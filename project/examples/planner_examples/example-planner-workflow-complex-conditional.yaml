@@ -1,0 +1,101 @@
+enabled: True
+rounds:
+  - user_query: Route support tickets based on priority and category
+    state: created
+    post_list:
+      - message: Route support tickets based on priority and category
+        send_from: User
+        send_to: Planner
+        attachment_list:
+      - message: Please generate Python code with nested conditionals to route tickets based on priority and category.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list:
+          - type: plan_reasoning
+            content: The user needs complex conditional logic for ticket routing. I will instruct CodeInterpreter to use nested if/elif/else statements.
+          - type: init_plan
+            content: |-
+              1. Collect ticket information
+              2. Apply routing logic with nested conditionals <sequentially depends on 1>
+              3. Assign ticket to appropriate team <sequentially depends on 2>
+              4. Report routing decision <sequentially depends on 3>
+          - type: plan
+            content: |-
+              1. Generate code with nested conditional routing logic
+              2. Report routing decision
+          - type: current_plan_step
+            content: 1. Generate code with nested conditional routing logic
+          - type: stop
+            content: InProcess
+      - message: Ticket routing workflow with complex conditional logic has been created.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: I will generate code with nested if/elif/else to demonstrate complex conditional routing.
+          - type: reply_type
+            content: python
+          - type: reply_content
+            content: |-
+              # Collect ticket details
+              priority = input("Enter priority (high/medium/low): ").lower()
+              category = input("Enter category (technical/billing/general): ").lower()
+              
+              # Complex conditional routing
+              if priority == "high":
+                  if category == "technical":
+                      team = "Senior Technical Support"
+                      sla = "1 hour"
+                  elif category == "billing":
+                      team = "Billing Escalation"
+                      sla = "2 hours"
+                  else:
+                      team = "Priority Support"
+                      sla = "3 hours"
+              elif priority == "medium":
+                  if category == "technical":
+                      team = "Technical Support"
+                      sla = "4 hours"
+                  elif category == "billing":
+                      team = "Billing Support"
+                      sla = "6 hours"
+                  else:
+                      team = "General Support"
+                      sla = "8 hours"
+              else:
+                  team = "General Queue"
+                  sla = "24 hours"
+              
+              print(f"Ticket routed to: {team}")
+              print(f"SLA: {sla}")
+              print(f"Sending notification to {team}...")
+          - type: verification
+            content: CORRECT
+          - type: code_error
+            content: No code error.
+          - type: execution_status
+            content: SUCCESS
+          - type: execution_result
+            content: Ticket routed successfully with nested conditional logic.
+      - message: The workflow routes tickets to the appropriate team based on priority and category using nested conditional logic.
+        send_from: Planner
+        send_to: User
+        attachment_list:
+          - type: plan_reasoning
+            content: The CodeInterpreter successfully generated complex nested conditional logic for ticket routing.
+          - type: init_plan
+            content: |-
+              1. Collect ticket information
+              2. Apply routing logic with nested conditionals <sequentially depends on 1>
+              3. Assign ticket to appropriate team <sequentially depends on 2>
+              4. Report routing decision <sequentially depends on 3>
+          - type: plan
+            content: |-
+              1. Generate code with nested conditional routing logic
+              2. Report routing decision
+          - type: current_plan_step
+            content: 2. Report routing decision
+          - type: stop
+            content: Completed
+
+

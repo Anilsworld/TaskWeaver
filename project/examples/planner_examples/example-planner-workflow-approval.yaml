@@ -1,0 +1,91 @@
+enabled: True
+rounds:
+  - user_query: Create a workflow to process orders with approval and notification
+    state: created
+    post_list:
+      - message: Create a workflow to process orders with approval and notification
+        send_from: User
+        send_to: Planner
+        attachment_list:
+      - message: Please generate Python code to collect order details using input(), add an approval step with if/else logic, and send notifications based on the approval decision.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              The user wants a workflow with order collection, approval logic, and conditional notifications. I will instruct CodeInterpreter to generate code with input() for forms, if/else for approval, and print() for notifications.
+          - type: init_plan
+            content: |-
+              1. Generate code to collect order details using input()
+              2. Add approval step with conditional logic <sequentially depends on 1>
+              3. Send notifications based on approval decision <sequentially depends on 2>
+              4. Report result to user <interactively depends on 3>
+          - type: plan
+            content: |-
+              1. Instruct CodeInterpreter to generate complete workflow code
+              2. Report result to user
+          - type: current_plan_step
+            content: 1. Instruct CodeInterpreter to generate complete workflow code
+          - type: stop
+            content: InProcess
+      - message: Workflow executed successfully with order collection, approval logic, and conditional notifications.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: I will generate Python code with input() for forms, if/else for approval, and conditional notifications.
+          - type: reply_type
+            content: python
+          - type: reply_content
+            content: |-
+              # Step 1: Collect order details (FORM)
+              customer_name = input("Enter customer name: ")
+              product = input("Enter product name: ")
+              quantity = input("Enter quantity: ")
+              total_amount = input("Enter total amount: ")
+              
+              # Step 2: Approval decision (CONDITIONAL)
+              approved = input("Approve this order? (yes/no): ").lower() == 'yes'
+              
+              # Step 3: Send notification based on approval
+              if approved:
+                  print(f"Order approved for {customer_name}")
+                  print(f"Sending confirmation email for {quantity} x {product}")
+                  print("Email sent successfully!")
+              else:
+                  print(f"Order denied for {customer_name}")
+                  print("Sending rejection notification")
+          - type: verification
+            content: CORRECT
+          - type: code_error
+            content: No code error.
+          - type: execution_status
+            content: SUCCESS
+          - type: execution_result
+            content: Order workflow completed with approval logic and notifications.
+      - message: The workflow is complete! It collects order details, requires approval, and sends different notifications based on whether the order is approved or denied.
+        send_from: Planner
+        send_to: User
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              The workflow includes:
+              1. Form to collect order details
+              2. Approval gate with conditional logic
+              3. Different notifications for approved vs denied orders
+              The CodeInterpreter successfully implemented all steps with proper Python code.
+          - type: init_plan
+            content: |-
+              1. Generate code to collect order details using input()
+              2. Add approval step with conditional logic <sequentially depends on 1>
+              3. Send notifications based on approval decision <sequentially depends on 2>
+              4. Report result to user <interactively depends on 3>
+          - type: plan
+            content: |-
+              1. Instruct CodeInterpreter to generate complete workflow code
+              2. Report result to user
+          - type: current_plan_step
+            content: 2. Report result to user
+          - type: stop
+            content: Completed
+
