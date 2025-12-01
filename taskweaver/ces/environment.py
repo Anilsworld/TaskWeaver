@@ -254,9 +254,14 @@ class Environment:
                 kernel_env["TASKWEAVER_GID"] = str(os.getgid())
 
             # ports will be assigned automatically at the host
+            # ✅ Auto-remove containers after execution (scalable for production)
+            # Can be disabled via TASKWEAVER_KEEP_CONTAINERS=true for debugging
+            auto_remove = os.getenv("TASKWEAVER_KEEP_CONTAINERS", "false").lower() != "true"
+            
             container = self.docker_client.containers.run(
                 image=self.image_name,
                 detach=True,
+                remove=auto_remove,  # ✅ Auto-cleanup for scalability
                 environment=kernel_env,
                 volumes={
                     os.path.abspath(ces_session_dir): {"bind": "/app/ces/", "mode": "rw"},
@@ -270,6 +275,8 @@ class Environment:
                     f"{new_port_start + 4}/tcp": None,
                 },
             )
+            
+            logger.info(f"Container created with auto_remove={auto_remove} (set TASKWEAVER_KEEP_CONTAINERS=true to disable)")
 
             tick = 0
             while tick < 30:
@@ -417,10 +424,20 @@ class Environment:
                 elif self.mode == EnvMode.Container:
                     container_id = self.session_container_dict[session_id]
                     logger.info(f"Stopping container {container_id} for session {session_id}")
-                    container = self.docker_client.containers.get(container_id)
-                    container.stop()
-                    container.remove()
-                    del self.session_container_dict[session_id]
+                    try:
+                        container = self.docker_client.containers.get(container_id)
+                        container.stop()
+                        # ✅ Only manually remove if auto_remove wasn't used
+                        # (container will already be gone if remove=True was set)
+                        try:
+                            container.remove()
+                        except Exception:
+                            # Container already removed (auto_remove=True), that's fine
+                            pass
+                    except Exception as e:
+                        logger.warning(f"Container {container_id} already removed or not found: {e}")
+                    finally:
+                        del self.session_container_dict[session_id]
                 else:
                     raise ValueError(f"Unsupported environment mode {self.mode}")
 
