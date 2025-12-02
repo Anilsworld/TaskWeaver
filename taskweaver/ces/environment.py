@@ -158,11 +158,15 @@ class Environment:
             else:
                 self.image_name = self.DEFAULT_IMAGE
                 try:
+                    # ✅ FIX: Use local image without checking registry (avoids TLS timeout)
                     local_image = self.docker_client.images.get(self.image_name)
-                    registry_image = self.docker_client.images.get_registry_data(self.image_name)
-                    if local_image.id != registry_image.id:
-                        logger.info(f"Local image {local_image.id} does not match registry image {registry_image.id}.")
-                        raise docker.errors.ImageNotFound("Local image is outdated.")
+                    logger.info(f"Using local image {self.image_name} (ID: {local_image.id})")
+                    
+                    # ❌ DISABLED: Registry check causes TLS timeout in offline/slow networks
+                    # registry_image = self.docker_client.images.get_registry_data(self.image_name)
+                    # if local_image.id != registry_image.id:
+                    #     logger.info(f"Local image {local_image.id} does not match registry image {registry_image.id}.")
+                    #     raise docker.errors.ImageNotFound("Local image is outdated.")
                 except docker.errors.ImageNotFound:
                     logger.info("Pulling image from docker.io.")
                     try:
