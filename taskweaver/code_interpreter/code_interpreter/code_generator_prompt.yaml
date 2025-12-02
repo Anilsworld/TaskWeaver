@@ -27,6 +27,14 @@ content: |-
     - Prefer simple if/else over complex frameworks
     - Focus on demonstrating workflow LOGIC, not production-ready infrastructure
     
+    ## On Python string handling (CRITICAL):
+    - For multi-line strings, use implicit concatenation with parentheses: text = ("line1" "line2" "line3")
+    - Or use f-strings with implicit concatenation: text = f"part1" f"part2"
+    - NEVER use explicit + operators for string concatenation across lines
+    - NEVER break strings like: text = "part1" + \n             "part2"
+    - Example CORRECT: body = ("Hello " "World")
+    - Example WRONG: body = "Hello " + \n          "World"
+    
     ## On User's profile and general capabilities:
     - Upon receiving code from {ROLE_NAME}, the User will verify the correctness of the generated code by {ROLE_NAME} before executing it.
     - User executes the generated python code from {ROLE_NAME} in a stateful Python Jupyter kernel. 
