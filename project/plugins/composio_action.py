@@ -118,11 +118,11 @@ class ComposioAction(Plugin):
         try:
             service = self._get_service()
             
-            # Get entity_id with priority: parameter > config > default
-            # Note: entity_id can be passed explicitly in the function call,
-            # or set in the plugin config (composio_action.yaml)
+            # Get entity_id with priority: parameter > session_var > config > default
+            # Session var is set by langgraph_adapter during execution
             if not entity_id:
-                entity_id = self.config.get('entity_id', 'default')
+                entity_id = self.ctx.get_session_var("_composio_entity_id", None) or \
+                            self.config.get('entity_id', 'default')
             
             logger.info(f"[COMPOSIO_PLUGIN] Executing: {action_name}")
             logger.info(f"[COMPOSIO_PLUGIN] Params: {params}")
