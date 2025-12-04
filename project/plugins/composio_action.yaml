@@ -24,15 +24,11 @@ examples: |-
   result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "forward@example.com", "subject": "Fwd: Original", "body": original_email_content, "user_id": "me"})
   
   # ========== GOOGLE SHEETS ==========
-  # CREATE A NEW SPREADSHEET (use this when user says "create new spreadsheet")
+  # Create a new spreadsheet
   new_sheet, desc = composio_action("GOOGLESHEETS_CREATE_GOOGLE_SHEET1", {"title": "My Spreadsheet"})
   
-  # ADD DATA TO EXISTING SPREADSHEET (use this when user says "add row" or "enter data")
+  # Add data to spreadsheet
   result, desc = composio_action("GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", {"spreadsheet_id": sheet_id, "range": "Sheet1!A1", "values": [["Name", "Email"], ["John", "john@example.com"]]})
-  
-  # ⚠️ IMPORTANT: GOOGLESHEETS_CREATE_SPREADSHEET_ROW is for adding a SINGLE row to an EXISTING spreadsheet
-  # Do NOT use it to CREATE a new spreadsheet!
-  result, desc = composio_action("GOOGLESHEETS_CREATE_SPREADSHEET_ROW", {"spreadsheet_id": existing_sheet_id, "row_data": {"Name": "John", "Email": "john@example.com"}})
   
   # ========== FLIGHTS ==========
   # Search for flights
