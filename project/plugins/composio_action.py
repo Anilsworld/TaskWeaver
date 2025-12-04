@@ -306,19 +306,14 @@ class ComposioAction(Plugin):
         action_lower = action_name.lower()
         
         if 'search' in action_lower or 'find' in action_lower or 'get' in action_lower or 'fetch' in action_lower:
-            # Search/Get actions return list of results
+            # Search/Get actions - return minimal generic response
+            # DO NOT hardcode specific keys like 'emails' or 'messages' - let runtime handle actual structure
             mock_data['data'] = {
-                'results': [
-                    {'id': 'mock_id_1', 'name': 'Result 1', 'description': 'Mock result'},
-                    {'id': 'mock_id_2', 'name': 'Result 2', 'description': 'Mock result'}
-                ],
-                'total': 2,
-                'emails': [
-                    {'id': 'email_1', 'subject': 'Email 1', 'body': 'Body 1', 'summary': 'Summary 1'},
-                    {'id': 'email_2', 'subject': 'Email 2', 'body': 'Body 2', 'summary': 'Summary 2'}
-                ]
+                '_note': 'Simulated response - actual API structure varies by tool',
+                'success': True,
+                'count': 2
             }
-            description = f"[SIMULATION] Found 2 results for {action_name}. Actual data will be fetched at runtime."
+            description = f"[SIMULATION] {action_name} will return actual data at runtime. Use defensive code to handle response."
             
         elif 'send' in action_lower or 'create' in action_lower or 'post' in action_lower:
             # Create/Send actions return confirmation

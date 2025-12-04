@@ -1,6 +1,6 @@
 name: composio_action
 enabled: true
-required: false
+required: true
 plugin_only: true
 description: >-
   Execute external API actions via Composio (800+ integrations).
@@ -13,11 +13,30 @@ description: >-
   OAuth authentication is handled automatically.
 
 examples: |-
-  # Search for flights
-  flights, desc = composio_action("COMPOSIO_SEARCH_FLIGHTS", {"departure_id": "JFK", "arrival_id": "LAX", "outbound_date": "2025-01-15"})
+  # ========== GMAIL ==========
+  # Fetch emails (get/read/list emails)
+  emails, desc = composio_action("GMAIL_FETCH_EMAILS", {"query": "", "max_results": 10, "user_id": "me"})
   
   # Send an email
-  result, desc = composio_action("GMAIL_SEND_EMAIL", {"to": "user@example.com", "subject": "Hello", "body": "Message"})
+  result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "user@example.com", "subject": "Hello", "body": "Message", "user_id": "me"})
+  
+  # Forward an email (send copy to another recipient)
+  result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "forward@example.com", "subject": "Fwd: Original", "body": original_email_content, "user_id": "me"})
+  
+  # ========== GOOGLE SHEETS ==========
+  # CREATE A NEW SPREADSHEET (use this when user says "create new spreadsheet")
+  new_sheet, desc = composio_action("GOOGLESHEETS_CREATE_GOOGLE_SHEET1", {"title": "My Spreadsheet"})
+  
+  # ADD DATA TO EXISTING SPREADSHEET (use this when user says "add row" or "enter data")
+  result, desc = composio_action("GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", {"spreadsheet_id": sheet_id, "range": "Sheet1!A1", "values": [["Name", "Email"], ["John", "john@example.com"]]})
+  
+  # ⚠️ IMPORTANT: GOOGLESHEETS_CREATE_SPREADSHEET_ROW is for adding a SINGLE row to an EXISTING spreadsheet
+  # Do NOT use it to CREATE a new spreadsheet!
+  result, desc = composio_action("GOOGLESHEETS_CREATE_SPREADSHEET_ROW", {"spreadsheet_id": existing_sheet_id, "row_data": {"Name": "John", "Email": "john@example.com"}})
+  
+  # ========== FLIGHTS ==========
+  # Search for flights
+  flights, desc = composio_action("COMPOSIO_SEARCH_FLIGHTS", {"departure_id": "JFK", "arrival_id": "LAX", "outbound_date": "2025-01-15"})
 
 parameters:
   - name: action_name
@@ -25,7 +44,15 @@ parameters:
     required: true
     description: >-
       Action ID in the format APPNAME_ACTION_NAME (uppercase).
-      Infer the action name from context. If invalid, an error will be returned.
+      
+      IMPORTANT ACTION IDs:
+      - GMAIL_FETCH_EMAILS: Get/read/list emails
+      - GMAIL_SEND_EMAIL: Send or forward an email
+      - GOOGLESHEETS_CREATE_GOOGLE_SHEET1: Create a NEW spreadsheet
+      - GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND: Add rows/data to EXISTING spreadsheet
+      - GOOGLESHEETS_CREATE_SPREADSHEET_ROW: Add ONE row to existing spreadsheet (NOT for creating new!)
+      
+      If the action ID is invalid, an error will be returned with available actions.
       
   - name: params
     type: dict

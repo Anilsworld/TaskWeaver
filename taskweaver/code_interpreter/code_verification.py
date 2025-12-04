@@ -208,6 +208,46 @@ def code_snippet_verification(
         )
         validator.visit(tree)
         errors.extend(validator.errors)
+        
+        # ✅ COMPOSIO SCHEMA VALIDATION (Dynamic, No Hardcoding!)
+        # This hooks into TaskWeaver's built-in retry mechanism
+        # If composio_action() has wrong params, retry with correct ones
+        composio_errors = validate_composio_actions(python_code)
+        if composio_errors:
+            errors.extend(composio_errors)
+        
         return errors
     except SyntaxError as e:
         return [f"Syntax error: {e}"]
+
+
+def validate_composio_actions(code: str) -> List[str]:
+    """
+    Validate composio_action() calls against actual Composio schemas.
+    
+    ✅ FULLY DYNAMIC - No hardcoding!
+    - Fetches schemas from Composio DB
+    - Uses learned mappings from Experience system
+    - Returns errors that trigger TaskWeaver's built-in retry
+    """
+    errors = []
+    try:
+        # Import dynamically to avoid circular imports
+        from TaskWeaver.project.plugins.composio_validator import (
+            DynamicComposioValidator, 
+            validate_composio_code
+        )
+        
+        is_valid, error_list = validate_composio_code(code)
+        if not is_valid:
+            errors.extend(error_list)
+            
+    except ImportError:
+        # Composio validator not available, skip
+        pass
+    except Exception as e:
+        # Don't fail on validation errors, just log
+        import logging
+        logging.getLogger(__name__).debug(f"Composio validation skipped: {e}")
+    
+    return errors

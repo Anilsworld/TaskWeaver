@@ -132,6 +132,9 @@ class PluginSelector:
         import numpy as np
         from sklearn.metrics.pairwise import cosine_similarity
 
+        # ✅ ALWAYS include required plugins (must-have for auto selection)
+        required_plugins = [p for p in self.available_plugins if p.required]
+        
         similarities = []
         user_query_embedding = np.array(self.llm_api.get_embedding(user_query))
 
@@ -152,5 +155,10 @@ class PluginSelector:
         )[:top_k]
 
         selected_plugins = [p for p, sim in plugins_rank]
+        
+        # ✅ Merge required plugins (avoid duplicates)
+        for req_plugin in required_plugins:
+            if req_plugin not in selected_plugins:
+                selected_plugins.append(req_plugin)
 
         return selected_plugins
