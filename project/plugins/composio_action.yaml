@@ -3,89 +3,47 @@ enabled: true
 required: false
 plugin_only: true
 description: >-
-  Execute any Composio action to interact with 800+ integrations (Gmail, Google Sheets, Slack, etc.).
-  Use this plugin when you need to:
-  - Read/write data from Google Sheets (GOOGLESHEETS_*)
-  - Send/read emails via Gmail (GMAIL_*)
-  - Post messages to Slack (SLACK_*)
-  - Interact with any external API/service
+  Execute external API actions via Composio (800+ integrations).
   
-  The plugin handles authentication automatically using the user's connected accounts.
+  USE THIS FOR: Flights, hotels, travel, emails (Gmail), spreadsheets (Google Sheets), 
+  messaging (Slack), calendars, CRM, and any external service or API.
   
-  IMPORTANT: For actions that require an ID (like spreadsheetId), first search for the resource
-  by name to get the ID, then use that ID in subsequent calls.
-  
-  Common patterns:
-  - Search first: GOOGLESHEETS_FIND_SPREADSHEET to get spreadsheetId
-  - Then read: GOOGLESHEETS_SPREADSHEETS_VALUES_BATCH_GET with the ID
-  - Or write: GOOGLESHEETS_SPREADSHEETS_VALUES_UPDATE with the ID
+  This is the PRIMARY plugin for interacting with external services.
+  Action IDs follow the pattern: APPNAME_ACTION_NAME (e.g., GMAIL_SEND_EMAIL, COMPOSIO_SEARCH_FLIGHTS).
+  OAuth authentication is handled automatically.
 
 examples: |-
-  # Search for a spreadsheet by name, then get its data
-  search_result, _ = composio_action(
-      action_name="GOOGLESHEETS_FIND_SPREADSHEET",
-      params={"name": "My Spreadsheet"}
-  )
-  spreadsheet_id = search_result['spreadsheets'][0]['spreadsheetId']
-  
-  data, desc = composio_action(
-      action_name="GOOGLESHEETS_SPREADSHEETS_VALUES_BATCH_GET",
-      params={"spreadsheetId": spreadsheet_id, "ranges": ["Sheet1!A1:Z100"]}
-  )
+  # Search for flights
+  flights, desc = composio_action("COMPOSIO_SEARCH_FLIGHTS", {"departure_id": "JFK", "arrival_id": "LAX", "outbound_date": "2025-01-15"})
   
   # Send an email
-  result, desc = composio_action(
-      action_name="GMAIL_SEND_EMAIL",
-      params={"to": "user@example.com", "subject": "Report", "body": "Here is your report..."}
-  )
+  result, desc = composio_action("GMAIL_SEND_EMAIL", {"to": "user@example.com", "subject": "Hello", "body": "Message"})
 
 parameters:
   - name: action_name
     type: str
     required: true
     description: >-
-      The Composio action ID to execute (e.g., "GOOGLESHEETS_BATCH_GET", "GMAIL_SEND_EMAIL").
-      Action IDs follow the pattern: APPNAME_ACTION_NAME (all uppercase).
-      Common actions:
-      - GOOGLESHEETS_FIND_SPREADSHEET: Search for spreadsheet by name
-      - GOOGLESHEETS_SPREADSHEETS_VALUES_BATCH_GET: Read spreadsheet data
-      - GOOGLESHEETS_SPREADSHEETS_VALUES_UPDATE: Write spreadsheet data
-      - GMAIL_SEND_EMAIL: Send an email
-      - GMAIL_GET_MESSAGE: Read an email
-      - GMAIL_FORWARD_MESSAGE: Forward an email
-      - SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL: Post to Slack
+      Action ID in the format APPNAME_ACTION_NAME (uppercase).
+      Infer the action name from context. If invalid, an error will be returned.
       
   - name: params
     type: dict
     required: false
-    description: >-
-      Parameters for the action as a dictionary. These vary by action.
-      Common parameters:
-      - spreadsheetId: Google Sheets ID (get via GOOGLESHEETS_FIND_SPREADSHEET first)
-      - ranges: List of ranges like ["Sheet1!A1:B10"]
-      - to: Email recipient
-      - subject: Email subject
-      - body: Email body or message content
+    description: Parameters for the action. Varies by action.
       
   - name: entity_id
     type: str
     required: false
-    description: >-
-      User's entity ID for authentication. If not provided, uses the configured default.
-      This should be the user's email address for proper OAuth connection lookup.
+    description: User entity ID for authentication.
 
 returns:
   - name: result
     type: dict
-    description: >-
-      The result from the Composio action. Structure varies by action.
-      On success: Contains action-specific data (e.g., spreadsheet values, email details).
-      On error: Contains 'error': True and 'error_message' with the error description.
+    description: Action result or error info with error_message.
   - name: description
     type: str
-    description: >-
-      Human-readable description of the result. Useful for logging and debugging.
+    description: Human-readable result description.
 
 configurations:
-  entity_id: ""  # Set by workflow executor (user's email for OAuth lookup)
-
+  entity_id: ""

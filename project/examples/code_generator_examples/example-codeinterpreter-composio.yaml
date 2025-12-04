@@ -1,0 +1,46 @@
+enabled: True
+rounds:
+  - user_query: Read spreadsheet data and send summary email
+    state: finished
+    post_list:
+      - message: Read spreadsheet data and send summary email
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list: []
+      - message: Successfully read spreadsheet and sent email.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: I will use composio_action for external API calls - spreadsheet read and email.
+          - type: reply_type
+            content: python
+          - type: reply_content
+            content: |-
+              # Read spreadsheet using composio_action
+              data, desc = composio_action(
+                  "GOOGLESHEETS_BATCH_GET",
+                  {"spreadsheet_id": "abc123", "ranges": ["Sheet1!A1:D10"]},
+                  None
+              )
+              
+              # Process data
+              summary = f"Found {len(data.get('values', []))} rows"
+              
+              # Send email with summary using composio_action
+              email_result, email_desc = composio_action(
+                  "GMAIL_SEND_EMAIL",
+                  {"to": "user@example.com", "subject": "Data Summary", "body": summary},
+                  None
+              )
+              
+              email_result
+          - type: verification
+            content: CORRECT
+          - type: code_error
+            content: No code error.
+          - type: execution_status
+            content: SUCCESS
+          - type: execution_result
+            content: Spreadsheet read and email sent successfully.
+
