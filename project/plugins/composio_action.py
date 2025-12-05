@@ -147,9 +147,19 @@ class ComposioAction(Plugin):
                         
                         if result.get('success') or result.get('successfull'):
                             data = result.get('data', result)
+                            
+                            # =========================================================
+                            # SCALABLE FIX (arch-35): Dynamic structure hint for LLM
+                            # =========================================================
+                            # Auto-describe response structure so LLM writes correct
+                            # parsing code on FIRST try, not via retry loop.
+                            # =========================================================
+                            structure_hint = self._describe_data_structure(data)
+                            
                             description = (
-                                f"Successfully executed {action_name} via host callback. "
-                                f"Result contains {len(data) if isinstance(data, (list, dict)) else 1} items."
+                                f"Successfully executed {action_name}.\n"
+                                f"RESPONSE STRUCTURE: {structure_hint}\n"
+                                f"Use the structure above to access the data correctly."
                             )
                             logger.info(f"✅ [COMPOSIO_PLUGIN] Host callback succeeded: {action_name}")
                             return data, description
@@ -193,6 +203,77 @@ class ComposioAction(Plugin):
             logger.warning(f"[COMPOSIO_PLUGIN] Host callback failed (network error): {e}")
             self._host_callback_available = False
             return None
+    
+    def _describe_data_structure(self, data: Any, depth: int = 4, max_items: int = 5) -> str:
+        """
+        SCALABLE FIX (arch-35): Auto-describe response structure for LLM.
+        
+        Works for ANY API response - flights, spreadsheets, emails, etc.
+        No hardcoding - recursively describes the actual structure.
+        
+        Examples:
+        - Flights: {"results": {"best_flights": list[5]: [{"id", "price", ...}]}}
+        - Sheets: {"spreadsheetId": "...", "replies": list[1]: [{"addSheet": {"properties": {...}}}]}
+        - Gmail: list[10]: [{"id", "threadId", "labelIds": list[2], "snippet", ...}]
+        
+        Args:
+            data: The API response data (ANY structure)
+            depth: How deep to recurse (4 levels handles most APIs)
+            max_items: Max keys/items to show (5 covers most important fields)
+            
+        Returns:
+            Human-readable structure description
+        """
+        if data is None:
+            return "null"
+        
+        if isinstance(data, str):
+            # Show short strings as-is, truncate long ones
+            if len(data) > 100:
+                return f'string[{len(data)} chars]'
+            elif len(data) > 40:
+                return f'"{data[:35]}..."'
+            return f'"{data}"'
+        
+        if isinstance(data, bool):
+            return str(data).lower()
+        
+        if isinstance(data, (int, float)):
+            return str(data)
+        
+        if isinstance(data, list):
+            if len(data) == 0:
+                return "[]"
+            # Show first item structure to reveal the pattern
+            if depth > 0:
+                first_item = self._describe_data_structure(data[0], depth - 1, max_items)
+                return f"list[{len(data)}]: [{first_item}, ...]"
+            return f"list[{len(data)}]"
+        
+        if isinstance(data, dict):
+            if len(data) == 0:
+                return "{}"
+            
+            keys = list(data.keys())
+            if depth > 0:
+                # Show key-value pairs for important keys
+                parts = []
+                for key in keys[:max_items]:
+                    val_desc = self._describe_data_structure(data[key], depth - 1, max_items)
+                    parts.append(f'"{key}": {val_desc}')
+                
+                if len(keys) > max_items:
+                    parts.append(f"+{len(keys) - max_items} more")
+                
+                return "{" + ", ".join(parts) + "}"
+            else:
+                # At max depth, just show key names
+                shown = ", ".join(f'"{k}"' for k in keys[:max_items])
+                if len(keys) > max_items:
+                    shown += f", +{len(keys) - max_items} more"
+                return "keys: [" + shown + "]"
+        
+        return type(data).__name__
     
     def _resolve_params(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -492,10 +573,11 @@ class ComposioAction(Plugin):
                     'status': 'active'
                 }
             ]
+            structure_hint = self._describe_data_structure(mock_data)
             description = (
-                f"Successfully retrieved 2 items from {action_name}. "
-                f"Result is a list - iterate with: `for item in result:`. "
-                f"Access fields directly: item['subject'], item['id'], item['name'], etc."
+                f"Successfully executed {action_name}.\n"
+                f"RESPONSE STRUCTURE: {structure_hint}\n"
+                f"Result is a list - iterate with: `for item in result:`"
             )
         elif is_create_action:
             # =====================================================================
@@ -534,10 +616,11 @@ class ComposioAction(Plugin):
                 'name': params.get('name', params.get('title', 'Created Resource')),
                 'url': f'https://example.com/resource/{created_id}'
             }
+            structure_hint = self._describe_data_structure(mock_data)
             description = (
-                f"Successfully created resource via {action_name}. "
-                f"Resource ID available as: result['id'], result['spreadsheetId'], etc. "
-                f"Use the ID for subsequent operations."
+                f"Successfully executed {action_name}.\n"
+                f"RESPONSE STRUCTURE: {structure_hint}\n"
+                f"Resource ID available as result['id'] or result['spreadsheetId'], etc."
             )
         elif is_update_action:
             # =====================================================================
@@ -554,7 +637,8 @@ class ComposioAction(Plugin):
                 'updated': True,
                 'modifiedTime': '2024-01-01T12:00:00Z'
             }
-            description = f"Successfully updated resource via {action_name}. Changes applied."
+            structure_hint = self._describe_data_structure(mock_data)
+            description = f"Successfully executed {action_name}.\nRESPONSE STRUCTURE: {structure_hint}"
         elif is_delete_action:
             # =====================================================================
             # DELETE ACTIONS: Return success confirmation
@@ -564,7 +648,8 @@ class ComposioAction(Plugin):
                 'deleted': True,
                 'status': 'deleted'
             }
-            description = f"Successfully deleted via {action_name}."
+            structure_hint = self._describe_data_structure(mock_data)
+            description = f"Successfully executed {action_name}.\nRESPONSE STRUCTURE: {structure_hint}"
         else:
             # =====================================================================
             # GENERIC ACTIONS: Return minimal success response
@@ -574,7 +659,8 @@ class ComposioAction(Plugin):
                 'status': 'completed',
                 'result': 'ok'
             }
-            description = f"Successfully executed {action_name}."
+            structure_hint = self._describe_data_structure(mock_data)
+            description = f"Successfully executed {action_name}.\nRESPONSE STRUCTURE: {structure_hint}"
         
         logger.info(f"[COMPOSIO_PLUGIN] SIMULATION: {action_name} -> verb-based mock (no hardcoding)")
         return mock_data, description
@@ -611,14 +697,13 @@ class ComposioAction(Plugin):
                 'data': self._generate_mock_from_schema(response_schema)
             }
             
-            # Generate description from schema
-            schema_props = response_schema.get('properties', {})
-            prop_names = list(schema_props.keys())[:5]  # First 5 properties
+            # Use dynamic structure hint (same as real API)
+            structure_hint = self._describe_data_structure(mock_data)
             
             description = (
-                f"Successfully executed {action_name}. "
-                f"Response contains: {', '.join(prop_names) if prop_names else 'result data'}. "
-                f"Use the returned data for subsequent steps."
+                f"Successfully executed {action_name}.\n"
+                f"RESPONSE STRUCTURE: {structure_hint}\n"
+                f"Use the structure above to access the data correctly."
             )
             
             logger.debug(f"[COMPOSIO_PLUGIN] Generated schema-based mock for {action_name}")
