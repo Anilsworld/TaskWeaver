@@ -1,0 +1,174 @@
+name: form_collect
+enabled: true
+required: true
+plugin_only: true
+description: >-
+  Collect user input via a dynamic form.
+  
+  USE THIS FOR: User data collection, registration forms, approval forms, payment info,
+  feedback forms, surveys, and any workflow step that requires user input.
+  
+  This is the PRIMARY plugin for collecting structured user input in workflows.
+  Forms are defined declaratively - the plugin handles rendering, validation, and data collection.
+  
+  FORM RELATIONSHIPS: Use data from previous forms by referencing their outputs.
+  Example: payment_form can use attendee_id from registration_form.
+
+examples: |-
+  # ========== REGISTRATION FORM ==========
+  # Collect attendee information
+  registration_data, desc = form_collect(
+      "registration",
+      {
+          "title": "Event Registration",
+          "fields": [
+              {"name": "attendee_name", "label": "Full Name", "required": True},
+              {"name": "email", "label": "Email Address", "required": True},
+              {"name": "phone", "label": "Phone Number"},
+              {"name": "ticket_type", "label": "Ticket Type", "type": "select", 
+               "options": ["VIP", "Standard", "Free"]}
+          ]
+      }
+  )
+  # registration_data = {"attendee_name": "John Doe", "email": "john@example.com", ...}
+  
+  # ========== PAYMENT FORM (using data from registration) ==========
+  # Collect payment after registration
+  payment_data, desc = form_collect(
+      "payment",
+      {
+          "title": "Payment Information",
+          "fields": [
+              {"name": "card_number", "label": "Card Number", "required": True},
+              {"name": "expiry", "label": "Expiry Date", "type": "date", "required": True},
+              {"name": "cvv", "label": "CVV", "type": "number", "required": True}
+          ],
+          "prefill": {
+              "email": registration_data["email"]  # Use data from previous form
+          }
+      }
+  )
+  
+  # ========== APPROVAL FORM ==========
+  # Get manager approval (HITL pattern)
+  approval, desc = form_collect(
+      "approval",
+      {
+          "title": "Manager Approval Required",
+          "description": f"Please review and approve request from {registration_data['attendee_name']}",
+          "fields": [
+              {"name": "decision", "label": "Approve this request?", "type": "select",
+               "options": ["Approve", "Reject", "Request Changes"], "required": True},
+              {"name": "comments", "label": "Comments", "type": "textarea"}
+          ]
+      }
+  )
+  
+  # ========== FEEDBACK FORM ==========
+  # Collect post-event feedback
+  feedback, desc = form_collect(
+      "feedback",
+      {
+          "title": "Event Feedback",
+          "fields": [
+              {"name": "rating", "label": "Overall Rating", "type": "select",
+               "options": ["1", "2", "3", "4", "5"], "required": True},
+              {"name": "comments", "label": "Additional Comments", "type": "textarea"},
+              {"name": "would_recommend", "label": "Would you recommend?", "type": "boolean"}
+          ]
+      }
+  )
+  
+  # ========== HITL APPROVAL (Human-in-the-Loop) ==========
+  # Display previous step results and collect approval decision
+  # The 'context' field shows upstream data for review
+  approval, desc = form_collect(
+      "manager_approval",
+      {
+          "title": "Manager Approval Required",
+          "description": f"Please review the flight booking for {registration_data['attendee_name']}",
+          "fields": [
+              {"name": "flight_summary", "label": "Flight Details", "type": "textarea",
+               "readonly": True, "default": flight_result.get('summary', '')},
+              {"name": "total_cost", "label": "Total Cost", "type": "number",
+               "readonly": True, "default": flight_result.get('cost', 0)},
+              {"name": "decision", "label": "Your Decision", "type": "select",
+               "options": ["Approve", "Reject", "Request Changes"], "required": True},
+              {"name": "comments", "label": "Comments/Feedback", "type": "textarea"}
+          ],
+          "prefill": {
+              "flight_summary": flight_result["summary"],  # From upstream tool
+              "total_cost": flight_result["cost"]
+          },
+          "hitl_config": {
+              "blocking": True,
+              "timeout_hours": 24,
+              "decision_field": "decision",
+              "routing": {
+                  "Approve": "continue",
+                  "Reject": "end",
+                  "Request Changes": "loop_back"
+              }
+          }
+      }
+  )
+
+parameters:
+  - name: form_id
+    type: str
+    required: true
+    description: >-
+      Unique identifier for this form (e.g., "registration", "payment", "feedback").
+      Used to track form submissions and link data across workflow steps.
+      
+  - name: schema
+    type: dict
+    required: true
+    description: >-
+      Form schema definition with the following structure:
+      {
+        "title": "Form Title",
+        "description": "Optional description",
+        "fields": [
+          {
+            "name": "field_name",           # Required: field identifier
+            "label": "Human Label",         # Optional: display label (auto-generated if not provided)
+            "type": "text",                 # Optional: field type (auto-inferred if not provided)
+            "required": true/false,         # Optional: is field required (default: false)
+            "options": ["opt1", "opt2"],    # Required for select/multiselect types
+            "placeholder": "Enter value",   # Optional: placeholder text
+            "default": "default_value"      # Optional: default value
+          }
+        ],
+        "prefill": {                        # Optional: pre-fill with data from previous steps
+          "field_name": value_from_previous_step
+        }
+      }
+      
+      FIELD TYPES (auto-inferred from name if not specified):
+      - text: Short text input (names, titles)
+      - email: Email address with validation
+      - tel: Phone number
+      - number: Numeric values
+      - date: Date picker
+      - datetime: Date and time
+      - textarea: Multi-line text
+      - select: Single choice dropdown (requires "options")
+      - multiselect: Multiple choice (requires "options")
+      - boolean: Yes/No toggle
+      - file, image, pdf, video, audio: File uploads
+
+returns:
+  - name: data
+    type: dict
+    description: >-
+      Collected form data as a dictionary mapping field names to values.
+      Example: {"attendee_name": "John", "email": "john@example.com", "ticket_type": "VIP"}
+      
+  - name: description
+    type: str
+    description: Form submission status and summary.
+
+configurations:
+  timeout_seconds: 3600
+
