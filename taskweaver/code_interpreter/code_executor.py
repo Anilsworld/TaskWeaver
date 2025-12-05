@@ -133,7 +133,7 @@ class CodeExecutor:
         for p in self.plugin_registry.get_list():
             try:
                 src_file = f"{self.config.app_base_path}/plugins/{p.impl}.py"
-                with open(src_file, "r") as f:
+                with open(src_file, "r", encoding="utf-8") as f:
                     plugin_code = f.read()
                 self.exec_client.load_plugin(
                     p.name,

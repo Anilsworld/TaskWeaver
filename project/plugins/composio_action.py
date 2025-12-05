@@ -58,6 +58,7 @@ class ComposioAction(Plugin):
     _composio_service = None
     _action_matcher = None  # Reuse existing semantic search
     _simulation_mode = None  # None = unknown, True = simulation, False = real
+    _host_callback_available = None  # Can we call back to Django host?
     
     def _is_simulation_mode(self) -> bool:
         """
@@ -93,6 +94,105 @@ class ComposioAction(Plugin):
             logger.info(f"[COMPOSIO_PLUGIN] Simulation mode detected: {e}")
             self._simulation_mode = True
             return True
+    
+    def _call_host_api(self, action_name: str, params: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str]]:
+        """
+        Call the Django host's internal API to execute the action.
+        
+        This allows the Docker container to make REAL Composio API calls by
+        calling back to the host where Django and credentials are available.
+        
+        Returns:
+            (data, description) tuple if successful, None if callback failed
+        """
+        if self._host_callback_available is False:
+            return None
+        
+        try:
+            import requests
+            
+            # Get session ID from context (set by TaskWeaver)
+            session_id = self.ctx.session_id if hasattr(self.ctx, 'session_id') else None
+            entity_id = self.ctx.get_session_var("_composio_entity_id", None)
+            
+            # Host URL - try multiple options for Docker networking
+            host_urls = [
+                "http://host.docker.internal:8000",  # Docker Desktop (Windows/Mac)
+                "http://172.17.0.1:8000",  # Docker Linux bridge
+                "http://localhost:8000",  # Local development
+            ]
+            
+            payload = {
+                "session_id": session_id,
+                "action_name": action_name,
+                "params": params,
+                "entity_id": entity_id
+            }
+            
+            for host_url in host_urls:
+                try:
+                    url = f"{host_url}/api/v1/integrations/internal/execute/"
+                    logger.info(f"[COMPOSIO_PLUGIN] Trying host callback: {url}")
+                    
+                    response = requests.post(
+                        url,
+                        json=payload,
+                        timeout=30,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        self._host_callback_available = True
+                        
+                        if result.get('success') or result.get('successfull'):
+                            data = result.get('data', result)
+                            description = (
+                                f"Successfully executed {action_name} via host callback. "
+                                f"Result contains {len(data) if isinstance(data, (list, dict)) else 1} items."
+                            )
+                            logger.info(f"✅ [COMPOSIO_PLUGIN] Host callback succeeded: {action_name}")
+                            return data, description
+                        else:
+                            # =========================================================
+                            # CRITICAL FIX (arch-25): RAISE EXCEPTION on API failure!
+                            # =========================================================
+                            # This enables TaskWeaver's retry loop to self-correct!
+                            # The LLM will see the error and fix the parameters.
+                            # =========================================================
+                            error = result.get('error', 'Unknown error')
+                            logger.error(f"❌ [COMPOSIO_PLUGIN] API FAILURE (will trigger retry): {error}")
+                            
+                            raise RuntimeError(
+                                f"Composio API error for {action_name}: {error}\n"
+                                f"Parameters provided: {list(params.keys())}\n"
+                                f"Please fix the parameters and retry."
+                            )
+                    
+                except requests.exceptions.ConnectionError:
+                    continue  # Try next host URL
+                except requests.exceptions.Timeout:
+                    logger.warning(f"[COMPOSIO_PLUGIN] Host callback timeout: {host_url}")
+                    continue
+            
+            # No host available
+            logger.info("[COMPOSIO_PLUGIN] Host callback not available, falling back to mock")
+            self._host_callback_available = False
+            return None
+            
+        except RuntimeError:
+            # =====================================================================
+            # CRITICAL FIX (arch-25): Re-raise RuntimeError (API failures)!
+            # =====================================================================
+            # RuntimeError is raised when Composio API returns success=False.
+            # We MUST let this propagate to trigger TaskWeaver's retry loop!
+            # =====================================================================
+            raise
+        except Exception as e:
+            # Only catch network/import errors, not API failures
+            logger.warning(f"[COMPOSIO_PLUGIN] Host callback failed (network error): {e}")
+            self._host_callback_available = False
+            return None
     
     def _resolve_params(self, action_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -285,70 +385,299 @@ class ComposioAction(Plugin):
     
     def _get_mock_response(self, action_name: str, params: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """
-        Generate a realistic mock response for simulation mode.
+        Generate a SCHEMA-BASED mock response for simulation mode.
         
-        This allows TaskWeaver to continue generating code for all plan steps
-        without failing on the first API call. The mock response contains
-        placeholder data that matches the expected output structure.
+        TASKWEAVER PATTERN (BATTLE-TESTED):
+        ===================================
+        TaskWeaver plugins return (data, description) where the LLM USES the data
+        for subsequent steps. We must return realistic data, not "ignore this".
+        
+        SCALABLE APPROACH (800+ tools):
+        ===============================
+        1. Try HOST CALLBACK first (real API via Django host)
+        2. Fallback to schema-based mock from DB
+        3. Fallback to verb-based mock (no hardcoding)
+        
+        This follows the sql_pull_data pattern: DYNAMIC resolution, no hardcoding.
         """
-        app_name = action_name.split('_')[0].lower() if '_' in action_name else 'unknown'
+        # =====================================================================
+        # STEP 1: Try HOST CALLBACK - Real API execution via Django host!
+        # =====================================================================
+        # This is the BEST option - we get REAL Composio API responses
+        # The Docker container calls back to Django where credentials exist
+        host_result = self._call_host_api(action_name, params)
         
-        # Generic mock response that works for most actions
-        mock_data = {
-            '_simulation': True,
-            '_action': action_name,
-            '_message': 'Simulated response - actual execution happens at runtime',
-            'success': True,
-            'data': {}
-        }
+        if host_result is not None:
+            return host_result
         
-        # Add action-specific mock data for common patterns
+        # =====================================================================
+        # STEP 2: Try to fetch actual response_schema from DB (DYNAMIC!)
+        # =====================================================================
+        schema_based_mock = self._generate_schema_based_mock(action_name, params)
+        
+        if schema_based_mock:
+            mock_data, description = schema_based_mock
+            logger.info(f"[COMPOSIO_PLUGIN] SIMULATION: {action_name} -> schema-based mock")
+            return mock_data, description
+        
+        # =====================================================================
+        # STEP 3: FALLBACK - VERB-BASED mock (ZERO app-specific hardcoding!)
+        # =====================================================================
+        # The key insight: All APIs follow REST conventions. 
+        # We classify by VERB pattern, not by app name.
+        # 
+        # VERB PATTERNS:
+        # - LIST/GET/FETCH → Returns a LIST that can be iterated
+        # - CREATE/SEND/POST → Returns dict with 'id' of created item
+        # - UPDATE/PATCH → Returns dict with 'id' of updated item  
+        # - DELETE → Returns dict with 'success' confirmation
+        # =====================================================================
+        
         action_lower = action_name.lower()
         
-        if 'search' in action_lower or 'find' in action_lower or 'get' in action_lower or 'fetch' in action_lower:
-            # Search/Get actions - return minimal generic response
-            # DO NOT hardcode specific keys like 'emails' or 'messages' - let runtime handle actual structure
-            mock_data['data'] = {
-                '_note': 'Simulated response - actual API structure varies by tool',
+        # Detect action verb from action name (GMAIL_FETCH_EMAILS → 'fetch')
+        # This is 100% dynamic - no app-specific logic!
+        is_list_action = any(verb in action_lower for verb in ['list', 'search', 'find', 'get', 'fetch', 'read', 'query'])
+        is_create_action = any(verb in action_lower for verb in ['create', 'send', 'post', 'add', 'insert', 'forward', 'append'])
+        is_update_action = any(verb in action_lower for verb in ['update', 'patch', 'modify', 'edit', 'set'])
+        is_delete_action = any(verb in action_lower for verb in ['delete', 'remove', 'clear'])
+        
+        if is_list_action:
+            # =====================================================================
+            # LIST ACTIONS: Return a LIST that can be directly iterated
+            # =====================================================================
+            # TaskWeaver pattern: `for item in result:` must work!
+            # 
+            # UNIVERSAL FIELD NAMES (not app-specific!):
+            # These are common across REST APIs regardless of app:
+            # - Emails: subject, snippet, body, from, to
+            # - Documents: title, name, content, body
+            # - Records: id, data, created_at
+            # 
+            # Including ALL common names so ANY access pattern works!
+            # =====================================================================
+            mock_data = [
+                {
+                    # Universal identifiers
+                    'id': 'sim_item_1',
+                    'uid': 'sim_item_1',
+                    # Email-pattern fields (universal)
+                    'subject': 'Simulated Subject 1',
+                    'snippet': 'Simulated snippet preview 1...',
+                    'body': 'Simulated body content 1',
+                    'from': 'sender@example.com',
+                    'to': 'recipient@example.com',
+                    # Document-pattern fields (universal)
+                    'title': 'Simulated Title 1',
+                    'name': 'Simulated Name 1',
+                    'content': 'Simulated content 1',
+                    'data': 'Simulated data 1',
+                    # Metadata (universal)
+                    'created_at': '2024-01-01T00:00:00Z',
+                    'status': 'active'
+                },
+                {
+                    'id': 'sim_item_2',
+                    'uid': 'sim_item_2',
+                    'subject': 'Simulated Subject 2',
+                    'snippet': 'Simulated snippet preview 2...',
+                    'body': 'Simulated body content 2',
+                    'from': 'sender@example.com',
+                    'to': 'recipient@example.com',
+                    'title': 'Simulated Title 2',
+                    'name': 'Simulated Name 2',
+                    'content': 'Simulated content 2',
+                    'data': 'Simulated data 2',
+                    'created_at': '2024-01-02T00:00:00Z',
+                    'status': 'active'
+                }
+            ]
+            description = (
+                f"Successfully retrieved 2 items from {action_name}. "
+                f"Result is a list - iterate with: `for item in result:`. "
+                f"Access fields directly: item['subject'], item['id'], item['name'], etc."
+            )
+        elif is_create_action:
+            # =====================================================================
+            # CREATE ACTIONS: Return dict with 'id' of created resource
+            # =====================================================================
+            # REST APIs return IDs in various formats. Include ALL common patterns
+            # so ANY access pattern works (no app-specific logic!):
+            # - Generic: id, uid, resourceId
+            # - Documents: documentId, spreadsheetId, fileId, sheetId
+            # - Messages: messageId, threadId
+            # - Records: recordId, entryId
+            # =====================================================================
+            created_id = 'sim_created_id_123'
+            mock_data = {
+                # Generic ID patterns (universal)
+                'id': created_id,
+                'uid': created_id,
+                'resourceId': created_id,
+                # Document ID patterns (universal for doc-like resources)
+                'spreadsheetId': created_id,
+                'documentId': created_id,
+                'fileId': created_id,
+                'sheetId': created_id,
+                # Message ID patterns (universal for message-like resources)
+                'messageId': created_id,
+                'threadId': created_id,
+                # Record ID patterns
+                'recordId': created_id,
+                'entryId': created_id,
+                # Status (universal)
                 'success': True,
-                'count': 2
+                'status': 'created',
+                'created': True,
+                # Common response fields
+                'title': params.get('title', params.get('name', 'Created Resource')),
+                'name': params.get('name', params.get('title', 'Created Resource')),
+                'url': f'https://example.com/resource/{created_id}'
             }
-            description = f"[SIMULATION] {action_name} will return actual data at runtime. Use defensive code to handle response."
+            description = (
+                f"Successfully created resource via {action_name}. "
+                f"Resource ID available as: result['id'], result['spreadsheetId'], etc. "
+                f"Use the ID for subsequent operations."
+            )
+        elif is_update_action:
+            # =====================================================================
+            # UPDATE ACTIONS: Return dict with confirmation
+            # =====================================================================
+            # Include same ID patterns as CREATE for consistency
+            updated_id = params.get('id', params.get('spreadsheetId', params.get('documentId', 'sim_updated_id')))
+            mock_data = {
+                'id': updated_id,
+                'spreadsheetId': updated_id,
+                'documentId': updated_id,
+                'success': True,
+                'status': 'updated',
+                'updated': True,
+                'modifiedTime': '2024-01-01T12:00:00Z'
+            }
+            description = f"Successfully updated resource via {action_name}. Changes applied."
+        elif is_delete_action:
+            # =====================================================================
+            # DELETE ACTIONS: Return success confirmation
+            # =====================================================================
+            mock_data = {
+                'success': True,
+                'deleted': True,
+                'status': 'deleted'
+            }
+            description = f"Successfully deleted via {action_name}."
+        else:
+            # =====================================================================
+            # GENERIC ACTIONS: Return minimal success response
+            # =====================================================================
+            mock_data = {
+                'success': True,
+                'status': 'completed',
+                'result': 'ok'
+            }
+            description = f"Successfully executed {action_name}."
+        
+        logger.info(f"[COMPOSIO_PLUGIN] SIMULATION: {action_name} -> verb-based mock (no hardcoding)")
+        return mock_data, description
+    
+    def _generate_schema_based_mock(self, action_name: str, params: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str]]:
+        """
+        Generate mock response based on actual Composio action schema from DB.
+        
+        FULLY DYNAMIC (TaskWeaver sql_pull_data pattern):
+        - Fetches response_schema from ComposioActionSchema table
+        - Generates conformant mock data based on schema
+        - No hardcoding - works for all 800+ tools!
+        
+        Returns:
+            (mock_data, description) or None if schema not available
+        """
+        try:
+            from apps.integrations.models import ComposioActionSchema
             
-        elif 'send' in action_lower or 'create' in action_lower or 'post' in action_lower:
-            # Create/Send actions return confirmation
-            mock_data['data'] = {
-                'id': 'mock_created_id',
-                'status': 'success',
-                'message': f'{action_name} will be executed at runtime'
-            }
-            description = f"[SIMULATION] {action_name} prepared. Actual execution happens at runtime."
+            # Fetch schema from DB
+            action = ComposioActionSchema.objects.filter(
+                action_id__iexact=action_name
+            ).first()
             
-        elif 'forward' in action_lower:
-            # Forward actions
-            mock_data['data'] = {
-                'id': 'mock_forwarded_id',
-                'status': 'forwarded',
-                'to': params.get('to', params.get('recipient_email', 'recipient@example.com'))
-            }
-            description = f"[SIMULATION] Email forward prepared. Actual forwarding happens at runtime."
+            if not action or not action.response_schema:
+                return None
             
-        elif 'append' in action_lower or 'row' in action_lower:
-            # Spreadsheet row operations
-            mock_data['data'] = {
-                'id': 'mock_row_id',
-                'status': 'appended',
-                'spreadsheet_id': params.get('spreadsheet_id', 'mock_spreadsheet_id')
+            response_schema = action.response_schema
+            
+            # Generate mock based on schema properties
+            mock_data = {
+                'success': True,
+                'successfull': True,
+                'data': self._generate_mock_from_schema(response_schema)
             }
-            description = f"[SIMULATION] Row operation prepared. Actual execution happens at runtime."
+            
+            # Generate description from schema
+            schema_props = response_schema.get('properties', {})
+            prop_names = list(schema_props.keys())[:5]  # First 5 properties
+            
+            description = (
+                f"Successfully executed {action_name}. "
+                f"Response contains: {', '.join(prop_names) if prop_names else 'result data'}. "
+                f"Use the returned data for subsequent steps."
+            )
+            
+            logger.debug(f"[COMPOSIO_PLUGIN] Generated schema-based mock for {action_name}")
+            return mock_data, description
+            
+        except ImportError:
+            # Django not available
+            return None
+        except Exception as e:
+            logger.debug(f"[COMPOSIO_PLUGIN] Schema-based mock failed: {e}")
+            return None
+    
+    def _generate_mock_from_schema(self, schema: Dict[str, Any], depth: int = 0) -> Any:
+        """
+        Recursively generate mock data from JSON schema.
+        
+        SCALABLE: Works for any schema structure without hardcoding.
+        """
+        if depth > 3:  # Prevent infinite recursion
+            return {}
+        
+        schema_type = schema.get('type', 'object')
+        
+        if schema_type == 'object':
+            properties = schema.get('properties', {})
+            mock_obj = {}
+            
+            for prop_name, prop_schema in list(properties.items())[:10]:  # Limit to 10 props
+                mock_obj[prop_name] = self._generate_mock_from_schema(prop_schema, depth + 1)
+            
+            return mock_obj
+            
+        elif schema_type == 'array':
+            items_schema = schema.get('items', {})
+            return [self._generate_mock_from_schema(items_schema, depth + 1)]
+            
+        elif schema_type == 'string':
+            # Check for format hints
+            format_hint = schema.get('format', '')
+            if 'email' in format_hint:
+                return 'example@domain.com'
+            elif 'date' in format_hint:
+                return '2024-01-01'
+            elif 'uri' in format_hint or 'url' in format_hint:
+                return 'https://example.com'
+            else:
+                return 'sample_value'
+                
+        elif schema_type == 'integer':
+            return 1
+            
+        elif schema_type == 'number':
+            return 1.0
+            
+        elif schema_type == 'boolean':
+            return True
             
         else:
-            # Generic response
-            mock_data['data'] = {'status': 'ok', 'action': action_name}
-            description = f"[SIMULATION] {action_name} validated. Actual execution happens at runtime."
-        
-        logger.info(f"[COMPOSIO_PLUGIN] SIMULATION: {action_name} -> mock response")
-        return mock_data, description
+            return 'value'
     
     def _get_service(self):
         """Get or create ComposioService instance (lazy initialization)."""
@@ -564,15 +893,25 @@ class ComposioAction(Plugin):
                 logger.info(f"[COMPOSIO_PLUGIN] Action succeeded: {action_name}")
                 return data, description
             else:
+                # =====================================================================
+                # CRITICAL FIX (arch-25): RAISE EXCEPTION on API failure!
+                # =====================================================================
+                # Previously: We returned error dict → Python "succeeded" → no retry
+                # Now: We RAISE an exception → Python fails → TaskWeaver retries!
+                #
+                # This enables TaskWeaver's self-correction loop to fix issues like:
+                # - "Missing required field: valueInputOption"
+                # - "is_html must be true for HTML content"
+                # =====================================================================
                 error_msg = result.get('error', 'Unknown error')
-                description = f"Action {action_name} failed: {error_msg}"
-                logger.error(f"[COMPOSIO_PLUGIN] Action failed: {error_msg}")
+                logger.error(f"[COMPOSIO_PLUGIN] API FAILURE (will trigger retry): {error_msg}")
                 
-                return {
-                    'error': True,
-                    'error_message': error_msg,
-                    'action': action_name
-                }, description
+                # Raise exception with detailed message for LLM to understand
+                raise RuntimeError(
+                    f"Composio API error for {action_name}: {error_msg}\n"
+                    f"Parameters provided: {list(params.keys())}\n"
+                    f"Please fix the parameters and retry."
+                )
                 
         except Exception as e:
             error_msg = str(e)

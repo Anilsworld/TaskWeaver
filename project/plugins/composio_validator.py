@@ -317,15 +317,20 @@ class DynamicComposioValidator:
     3. Compare provided params against schema
     4. Use learned mappings to suggest fixes
     5. Learn new mappings from successful executions
+    
+    CRITICAL FIX (arch-26): Now properly checks required params and provides
+    clear error messages for TaskWeaver's retry loop.
     """
     
     def __init__(self, experience_dir: Optional[str] = None):
         self.alias_store = DynamicAliasStore(experience_dir)
         self.schema_fetcher = ComposioSchemaFetcher()
+        self._pending_mappings: List[Tuple[str, str, str]] = []  # (action, tw_name, composio_name)
     
     def validate(self, code: str) -> ValidationResult:
         """Validate code against actual Composio schemas"""
         result = ValidationResult()
+        self._pending_mappings = []  # Reset pending mappings
         
         try:
             tree = ast.parse(code)
@@ -350,9 +355,16 @@ class DynamicComposioValidator:
                     result.warnings.append(f"Line {call.line_number}: {call.action_name} - schema not found in DB")
                     continue
                 
+                # Log required params for debugging
+                if required_params:
+                    logger.debug(f"[DYNAMIC_VALIDATOR] {call.action_name} requires: {required_params}")
+                
                 # Validate this call
                 call_errors = self._validate_call(call, schema_props, required_params)
                 result.errors.extend(call_errors)
+            
+            # Transfer discovered mappings
+            result.discovered_mappings = self._pending_mappings.copy()
             
         except SyntaxError as e:
             result.errors.append(ValidationError(
@@ -372,13 +384,39 @@ class DynamicComposioValidator:
         schema_props: Dict[str, Any],
         required_params: Set[str]
     ) -> List[ValidationError]:
-        """Validate a single composio_action() call"""
+        """
+        Validate a single composio_action() call.
+        
+        CRITICAL FIX (arch-26): This now properly checks for missing required params
+        and provides clear error messages for TaskWeaver's retry loop.
+        """
         errors = []
         provided = set(call.params.keys())
         schema_params = set(schema_props.keys())
         
-        # 1. Check for missing REQUIRED params
+        # =====================================================================
+        # 1. Check for missing REQUIRED params (CRITICAL for arch-26!)
+        # =====================================================================
+        # This enables TaskWeaver to retry with the correct params!
+        # =====================================================================
         for req_param in required_params:
+            # Check case-insensitive match first
+            provided_lower = {p.lower(): p for p in provided}
+            req_lower = req_param.lower()
+            
+            if req_lower in provided_lower:
+                # Found case-insensitive match - check if case is wrong
+                if provided_lower[req_lower] != req_param:
+                    errors.append(ValidationError(
+                        line=call.line_number,
+                        action=call.action_name,
+                        param_used=provided_lower[req_lower],
+                        param_expected=req_param,
+                        is_wrong_name=True,
+                        message=f"Use '{req_param}' (case-sensitive)"
+                    ))
+                continue  # Param is present (with correct or wrong case)
+            
             if req_param not in provided:
                 # Check if TaskWeaver used a different name that we've learned maps to this
                 learned_tw_name = self.alias_store.get_tw_name(call.action_name, req_param)
@@ -403,14 +441,16 @@ class DynamicComposioValidator:
                             param_expected=req_param,
                             is_wrong_name=True
                         ))
-                        # Learn this mapping for next time
-                        result.discovered_mappings.append((call.action_name, similar, req_param))
+                        # FIX: Store discovered mappings for learning (was buggy before)
+                        self._pending_mappings.append((call.action_name, similar, req_param))
                     else:
+                        # CRITICAL: Missing required parameter!
                         errors.append(ValidationError(
                             line=call.line_number,
                             action=call.action_name,
                             param_used=req_param,
-                            is_missing_required=True
+                            is_missing_required=True,
+                            message=f"Missing REQUIRED parameter: '{req_param}'"
                         ))
         
         # 2. Check for unknown params (might be wrong names)
