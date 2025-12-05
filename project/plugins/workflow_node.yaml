@@ -1,0 +1,155 @@
+name: workflow_node
+enabled: true
+required: true
+plugin_only: true
+description: >-
+  Define a workflow node declaratively.
+  
+  USE THIS FOR: Declaring workflow structure during code generation.
+  Each call creates ONE node in the final workflow graph.
+  
+  This is the PRIMARY plugin for building workflow structure.
+  Instead of relying on plan/code reconciliation, the code ITSELF declares what nodes exist.
+  
+  NODE TYPES:
+  - tool: Execute a Composio action (GMAIL_SEND_EMAIL, GOOGLESHEETS_BATCH_GET, etc.)
+  - form: Collect user input via dynamic form
+  - hitl: Human approval/decision point
+  - logic: Data processing, transformation, conditionals
+  
+  WORKFLOW EDGES: Nodes are connected in order of declaration by default.
+  Use 'depends_on' to specify custom dependencies.
+
+examples: |-
+  # ========== TOOL NODE (External API call) ==========
+  # Call Composio action to read spreadsheet data
+  spreadsheet_data = workflow_node(
+      "read_data",
+      {
+          "type": "tool",
+          "name": "Read spreadsheet data",
+          "tool": "GOOGLESHEETS_BATCH_GET",
+          "params": {
+              "spreadsheet_id": "my_spreadsheet_id",
+              "ranges": ["Sheet1!A:D"]
+          }
+      }
+  )
+  
+  # ========== FORM NODE (User input collection) ==========
+  # Collect user information
+  user_info = workflow_node(
+      "collect_info",
+      {
+          "type": "form",
+          "name": "Collect user information",
+          "fields": [
+              {"name": "full_name", "label": "Full Name", "required": True},
+              {"name": "email", "label": "Email Address", "type": "email", "required": True},
+              {"name": "department", "label": "Department", "type": "select",
+               "options": ["Engineering", "Sales", "Marketing"]}
+          ]
+      }
+  )
+  
+  # ========== HITL NODE (Human approval) ==========
+  # Manager approval required before proceeding
+  approval = workflow_node(
+      "manager_approval",
+      {
+          "type": "hitl",
+          "name": "Manager Approval",
+          "description": f"Approve request for {user_info['full_name']}",
+          "fields": [
+              {"name": "decision", "label": "Decision", "type": "select",
+               "options": ["Approve", "Reject"], "required": True},
+              {"name": "comments", "label": "Comments", "type": "textarea"}
+          ],
+          "decision_field": "decision",
+          "routing": {
+              "Approve": "continue",
+              "Reject": "end"
+          }
+      }
+  )
+  
+  # ========== LOGIC NODE (Data transformation) ==========
+  # Process and transform data
+  processed = workflow_node(
+      "process_data",
+      {
+          "type": "logic",
+          "name": "Process submitted data",
+          "description": "Transform and validate the collected information"
+      }
+  )
+  
+  # ========== TOOL NODE WITH UPSTREAM DATA ==========
+  # Send email using data from previous nodes
+  email_result = workflow_node(
+      "send_notification",
+      {
+          "type": "tool",
+          "name": "Send notification email",
+          "tool": "GMAIL_SEND_EMAIL",
+          "params": {
+              "recipient_email": user_info["email"],
+              "subject": "Request Approved",
+              "body": f"Your request has been approved. Decision: {approval['decision']}"
+          },
+          "depends_on": ["manager_approval"]
+      }
+  )
+
+parameters:
+  - name: node_id
+    type: str
+    required: true
+    description: >-
+      Unique identifier for this workflow node.
+      Used to reference this node in dependencies and data flow.
+      Example: "read_data", "send_email", "approval_step"
+      
+  - name: config
+    type: dict
+    required: true
+    description: >-
+      Node configuration with the following structure:
+      {
+        "type": "tool|form|hitl|logic",     # Required: Node type
+        "name": "Human readable name",       # Required: Display name
+        "description": "What this node does", # Optional: Description
+        
+        # For type="tool":
+        "tool": "COMPOSIO_ACTION_ID",        # Required: Composio action ID
+        "params": {"param1": "value1"},      # Tool parameters
+        
+        # For type="form" or type="hitl":
+        "fields": [                          # Form fields to collect
+          {"name": "field_name", "type": "text", "required": true}
+        ],
+        "prefill": {"field": "value"},       # Pre-fill values from upstream
+        
+        # For type="hitl" only:
+        "decision_field": "field_name",      # Which field contains decision
+        "routing": {"Approve": "continue", "Reject": "end"},
+        
+        # For all types:
+        "depends_on": ["node_id1", "node_id2"]  # Explicit dependencies
+      }
+
+returns:
+  - name: result
+    type: dict
+    description: >-
+      Node output data. For tool nodes, contains API response.
+      For form/hitl nodes, contains collected field values.
+      For logic nodes, contains processed data.
+      
+  - name: description
+    type: str
+    description: Human-readable summary of node execution.
+
+configurations:
+  auto_connect: true
+

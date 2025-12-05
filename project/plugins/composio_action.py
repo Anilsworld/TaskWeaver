@@ -22,7 +22,7 @@ Usage in generated code:
 import os
 import sys
 import logging
-from typing import Dict, Any, Tuple, Optional, Union
+from typing import Dict, Any, Tuple, Optional, Union, List
 
 from taskweaver.plugin import Plugin, register_plugin, test_plugin
 
@@ -59,6 +59,27 @@ class ComposioAction(Plugin):
     _action_matcher = None  # Reuse existing semantic search
     _simulation_mode = None  # None = unknown, True = simulation, False = real
     _host_callback_available = None  # Can we call back to Django host?
+    
+    # Host URL for Docker container to call back to Django
+    # Configurable via TASKWEAVER_HOST_URL env var (e.g., "http://host.docker.internal:8000")
+    _host_urls = None  # Lazily initialized
+    
+    @classmethod
+    def _get_host_urls(cls) -> List[str]:
+        """Get list of host URLs to try for Docker-to-Django communication."""
+        if cls._host_urls is None:
+            # Check env var first (allows custom configuration)
+            custom_url = os.environ.get('TASKWEAVER_HOST_URL')
+            if custom_url:
+                cls._host_urls = [custom_url]
+            else:
+                # Default fallback order for different Docker environments
+                cls._host_urls = [
+                    "http://host.docker.internal:8000",  # Docker Desktop (Windows/Mac)
+                    "http://172.17.0.1:8000",            # Docker Linux bridge
+                    "http://localhost:8000",             # Local development
+                ]
+        return cls._host_urls
     
     def _is_simulation_mode(self) -> bool:
         """
@@ -133,12 +154,8 @@ class ComposioAction(Plugin):
             session_id = self.ctx.session_id if hasattr(self.ctx, 'session_id') else None
             entity_id = self.ctx.get_session_var("_composio_entity_id", None)
             
-            # Host URL - try multiple options for Docker networking
-            host_urls = [
-                "http://host.docker.internal:8000",  # Docker Desktop (Windows/Mac)
-                "http://172.17.0.1:8000",  # Docker Linux bridge
-                "http://localhost:8000",  # Local development
-            ]
+            # Host URL - configurable via TASKWEAVER_HOST_URL env var
+            host_urls = self._get_host_urls()
             
             payload = {
                 "session_id": session_id,
@@ -685,10 +702,10 @@ class ComposioAction(Plugin):
     
     def _generate_schema_based_mock(self, action_name: str, params: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str]]:
         """
-        Generate mock response based on actual Composio action schema from DB.
+        Generate mock response based on actual Composio action schema.
         
         FULLY DYNAMIC (TaskWeaver sql_pull_data pattern):
-        - Fetches response_schema from ComposioActionSchema table
+        - Fetches response_schema via Django's internal API (works from Docker!)
         - Generates conformant mock data based on schema
         - No hardcoding - works for all 800+ tools!
         
@@ -696,17 +713,37 @@ class ComposioAction(Plugin):
             (mock_data, description) or None if schema not available
         """
         try:
-            from apps.integrations.models import ComposioActionSchema
+            import requests
             
-            # Fetch schema from DB
-            action = ComposioActionSchema.objects.filter(
-                action_id__iexact=action_name
-            ).first()
+            # =====================================================================
+            # SCALABLE FIX (arch-51): Fetch schema via internal API
+            # =====================================================================
+            # Docker container can't access Django models or Redis cache.
+            # We call the internal schema endpoint instead.
+            # =====================================================================
             
-            if not action or not action.response_schema:
+            # Host URL - configurable via TASKWEAVER_HOST_URL env var
+            host_urls = self._get_host_urls()
+            
+            response_schema = None
+            
+            for host_url in host_urls:
+                try:
+                    url = f"{host_url}/api/v1/integrations/internal/schema/{action_name}/"
+                    response = requests.get(url, timeout=2)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        response_schema = data.get('response_schema')
+                        if response_schema:
+                            logger.info(f"[COMPOSIO_PLUGIN] Fetched schema for {action_name} from {host_url}")
+                            break
+                except requests.exceptions.RequestException:
+                    continue
+            
+            if not response_schema:
+                logger.debug(f"[COMPOSIO_PLUGIN] No response_schema available for {action_name}")
                 return None
-            
-            response_schema = action.response_schema
             
             # Generate mock based on schema properties
             mock_data = {
@@ -724,59 +761,130 @@ class ComposioAction(Plugin):
                 f"Use the structure above to access the data correctly."
             )
             
-            logger.debug(f"[COMPOSIO_PLUGIN] Generated schema-based mock for {action_name}")
+            logger.info(f"[COMPOSIO_PLUGIN] ✅ Generated schema-based mock for {action_name}")
             return mock_data, description
             
-        except ImportError:
-            # Django not available
-            return None
         except Exception as e:
             logger.debug(f"[COMPOSIO_PLUGIN] Schema-based mock failed: {e}")
             return None
     
-    def _generate_mock_from_schema(self, schema: Dict[str, Any], depth: int = 0) -> Any:
+    def _generate_mock_from_schema(
+        self, 
+        schema: Dict[str, Any], 
+        depth: int = 0,
+        prop_name: str = ""
+    ) -> Any:
         """
         Recursively generate mock data from JSON schema.
         
         SCALABLE: Works for any schema structure without hardcoding.
+        
+        CRITICAL FIX: Fields named 'error', 'error_message', etc. are set to None
+        to prevent the Planner from thinking the mock response is a failure.
         """
         if depth > 3:  # Prevent infinite recursion
             return {}
+        
+        # =========================================================================
+        # CRITICAL: Skip error-like fields to prevent Planner from stopping early
+        # =========================================================================
+        error_field_names = {'error', 'error_message', 'error_code', 'errors', 'err', 'exception'}
+        if prop_name.lower() in error_field_names:
+            return None  # No error in mock responses!
         
         schema_type = schema.get('type', 'object')
         
         if schema_type == 'object':
             properties = schema.get('properties', {})
+            additional_props = schema.get('additionalProperties', False)
             mock_obj = {}
             
-            for prop_name, prop_schema in list(properties.items())[:10]:  # Limit to 10 props
-                mock_obj[prop_name] = self._generate_mock_from_schema(prop_schema, depth + 1)
+            for child_prop_name, prop_schema in list(properties.items())[:10]:  # Limit to 10 props
+                # Pass prop_name to recursive call
+                mock_obj[child_prop_name] = self._generate_mock_from_schema(
+                    prop_schema, depth + 1, child_prop_name
+                )
+            
+            # =========================================================================
+            # FIX: If no properties but additionalProperties is true, generate sample data
+            # This handles schemas like: {"type": "object", "additionalProperties": true}
+            # Without this, we'd return {} which looks like "no results found"
+            # 
+            # SCALABLE: Uses generic structure that works for ANY API response
+            # =========================================================================
+            if not properties and additional_props:
+                # Generic result structure that any code can iterate/access
+                mock_obj = {
+                    'items': [
+                        {'id': 'item_1', 'name': 'Sample Item 1', 'value': 'data_1'},
+                        {'id': 'item_2', 'name': 'Sample Item 2', 'value': 'data_2'}
+                    ],
+                    'count': 2,
+                    'total': 2,
+                    'has_more': False,
+                    'summary': 'Mock results for workflow generation'
+                }
             
             return mock_obj
             
         elif schema_type == 'array':
             items_schema = schema.get('items', {})
-            return [self._generate_mock_from_schema(items_schema, depth + 1)]
+            # Generate 2-3 items for lists to make it look more realistic
+            return [
+                self._generate_mock_from_schema(items_schema, depth + 1, f"{prop_name}_item"),
+                self._generate_mock_from_schema(items_schema, depth + 1, f"{prop_name}_item")
+            ]
             
         elif schema_type == 'string':
             # Check for format hints
             format_hint = schema.get('format', '')
-            if 'email' in format_hint:
-                return 'example@domain.com'
-            elif 'date' in format_hint:
-                return '2024-01-01'
-            elif 'uri' in format_hint or 'url' in format_hint:
-                return 'https://example.com'
+            description = schema.get('description', '').lower()
+            
+            # Generate contextual values based on field name/description
+            prop_lower = prop_name.lower()
+            
+            if 'email' in format_hint or 'email' in prop_lower:
+                return 'user@example.com'
+            elif 'date' in format_hint or 'date' in prop_lower:
+                return '2024-01-15'
+            elif 'uri' in format_hint or 'url' in format_hint or 'url' in prop_lower or 'link' in prop_lower:
+                return 'https://example.com/resource'
+            elif 'id' in prop_lower:
+                return 'mock_id_12345'
+            elif 'name' in prop_lower:
+                return 'Sample Name'
+            elif 'title' in prop_lower:
+                return 'Sample Title'
+            elif 'subject' in prop_lower:
+                return 'Sample Subject'
+            elif 'body' in prop_lower or 'content' in prop_lower or 'text' in prop_lower:
+                return 'Sample content text...'
+            elif 'status' in prop_lower:
+                return 'success'
             else:
                 return 'sample_value'
                 
         elif schema_type == 'integer':
+            prop_lower = prop_name.lower()
+            if 'count' in prop_lower or 'total' in prop_lower:
+                return 5
+            elif 'page' in prop_lower:
+                return 1
             return 1
             
         elif schema_type == 'number':
+            prop_lower = prop_name.lower()
+            if 'price' in prop_lower or 'cost' in prop_lower or 'amount' in prop_lower:
+                return 99.99
             return 1.0
             
         elif schema_type == 'boolean':
+            # Default to True for success-like fields
+            prop_lower = prop_name.lower()
+            if 'success' in prop_lower or 'valid' in prop_lower or 'active' in prop_lower:
+                return True
+            elif 'error' in prop_lower or 'failed' in prop_lower:
+                return False
             return True
             
         else:

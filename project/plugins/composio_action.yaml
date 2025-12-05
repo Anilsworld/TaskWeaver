@@ -13,26 +13,35 @@ description: >-
   OAuth authentication is handled automatically.
 
 examples: |-
+  # **CRITICAL: ALWAYS unpack the return tuple! composio_action returns (data, description)**
+  # WRONG: result = composio_action(...)  # This assigns tuple, not data!
+  # CORRECT: data, desc = composio_action(...)  # Always unpack both values!
+  
   # ========== GMAIL ==========
-  # Fetch emails (get/read/list emails)
+  # Fetch emails - MUST unpack tuple!
   emails, desc = composio_action("GMAIL_FETCH_EMAILS", {"query": "", "max_results": 10, "user_id": "me"})
+  for email in emails:  # emails is a list of dicts
+      print(email.get('subject', ''))  # Use .get() for safety!
   
   # Send an email
   result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "user@example.com", "subject": "Hello", "body": "Message", "user_id": "me"})
-  
-  # Forward an email (send copy to another recipient)
-  result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "forward@example.com", "subject": "Fwd: Original", "body": original_email_content, "user_id": "me"})
   
   # ========== GOOGLE SHEETS ==========
   # Create a new spreadsheet
   new_sheet, desc = composio_action("GOOGLESHEETS_CREATE_GOOGLE_SHEET1", {"title": "My Spreadsheet"})
   
-  # Add data to spreadsheet
-  result, desc = composio_action("GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", {"spreadsheet_id": sheet_id, "range": "Sheet1!A1", "values": [["Name", "Email"], ["John", "john@example.com"]]})
+  # Add data to spreadsheet (REQUIRES spreadsheet_id and valueInputOption!)
+  result, desc = composio_action("GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", {"spreadsheet_id": sheet_id, "range": "Sheet1!A1", "values": [["Name", "Email"]], "valueInputOption": "USER_ENTERED"})
   
   # ========== FLIGHTS ==========
-  # Search for flights
+  # Search for flights - ALWAYS unpack tuple!
   flights, desc = composio_action("COMPOSIO_SEARCH_FLIGHTS", {"departure_id": "JFK", "arrival_id": "LAX", "outbound_date": "2025-01-15"})
+  for flight in flights:  # flights is a list
+      print(flight.get('price', 'N/A'))
+  
+  # **IMPORTANT: Only use VERIFIED action IDs from the list above or search for valid ones.**
+  # Do NOT invent action names like OUTLOOK_FETCH_MESSAGES - they may not exist!
+  # If unsure, ask user to connect the integration or search for available actions.
 
 parameters:
   - name: action_name
