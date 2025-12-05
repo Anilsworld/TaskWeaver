@@ -105,6 +105,24 @@ class ComposioAction(Plugin):
         Returns:
             (data, description) tuple if successful, None if callback failed
         """
+        # =====================================================================
+        # SCALABLE FIX (arch-44): Skip real API during workflow GENERATION
+        # =====================================================================
+        # During workflow generation, form_collect returns mock data which will
+        # cause API validation failures. We should mock ALL API calls during
+        # generation - real APIs are only called during workflow EXECUTION.
+        #
+        # Session variable `_workflow_generation_mode` is set by eclipse_adapter
+        # when creating the session.
+        # =====================================================================
+        is_generation_mode = self.ctx.get_session_var("_workflow_generation_mode", None)
+        logger.info(f"[COMPOSIO_PLUGIN] 🔍 CHECK: _workflow_generation_mode = '{is_generation_mode}' for {action_name}")
+        if is_generation_mode == "true":
+            logger.info(f"[COMPOSIO_PLUGIN] ✅ GENERATION MODE - returning mock for {action_name}")
+            return None  # Triggers mock fallback
+        else:
+            logger.info(f"[COMPOSIO_PLUGIN] ⚠️ EXECUTION MODE - calling real API for {action_name}")
+        
         if self._host_callback_available is False:
             return None
         

@@ -13,6 +13,15 @@ description: >-
   
   FORM RELATIONSHIPS: Use data from previous forms by referencing their outputs.
   Example: payment_form can use attendee_id from registration_form.
+  
+  **CRITICAL** - APPROVAL/HITL FORMS: When creating approval, review, confirmation, or decision forms,
+  ALWAYS include hitl_config with decision_field and routing. This is REQUIRED for:
+  - Manager/supervisor approvals
+  - Review and confirm steps
+  - Any workflow pause requiring human decision
+  - Approval gates before proceeding
+  
+  hitl_config MUST include: decision_field (which field has the decision), routing (what happens for each choice)
 
 examples: |-
   # ========== REGISTRATION FORM ==========
@@ -49,8 +58,8 @@ examples: |-
       }
   )
   
-  # ========== APPROVAL FORM ==========
-  # Get manager approval (HITL pattern)
+  # ========== APPROVAL FORM (REQUIRES hitl_config!) ==========
+  # Get manager approval - MUST include hitl_config for approval workflows
   approval, desc = form_collect(
       "approval",
       {
@@ -60,7 +69,16 @@ examples: |-
               {"name": "decision", "label": "Approve this request?", "type": "select",
                "options": ["Approve", "Reject", "Request Changes"], "required": True},
               {"name": "comments", "label": "Comments", "type": "textarea"}
-          ]
+          ],
+          "hitl_config": {  # REQUIRED for approval forms!
+              "blocking": True,
+              "decision_field": "decision",
+              "routing": {
+                  "Approve": "continue",
+                  "Reject": "end",
+                  "Request Changes": "loop_back"
+              }
+          }
       }
   )
   
