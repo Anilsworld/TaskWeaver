@@ -24,6 +24,12 @@ examples: |-
   result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "forward@example.com", "subject": "Fwd: Original", "body": original_email_content, "user_id": "me"})
   
   # ========== GOOGLE SHEETS ==========
+  # Read data from spreadsheet (BATCH_GET)
+  sheet_data, desc = composio_action("GOOGLESHEETS_BATCH_GET", {"spreadsheet_id": "...", "ranges": ["Sheet1!A1:Z"]})
+  # IMPORTANT: Data is nested in valueRanges[0]['values'], NOT sheet_data['values']!
+  values = sheet_data['valueRanges'][0]['values']
+  df = pd.DataFrame(values[1:], columns=values[0])  # First row is headers
+  
   # Create a new spreadsheet
   new_sheet, desc = composio_action("GOOGLESHEETS_CREATE_GOOGLE_SHEET1", {"title": "My Spreadsheet"})
   
@@ -70,3 +76,4 @@ returns:
 
 configurations:
   entity_id: ""
+  schema_cache_path: "composio_schemas_cache.json"

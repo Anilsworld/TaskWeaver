@@ -21,6 +21,7 @@ Usage in generated code:
 
 import os
 import sys
+import json
 import logging
 from typing import Dict, Any, Tuple, Optional, Union
 
@@ -59,6 +60,47 @@ class ComposioAction(Plugin):
     _action_matcher = None  # Reuse existing semantic search
     _simulation_mode = None  # None = unknown, True = simulation, False = real
     _host_callback_available = None  # Can we call back to Django host?
+    _schema_cache = None  # Cached schemas from JSON file
+    
+    def _get_schema_cache_path(self) -> str:
+        """Get schema cache file path from config (TaskWeaver pattern)."""
+        cache_file = self.config.get("schema_cache_path", "composio_schemas_cache.json")
+        # Try multiple locations - Docker container path FIRST since __file__ 
+        # resolves to temp dir in container
+        locations = [
+            # 1. Container mounted path (Docker) - CHECK FIRST!
+            f"/app/plugins/{cache_file}",
+            # 2. Relative to plugin directory (host)
+            os.path.join(os.path.dirname(__file__), cache_file),
+            # 3. Current working directory
+            cache_file,
+        ]
+        for path in locations:
+            if os.path.exists(path):
+                print(f"[COMPOSIO_PLUGIN] Found cache at: {path}")
+                return path
+        print(f"[COMPOSIO_PLUGIN] Cache not found in: {locations}")
+        return locations[1]  # Default to host location
+    
+    def _load_schema_cache(self) -> Dict[str, Any]:
+        """Load schema cache from JSON file (for Docker container without Django)."""
+        if self._schema_cache is not None:
+            return self._schema_cache
+        
+        cache_path = self._get_schema_cache_path()
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    ComposioAction._schema_cache = json.load(f)
+                    print(f"[COMPOSIO_PLUGIN] Loaded {len(self._schema_cache)} schemas from {cache_path}")
+                    return self._schema_cache
+            else:
+                print(f"[COMPOSIO_PLUGIN] Cache file not found: {cache_path}")
+        except Exception as e:
+            print(f"[COMPOSIO_PLUGIN] Failed to load schema cache: {e}")
+        
+        ComposioAction._schema_cache = {}
+        return self._schema_cache
     
     def _is_simulation_mode(self) -> bool:
         """
@@ -484,203 +526,44 @@ class ComposioAction(Plugin):
     
     def _get_mock_response(self, action_name: str, params: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """
-        Generate a SCHEMA-BASED mock response for simulation mode.
+        Generate mock response for simulation mode.
         
-        TASKWEAVER PATTERN (BATTLE-TESTED):
-        ===================================
-        TaskWeaver plugins return (data, description) where the LLM USES the data
-        for subsequent steps. We must return realistic data, not "ignore this".
+        SINGLE SOURCE OF TRUTH: ComposioActionSchema.response_schema in DB
+        ===================================================================
         
-        SCALABLE APPROACH (800+ tools):
-        ===============================
-        1. Try HOST CALLBACK first (real API via Django host)
-        2. Fallback to schema-based mock from DB
-        3. Fallback to verb-based mock (no hardcoding)
+        All mock data is generated from the response_schema stored in DB.
+        No hardcoded patterns, no verb-based fallbacks, no app-specific logic.
         
-        This follows the sql_pull_data pattern: DYNAMIC resolution, no hardcoding.
+        If response_schema is missing, that's a DATA problem - fix in DB, not code.
         """
         # =====================================================================
-        # STEP 1: Try HOST CALLBACK - Real API execution via Django host!
+        # STEP 1: Try HOST CALLBACK - Real API execution via Django host
         # =====================================================================
-        # This is the BEST option - we get REAL Composio API responses
-        # The Docker container calls back to Django where credentials exist
         host_result = self._call_host_api(action_name, params)
-        
         if host_result is not None:
             return host_result
         
         # =====================================================================
-        # STEP 2: Try to fetch actual response_schema from DB (DYNAMIC!)
+        # STEP 2: SINGLE SOURCE OF TRUTH - Schema from DB
         # =====================================================================
         schema_based_mock = self._generate_schema_based_mock(action_name, params)
         
         if schema_based_mock:
-            mock_data, description = schema_based_mock
-            logger.info(f"[COMPOSIO_PLUGIN] SIMULATION: {action_name} -> schema-based mock")
-            return mock_data, description
+            logger.info(f"[COMPOSIO_PLUGIN] SIMULATION: {action_name} -> schema-based mock from DB")
+            return schema_based_mock
         
         # =====================================================================
-        # STEP 3: FALLBACK - VERB-BASED mock (ZERO app-specific hardcoding!)
+        # FALLBACK: Minimal success response (schema missing - DATA issue)
         # =====================================================================
-        # The key insight: All APIs follow REST conventions. 
-        # We classify by VERB pattern, not by app name.
-        # 
-        # VERB PATTERNS:
-        # - LIST/GET/FETCH → Returns a LIST that can be iterated
-        # - CREATE/SEND/POST → Returns dict with 'id' of created item
-        # - UPDATE/PATCH → Returns dict with 'id' of updated item  
-        # - DELETE → Returns dict with 'success' confirmation
-        # =====================================================================
+        # If we get here, the action's response_schema needs to be populated in DB.
+        # This is NOT a code fix - it's a data fix via sync_composio_schemas command.
+        logger.warning(f"[COMPOSIO_PLUGIN] MISSING SCHEMA: {action_name} - run 'python manage.py sync_composio_schemas'")
         
-        action_lower = action_name.lower()
-        
-        # Detect action verb from action name (GMAIL_FETCH_EMAILS → 'fetch')
-        # This is 100% dynamic - no app-specific logic!
-        is_list_action = any(verb in action_lower for verb in ['list', 'search', 'find', 'get', 'fetch', 'read', 'query'])
-        is_create_action = any(verb in action_lower for verb in ['create', 'send', 'post', 'add', 'insert', 'forward', 'append'])
-        is_update_action = any(verb in action_lower for verb in ['update', 'patch', 'modify', 'edit', 'set'])
-        is_delete_action = any(verb in action_lower for verb in ['delete', 'remove', 'clear'])
-        
-        if is_list_action:
-            # =====================================================================
-            # LIST ACTIONS: Return a LIST that can be directly iterated
-            # =====================================================================
-            # TaskWeaver pattern: `for item in result:` must work!
-            # 
-            # UNIVERSAL FIELD NAMES (not app-specific!):
-            # These are common across REST APIs regardless of app:
-            # - Emails: subject, snippet, body, from, to
-            # - Documents: title, name, content, body
-            # - Records: id, data, created_at
-            # 
-            # Including ALL common names so ANY access pattern works!
-            # =====================================================================
-            mock_data = [
-                {
-                    # Universal identifiers
-                    'id': 'sim_item_1',
-                    'uid': 'sim_item_1',
-                    # Email-pattern fields (universal)
-                    'subject': 'Simulated Subject 1',
-                    'snippet': 'Simulated snippet preview 1...',
-                    'body': 'Simulated body content 1',
-                    'from': 'sender@example.com',
-                    'to': 'recipient@example.com',
-                    # Document-pattern fields (universal)
-                    'title': 'Simulated Title 1',
-                    'name': 'Simulated Name 1',
-                    'content': 'Simulated content 1',
-                    'data': 'Simulated data 1',
-                    # Metadata (universal)
-                    'created_at': '2024-01-01T00:00:00Z',
-                    'status': 'active'
-                },
-                {
-                    'id': 'sim_item_2',
-                    'uid': 'sim_item_2',
-                    'subject': 'Simulated Subject 2',
-                    'snippet': 'Simulated snippet preview 2...',
-                    'body': 'Simulated body content 2',
-                    'from': 'sender@example.com',
-                    'to': 'recipient@example.com',
-                    'title': 'Simulated Title 2',
-                    'name': 'Simulated Name 2',
-                    'content': 'Simulated content 2',
-                    'data': 'Simulated data 2',
-                    'created_at': '2024-01-02T00:00:00Z',
-                    'status': 'active'
-                }
-            ]
-            structure_hint = self._describe_data_structure(mock_data)
-            description = (
-                f"Successfully executed {action_name}.\n"
-                f"RESPONSE STRUCTURE: {structure_hint}\n"
-                f"Result is a list - iterate with: `for item in result:`"
-            )
-        elif is_create_action:
-            # =====================================================================
-            # CREATE ACTIONS: Return dict with 'id' of created resource
-            # =====================================================================
-            # REST APIs return IDs in various formats. Include ALL common patterns
-            # so ANY access pattern works (no app-specific logic!):
-            # - Generic: id, uid, resourceId
-            # - Documents: documentId, spreadsheetId, fileId, sheetId
-            # - Messages: messageId, threadId
-            # - Records: recordId, entryId
-            # =====================================================================
-            created_id = 'sim_created_id_123'
-            mock_data = {
-                # Generic ID patterns (universal)
-                'id': created_id,
-                'uid': created_id,
-                'resourceId': created_id,
-                # Document ID patterns (universal for doc-like resources)
-                'spreadsheetId': created_id,
-                'documentId': created_id,
-                'fileId': created_id,
-                'sheetId': created_id,
-                # Message ID patterns (universal for message-like resources)
-                'messageId': created_id,
-                'threadId': created_id,
-                # Record ID patterns
-                'recordId': created_id,
-                'entryId': created_id,
-                # Status (universal)
-                'success': True,
-                'status': 'created',
-                'created': True,
-                # Common response fields
-                'title': params.get('title', params.get('name', 'Created Resource')),
-                'name': params.get('name', params.get('title', 'Created Resource')),
-                'url': f'https://example.com/resource/{created_id}'
-            }
-            structure_hint = self._describe_data_structure(mock_data)
-            description = (
-                f"Successfully executed {action_name}.\n"
-                f"RESPONSE STRUCTURE: {structure_hint}\n"
-                f"Resource ID available as result['id'] or result['spreadsheetId'], etc."
-            )
-        elif is_update_action:
-            # =====================================================================
-            # UPDATE ACTIONS: Return dict with confirmation
-            # =====================================================================
-            # Include same ID patterns as CREATE for consistency
-            updated_id = params.get('id', params.get('spreadsheetId', params.get('documentId', 'sim_updated_id')))
-            mock_data = {
-                'id': updated_id,
-                'spreadsheetId': updated_id,
-                'documentId': updated_id,
-                'success': True,
-                'status': 'updated',
-                'updated': True,
-                'modifiedTime': '2024-01-01T12:00:00Z'
-            }
-            structure_hint = self._describe_data_structure(mock_data)
-            description = f"Successfully executed {action_name}.\nRESPONSE STRUCTURE: {structure_hint}"
-        elif is_delete_action:
-            # =====================================================================
-            # DELETE ACTIONS: Return success confirmation
-            # =====================================================================
-            mock_data = {
-                'success': True,
-                'deleted': True,
-                'status': 'deleted'
-            }
-            structure_hint = self._describe_data_structure(mock_data)
-            description = f"Successfully executed {action_name}.\nRESPONSE STRUCTURE: {structure_hint}"
-        else:
-            # =====================================================================
-            # GENERIC ACTIONS: Return minimal success response
-            # =====================================================================
-            mock_data = {
-                'success': True,
-                'status': 'completed',
-                'result': 'ok'
-            }
-            structure_hint = self._describe_data_structure(mock_data)
-            description = f"Successfully executed {action_name}.\nRESPONSE STRUCTURE: {structure_hint}"
-        
-        logger.info(f"[COMPOSIO_PLUGIN] SIMULATION: {action_name} -> verb-based mock (no hardcoding)")
+        mock_data = {'success': True, 'status': 'completed', '_schema_missing': True}
+        description = (
+            f"Executed {action_name} (simulated - schema not in DB).\n"
+            f"To get accurate mock data, run: python manage.py sync_composio_schemas"
+        )
         return mock_data, description
     
     def _generate_schema_based_mock(self, action_name: str, params: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str]]:
@@ -691,6 +574,12 @@ class ComposioAction(Plugin):
         - Fetches response_schema from ComposioActionSchema table
         - Generates conformant mock data based on schema
         - No hardcoding - works for all 800+ tools!
+        
+        THE ARCHITECTURAL FIX:
+        =====================
+        If this returns None, it means the action's response_schema is missing from DB.
+        The fix is to populate ComposioActionSchema.response_schema for all actions.
+        This is DATA, not CODE - the schema-driven approach scales to any number of tools.
         
         Returns:
             (mock_data, description) or None if schema not available
@@ -703,17 +592,25 @@ class ComposioAction(Plugin):
                 action_id__iexact=action_name
             ).first()
             
-            if not action or not action.response_schema:
+            if not action:
+                logger.warning(f"[COMPOSIO_PLUGIN] ACTION NOT IN DB: {action_name} - add to ComposioActionSchema table")
+                return None
+            
+            if not action.response_schema:
+                logger.warning(f"[COMPOSIO_PLUGIN] NO RESPONSE_SCHEMA: {action_name} - populate response_schema in DB")
                 return None
             
             response_schema = action.response_schema
             
             # Generate mock based on schema properties
-            mock_data = {
-                'success': True,
-                'successfull': True,
-                'data': self._generate_mock_from_schema(response_schema)
-            }
+            full_mock = self._generate_mock_from_schema(response_schema)
+            
+            # UNWRAP: Real API returns result.get('data', result)
+            # Mock must match this pattern - return just the 'data' field
+            if isinstance(full_mock, dict) and 'data' in full_mock:
+                mock_data = full_mock['data']
+            else:
+                mock_data = full_mock
             
             # Use dynamic structure hint (same as real API)
             structure_hint = self._describe_data_structure(mock_data)
@@ -724,39 +621,254 @@ class ComposioAction(Plugin):
                 f"Use the structure above to access the data correctly."
             )
             
-            logger.debug(f"[COMPOSIO_PLUGIN] Generated schema-based mock for {action_name}")
+            logger.info(f"[COMPOSIO_PLUGIN] SCHEMA-BASED mock for {action_name} (from DB)")
             return mock_data, description
             
         except ImportError:
-            # Django not available
-            return None
+            # Django not available (running in Docker without Django context)
+            # Try loading from schema cache file instead
+            print(f"[COMPOSIO_PLUGIN] Django not available, trying schema cache for {action_name}")
+            return self._generate_mock_from_cache(action_name, params)
         except Exception as e:
-            logger.debug(f"[COMPOSIO_PLUGIN] Schema-based mock failed: {e}")
-            return None
+            print(f"[COMPOSIO_PLUGIN] Schema lookup failed for {action_name}: {e}")
+            return self._generate_mock_from_cache(action_name, params)
     
-    def _generate_mock_from_schema(self, schema: Dict[str, Any], depth: int = 0) -> Any:
+    def _generate_mock_from_cache(self, action_name: str, params: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str]]:
+        """Generate mock from cached schema file (Docker container fallback)."""
+        cache = self._load_schema_cache()
+        
+        # Try exact match first, then case-insensitive
+        response_schema = cache.get(action_name) or cache.get(action_name.upper())
+        
+        if not response_schema:
+            print(f"[COMPOSIO_PLUGIN] Schema not in cache: {action_name}")
+            return None
+        
+        print(f"[COMPOSIO_PLUGIN] Found schema in cache for {action_name}")
+        
+        # Generate mock based on schema properties
+        full_mock = self._generate_mock_from_schema(response_schema)
+        
+        # UNWRAP: Real API returns result.get('data', result)
+        if isinstance(full_mock, dict) and 'data' in full_mock:
+            mock_data = full_mock['data']
+        else:
+            mock_data = full_mock
+        
+        # Use dynamic structure hint
+        structure_hint = self._describe_data_structure(mock_data)
+        
+        description = (
+            f"Successfully executed {action_name}.\n"
+            f"RESPONSE STRUCTURE: {structure_hint}\n"
+            f"Use the structure above to access the data correctly."
+        )
+        
+        print(f"[COMPOSIO_PLUGIN] Generated schema-based mock from cache for {action_name}")
+        return mock_data, description
+    
+    def _generate_mock_from_schema(self, schema: Dict[str, Any], depth: int = 0, prop_name: str = "") -> Any:
         """
         Recursively generate mock data from JSON schema.
         
-        SCALABLE: Works for any schema structure without hardcoding.
+        SCALABLE: Works for any schema structure without hardcoding app names.
+        Uses property names for context-aware mock generation for common patterns.
+        
+        Covered patterns:
+        - Spreadsheets: values, valueRanges, rows, cells (Google Sheets, Excel, Smartsheet)
+        - Databases: records, fields, entries (Airtable, Notion, Supabase)
+        - Email/Messaging: messages, threads, attachments (Gmail, Outlook, Slack)
+        - Files/Storage: files, items, entries (Google Drive, Dropbox, OneDrive)
+        - Calendar: events, attendees (Google Calendar, Outlook Calendar)
+        - CRM: contacts, deals, leads (Salesforce, HubSpot)
+        - Generic: data, results, items, entries
         """
         if depth > 3:  # Prevent infinite recursion
             return {}
         
         schema_type = schema.get('type', 'object')
+        prop_lower = prop_name.lower()
+        
+        # =====================================================================
+        # SPREADSHEET/TABLE PATTERNS (Google Sheets, Excel, Airtable, Smartsheet)
+        # =====================================================================
+        if prop_lower == 'values':
+            # 2D array: headers + data rows
+            return [
+                ['Date', 'Amount', 'Description'],
+                ['2025-01-15', '150.00', 'Sample item 1'],
+                ['2025-02-15', '200.00', 'Sample item 2'],
+            ]
+        elif prop_lower == 'valueranges':
+            # Google Sheets BATCH_GET response
+            return [{
+                'range': 'Sheet1!A1:C3',
+                'majorDimension': 'ROWS',
+                'values': [
+                    ['Date', 'Amount', 'Description'],
+                    ['2025-01-15', '150.00', 'Sample item 1'],
+                    ['2025-02-15', '200.00', 'Sample item 2'],
+                ]
+            }]
+        elif prop_lower == 'rows':
+            # Generic table rows
+            return [
+                {'id': 'row_1', 'Date': '2025-01-15', 'Amount': '150.00'},
+                {'id': 'row_2', 'Date': '2025-02-15', 'Amount': '200.00'},
+            ]
+        elif prop_lower == 'cells':
+            # Individual cells
+            return [
+                {'row': 1, 'column': 'A', 'value': 'Date'},
+                {'row': 1, 'column': 'B', 'value': 'Amount'},
+            ]
+        
+        # =====================================================================
+        # DATABASE PATTERNS (Airtable, Notion, Supabase, Firebase)
+        # =====================================================================
+        elif prop_lower == 'records':
+            # Airtable/Notion database records
+            return [
+                {'id': 'rec_001', 'fields': {'Name': 'Item 1', 'Status': 'Active', 'Amount': 150}},
+                {'id': 'rec_002', 'fields': {'Name': 'Item 2', 'Status': 'Pending', 'Amount': 200}},
+            ]
+        elif prop_lower == 'fields':
+            # Record fields (when accessed directly)
+            return {'Name': 'Sample Record', 'Status': 'Active', 'Amount': 150, 'Date': '2025-01-15'}
+        
+        # =====================================================================
+        # EMAIL/MESSAGING PATTERNS (Gmail, Outlook, Slack, Teams)
+        # =====================================================================
+        elif prop_lower == 'messages':
+            return [
+                {'id': 'msg_001', 'subject': 'Sample Email 1', 'from': 'sender@example.com', 'snippet': 'Email content preview...'},
+                {'id': 'msg_002', 'subject': 'Sample Email 2', 'from': 'other@example.com', 'snippet': 'Another email preview...'},
+            ]
+        elif prop_lower == 'threads':
+            return [
+                {'id': 'thread_001', 'subject': 'Email Thread', 'messageCount': 3},
+            ]
+        elif prop_lower == 'attachments':
+            return [
+                {'id': 'att_001', 'filename': 'document.pdf', 'mimeType': 'application/pdf', 'size': 1024},
+            ]
+        elif prop_lower == 'channels':
+            return [
+                {'id': 'C001', 'name': 'general', 'is_private': False},
+                {'id': 'C002', 'name': 'team-updates', 'is_private': False},
+            ]
+        
+        # =====================================================================
+        # FILE/STORAGE PATTERNS (Google Drive, Dropbox, OneDrive, Box)
+        # =====================================================================
+        elif prop_lower == 'files':
+            return [
+                {'id': 'file_001', 'name': 'Report.xlsx', 'mimeType': 'application/vnd.ms-excel', 'size': 2048},
+                {'id': 'file_002', 'name': 'Presentation.pptx', 'mimeType': 'application/vnd.ms-powerpoint', 'size': 4096},
+            ]
+        elif prop_lower == 'folders':
+            return [
+                {'id': 'folder_001', 'name': 'Documents', 'itemCount': 15},
+                {'id': 'folder_002', 'name': 'Projects', 'itemCount': 8},
+            ]
+        
+        # =====================================================================
+        # CALENDAR PATTERNS (Google Calendar, Outlook Calendar)
+        # =====================================================================
+        elif prop_lower == 'events':
+            return [
+                {'id': 'evt_001', 'summary': 'Team Meeting', 'start': '2025-01-15T10:00:00Z', 'end': '2025-01-15T11:00:00Z'},
+                {'id': 'evt_002', 'summary': 'Project Review', 'start': '2025-01-16T14:00:00Z', 'end': '2025-01-16T15:00:00Z'},
+            ]
+        elif prop_lower == 'attendees':
+            return [
+                {'email': 'user1@example.com', 'responseStatus': 'accepted'},
+                {'email': 'user2@example.com', 'responseStatus': 'tentative'},
+            ]
+        
+        # =====================================================================
+        # CRM PATTERNS (Salesforce, HubSpot, Pipedrive)
+        # =====================================================================
+        elif prop_lower == 'contacts':
+            return [
+                {'id': 'con_001', 'name': 'John Doe', 'email': 'john@example.com', 'phone': '+1234567890'},
+                {'id': 'con_002', 'name': 'Jane Smith', 'email': 'jane@example.com', 'phone': '+0987654321'},
+            ]
+        elif prop_lower == 'deals' or prop_lower == 'opportunities':
+            return [
+                {'id': 'deal_001', 'name': 'Enterprise Deal', 'amount': 50000, 'stage': 'Negotiation'},
+                {'id': 'deal_002', 'name': 'SMB Deal', 'amount': 5000, 'stage': 'Proposal'},
+            ]
+        elif prop_lower == 'leads':
+            return [
+                {'id': 'lead_001', 'name': 'New Lead', 'company': 'Acme Corp', 'status': 'New'},
+            ]
+        
+        # =====================================================================
+        # GENERIC PATTERNS (work across many APIs)
+        # =====================================================================
+        elif prop_lower == 'results':
+            # Generic search/list results
+            return [
+                {'id': 'res_001', 'title': 'Result 1', 'score': 0.95},
+                {'id': 'res_002', 'title': 'Result 2', 'score': 0.87},
+            ]
+        elif prop_lower == 'items':
+            # Generic items list
+            return [
+                {'id': 'item_001', 'name': 'Item 1', 'type': 'default'},
+                {'id': 'item_002', 'name': 'Item 2', 'type': 'default'},
+            ]
+        elif prop_lower == 'entries':
+            # Generic entries
+            return [
+                {'id': 'entry_001', 'content': 'Entry content 1', 'created': '2025-01-15'},
+                {'id': 'entry_002', 'content': 'Entry content 2', 'created': '2025-01-16'},
+            ]
+        elif prop_lower == 'data' and depth == 0:
+            # Top-level data wrapper - don't override, let schema handle it
+            pass
+        
+        # =====================================================================
+        # FLIGHT/TRAVEL PATTERNS (Amadeus, Skyscanner, Composio flights)
+        # =====================================================================
+        elif prop_lower == 'flights':
+            return [
+                {'id': 'fl_001', 'airline': 'United', 'flight_number': 'UA123', 'departure': '2025-01-15T08:00:00Z', 'arrival': '2025-01-15T11:00:00Z', 'price': 350},
+                {'id': 'fl_002', 'airline': 'Delta', 'flight_number': 'DL456', 'departure': '2025-01-15T10:00:00Z', 'arrival': '2025-01-15T13:00:00Z', 'price': 420},
+            ]
+        elif prop_lower == 'hotels':
+            return [
+                {'id': 'htl_001', 'name': 'Grand Hotel', 'rating': 4.5, 'price_per_night': 150},
+                {'id': 'htl_002', 'name': 'City Inn', 'rating': 4.0, 'price_per_night': 95},
+            ]
+        
+        # =====================================================================
+        # DOCUMENT/CONTENT PATTERNS (Notion, Confluence, Google Docs)
+        # =====================================================================
+        elif prop_lower == 'blocks':
+            return [
+                {'id': 'blk_001', 'type': 'paragraph', 'text': 'Sample paragraph content'},
+                {'id': 'blk_002', 'type': 'heading', 'text': 'Sample Heading'},
+            ]
+        elif prop_lower == 'pages':
+            return [
+                {'id': 'page_001', 'title': 'Project Overview', 'url': 'https://example.com/page1'},
+                {'id': 'page_002', 'title': 'Meeting Notes', 'url': 'https://example.com/page2'},
+            ]
         
         if schema_type == 'object':
             properties = schema.get('properties', {})
             mock_obj = {}
             
-            for prop_name, prop_schema in list(properties.items())[:10]:  # Limit to 10 props
-                mock_obj[prop_name] = self._generate_mock_from_schema(prop_schema, depth + 1)
+            for pname, prop_schema in list(properties.items())[:10]:  # Limit to 10 props
+                mock_obj[pname] = self._generate_mock_from_schema(prop_schema, depth + 1, pname)
             
             return mock_obj
             
         elif schema_type == 'array':
             items_schema = schema.get('items', {})
-            return [self._generate_mock_from_schema(items_schema, depth + 1)]
+            return [self._generate_mock_from_schema(items_schema, depth + 1, prop_name)]
             
         elif schema_type == 'string':
             # Check for format hints

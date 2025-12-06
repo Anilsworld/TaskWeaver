@@ -241,6 +241,12 @@ class Environment:
         elif self.mode == EnvMode.Container:
             connection_file = self._get_connection_file(session_id, new_kernel_id)
             new_port_start = self.port_start_inside_container
+            # Get plugins directory path for cache file access
+            # Path: TaskWeaver/taskweaver/ces/environment.py -> TaskWeaver/project/plugins
+            taskweaver_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            plugins_dir = os.path.join(taskweaver_root, "project", "plugins")
+            logger.info(f"[CONTAINER] Mounting plugins from: {plugins_dir}")
+            
             kernel_env = {
                 "TASKWEAVER_KERNEL_MODE": "container",
                 "TASKWEAVER_SESSION_ID": session_id,
@@ -270,6 +276,7 @@ class Environment:
                 volumes={
                     os.path.abspath(ces_session_dir): {"bind": "/app/ces/", "mode": "rw"},
                     os.path.abspath(cwd): {"bind": "/app/cwd", "mode": "rw"},
+                    plugins_dir: {"bind": "/app/plugins/", "mode": "ro"},  # Mount plugins for cache access
                 },
                 ports={
                     f"{new_port_start}/tcp": None,
