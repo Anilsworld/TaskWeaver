@@ -23,7 +23,8 @@ import os
 import sys
 import json
 import logging
-from typing import Dict, Any, Tuple, Optional, Union
+import re
+from typing import Dict, Any, Tuple, Optional, Union, List, Set
 
 from taskweaver.plugin import Plugin, register_plugin, test_plugin
 
@@ -60,7 +61,9 @@ class ComposioAction(Plugin):
     _action_matcher = None  # Reuse existing semantic search
     _simulation_mode = None  # None = unknown, True = simulation, False = real
     _host_callback_available = None  # Can we call back to Django host?
-    _schema_cache = None  # Cached schemas from JSON file
+    _schema_cache = None  # Cached schemas from JSON file (response schemas)
+    _resolver_graph = None  # Maps param types to SEARCH/FIND actions that produce them
+    _action_metadata_cache = None  # Cached action metadata (parameters_schema, parameter_examples, response_schema)
     
     def _get_schema_cache_path(self) -> str:
         """Get schema cache file path from config (TaskWeaver pattern)."""
@@ -448,6 +451,752 @@ class ComposioAction(Plugin):
         
         return best_match if best_score >= 0.5 else None
     
+    # =========================================================================
+    # PARAMETER VALUE RESOLUTION (sql_pull_data pattern - PURE SCHEMA-DRIVEN)
+    # =========================================================================
+    # Resolves NAME → ID automatically using ONLY schema information.
+    # Works for ANY tool (800+) - ZERO hardcoding!
+    # =========================================================================
+    
+    def _build_resolver_graph(self) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Build a graph mapping param types to actions that can PRODUCE them.
+        
+        PURE SCHEMA-DRIVEN - analyzes response schemas to discover:
+        - Which actions produce ID fields in arrays (these are "resolver" actions)
+        - What the param pattern should be (derived from field name + parent)
+        
+        Returns:
+            Dict mapping param patterns to resolver actions
+        """
+        if self._resolver_graph is not None:
+            return self._resolver_graph
+        
+        graph = {}
+        
+        try:
+            cache = self._load_schema_cache()
+            
+            for action_id, entry in cache.items():
+                if not isinstance(entry, dict):
+                    continue
+                
+                # Handle both old format (entry = response_schema) and new format (entry = {response_schema, ...})
+                if 'response_schema' in entry:
+                    response_schema = entry['response_schema']
+                else:
+                    response_schema = entry  # Old format
+                
+                if not isinstance(response_schema, dict):
+                    continue
+                
+                # Extract app prefix from action_id
+                app_prefix = action_id.split('_')[0].upper() if '_' in action_id else ''
+                
+                # Find ID-producing arrays in response schema
+                id_infos = self._find_id_producing_arrays(response_schema)
+                
+                for id_info in id_infos:
+                    param_pattern = id_info['param_pattern']
+                    
+                    if param_pattern not in graph:
+                        graph[param_pattern] = []
+                    
+                    # Get search param from input schema of this action
+                    search_param = self._get_search_param_from_input_schema(action_id)
+                    
+                    graph[param_pattern].append({
+                        'action': action_id,
+                        'app': app_prefix,
+                        'search_param': search_param,
+                        'id_path': id_info['id_path'],
+                        'name_path': id_info['name_path']
+                    })
+            
+            ComposioAction._resolver_graph = graph
+            logger.info(f"[COMPOSIO_PLUGIN] Built resolver graph: {len(graph)} param types from schema")
+            return graph
+            
+        except Exception as e:
+            logger.warning(f"[COMPOSIO_PLUGIN] Failed to build resolver graph: {e}")
+            ComposioAction._resolver_graph = {}
+            return {}
+    
+    def _find_id_producing_arrays(self, schema: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Find arrays in schema that contain objects with ID fields.
+        
+        PURE SCHEMA-DRIVEN - recursively analyzes schema structure.
+        No assumptions about field names - uses schema 'type' and structure.
+        """
+        results = []
+        
+        def analyze_schema(obj: Any, path: str, parent_array_name: str = ''):
+            if not isinstance(obj, dict):
+                return
+            
+            obj_type = obj.get('type')
+            
+            # If this is an array with items, check if items have ID fields
+            if obj_type == 'array' and 'items' in obj:
+                items = obj.get('items', {})
+                if isinstance(items, dict):
+                    item_props = items.get('properties', {})
+                    
+                    # Find ID field and name field in item properties
+                    id_field = None
+                    name_field = None
+                    
+                    for field_name, field_schema in item_props.items():
+                        if not isinstance(field_schema, dict):
+                            continue
+                        
+                        field_type = field_schema.get('type')
+                        field_name_lower = field_name.lower()
+                        
+                        # Detect ID field by checking if name ends with 'id' and type is string
+                        if field_type == 'string':
+                            if field_name_lower == 'id' or field_name_lower.endswith('id') or field_name_lower.endswith('_id'):
+                                id_field = field_name
+                            # First string field that's not an ID could be the name field
+                            elif name_field is None:
+                                name_field = field_name
+                    
+                    if id_field:
+                        # Derive param pattern from parent array name or ID field
+                        if parent_array_name:
+                            # Remove trailing 's' for singular: 'spreadsheets' -> 'spreadsheet'
+                            singular = parent_array_name.rstrip('s') if parent_array_name.endswith('s') else parent_array_name
+                            param_pattern = f"{singular}_id".lower()
+                        else:
+                            # Use ID field name: 'spreadsheetId' -> 'spreadsheet_id'
+                            param_pattern = re.sub(r'(?<!^)(?=[A-Z])', '_', id_field).lower()
+                        
+                        # Normalize
+                        param_pattern = param_pattern.replace('__', '_').strip('_')
+                        if not param_pattern.endswith('_id'):
+                            param_pattern = param_pattern.replace('_id_id', '_id')  # Fix double _id
+                        
+                        results.append({
+                            'param_pattern': param_pattern,
+                            'id_path': f"{path}[0].{id_field}",
+                            'name_path': f"{path}[0].{name_field}" if name_field else None
+                        })
+            
+            # Recurse into properties
+            if 'properties' in obj:
+                for prop_name, prop_schema in obj.get('properties', {}).items():
+                    new_path = f"{path}.{prop_name}" if path else prop_name
+                    # Pass array name as parent when recursing into array items
+                    if isinstance(prop_schema, dict) and prop_schema.get('type') == 'array':
+                        analyze_schema(prop_schema, new_path, prop_name)
+                    else:
+                        analyze_schema(prop_schema, new_path, parent_array_name)
+            
+            # Also check 'items' for arrays
+            if 'items' in obj:
+                analyze_schema(obj.get('items', {}), path, parent_array_name)
+        
+        # Start from root or data property
+        data_schema = schema.get('properties', {}).get('data', schema)
+        analyze_schema(data_schema, 'data' if 'data' in schema.get('properties', {}) else '', '')
+        
+        return results
+    
+    def _get_action_metadata(self, action_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get full action metadata from DB or cache file.
+        
+        Returns dict with:
+        - parameters_schema: JSON schema for inputs
+        - parameter_examples: Dict of param_name -> list of example values
+        - response_schema: Expected response structure
+        
+        Falls back to cache file when Django is not available (Docker container).
+        """
+        if self._action_metadata_cache is None:
+            ComposioAction._action_metadata_cache = {}
+        
+        if action_id in self._action_metadata_cache:
+            return self._action_metadata_cache[action_id]
+        
+        # Try DB first (when Django is available)
+        try:
+            from apps.integrations.models import ComposioActionSchema
+            action = ComposioActionSchema.objects.filter(action_id__iexact=action_id).first()
+            
+            if action:
+                metadata = {
+                    'parameters_schema': action.parameters_schema or {},
+                    'parameter_examples': action.parameter_examples or {},
+                    'response_schema': action.response_schema or {},
+                    'description': action.description or ''
+                }
+                self._action_metadata_cache[action_id] = metadata
+                return metadata
+        except ImportError:
+            # Django not available - fall through to cache
+            pass
+        
+        # Fallback: Load from schema cache file (Docker container)
+        cache = self._load_schema_cache()
+        if cache:
+            # Try exact match, then case-insensitive
+            entry = cache.get(action_id) or cache.get(action_id.upper())
+            
+            if entry and isinstance(entry, dict):
+                # New format: entry contains response_schema, parameter_examples, parameters_schema
+                if 'response_schema' in entry or 'parameter_examples' in entry:
+                    metadata = {
+                        'parameters_schema': entry.get('parameters_schema', {}),
+                        'parameter_examples': entry.get('parameter_examples', {}),
+                        'response_schema': entry.get('response_schema', {}),
+                        'description': ''
+                    }
+                else:
+                    # Old format: entry IS the response_schema directly
+                    metadata = {
+                        'parameters_schema': {},
+                        'parameter_examples': {},
+                        'response_schema': entry,
+                        'description': ''
+                    }
+                
+                self._action_metadata_cache[action_id] = metadata
+                return metadata
+        
+        return None
+    
+    def _get_search_param_from_input_schema(self, action_id: str) -> str:
+        """
+        Get the search parameter name from action's INPUT schema.
+        
+        Uses parameters_schema from DB or cache file.
+        """
+        metadata = self._get_action_metadata(action_id)
+        if not metadata:
+            return 'query'
+        
+        params_schema = metadata.get('parameters_schema', {})
+        if not params_schema:
+            return 'query'
+        
+        props = params_schema.get('properties', {})
+        required = set(params_schema.get('required', []))
+        
+        # Find first required string parameter
+        for param_name, param_schema in props.items():
+            if isinstance(param_schema, dict) and param_schema.get('type') == 'string':
+                if param_name in required:
+                    return param_name
+        
+        # Fallback: first string param
+        for param_name, param_schema in props.items():
+            if isinstance(param_schema, dict) and param_schema.get('type') == 'string':
+                return param_name
+        
+        return 'query'
+    
+    def _value_matches_examples(self, value: str, examples: List[Any]) -> bool:
+        """
+        Check if value matches the format of provided examples.
+        
+        Uses parameter_examples from DB - no pattern hardcoding!
+        
+        Logic:
+        1. If examples are empty, can't validate - return True
+        2. Compare length characteristics
+        3. Compare character class (spaces, special chars)
+        4. If value looks very different from examples, return False
+        """
+        if not examples:
+            return True  # No examples to compare
+        
+        # Filter to string examples only
+        str_examples = [e for e in examples if isinstance(e, str)]
+        if not str_examples:
+            return True
+        
+        # Analyze example characteristics
+        example_lengths = [len(e) for e in str_examples]
+        min_len = min(example_lengths)
+        max_len = max(example_lengths)
+        avg_len = sum(example_lengths) / len(example_lengths)
+        
+        # Length check (with generous tolerance)
+        if len(value) < min_len * 0.3 or len(value) > max_len * 3:
+            # Value length is very different from examples
+            logger.debug(f"[COMPOSIO_PLUGIN] Length mismatch: value={len(value)}, examples={min_len}-{max_len}")
+            return False
+        
+        # Space check - if examples have no spaces but value has spaces
+        examples_have_spaces = any(' ' in e for e in str_examples)
+        if ' ' in value and not examples_have_spaces:
+            logger.debug(f"[COMPOSIO_PLUGIN] Space mismatch: value has spaces, examples don't")
+            return False
+        
+        # Character class similarity
+        def char_profile(s: str) -> Set[str]:
+            profile = set()
+            if any(c.isdigit() for c in s):
+                profile.add('digit')
+            if any(c.isupper() for c in s):
+                profile.add('upper')
+            if any(c.islower() for c in s):
+                profile.add('lower')
+            if any(c in '-_' for c in s):
+                profile.add('dash')
+            if ' ' in s:
+                profile.add('space')
+            return profile
+        
+        # If value profile is very different from ALL examples, likely mismatch
+        value_profile = char_profile(value)
+        example_profiles = [char_profile(e) for e in str_examples]
+        
+        # Check if value profile overlaps with at least one example
+        has_overlap = any(len(value_profile & ep) >= len(value_profile) * 0.5 for ep in example_profiles)
+        if not has_overlap and len(value_profile) > 1:
+            logger.debug(f"[COMPOSIO_PLUGIN] Profile mismatch: value={value_profile}")
+            return False
+        
+        return True
+    
+    def _is_obvious_placeholder(self, value: str, param_name: str, action_id: str = None) -> bool:
+        """
+        Detect obvious placeholder values using SCHEMA-FIRST approach.
+        
+        Priority:
+        1. Check schema for enum/pattern validation (SCALABLE)
+        2. Fall back to obvious pattern matching (CONSERVATIVE)
+        
+        Returns True ONLY if value is clearly a placeholder.
+        """
+        value_lower = value.lower()
+        
+        # =================================================================
+        # STEP 1: OBVIOUS PLACEHOLDER PATTERNS (High confidence)
+        # =================================================================
+        # Only flag things that are CLEARLY placeholders
+        obvious_placeholder_patterns = [
+            'your_', '_here', 'replace_', 'example_', 'sample_',
+            'placeholder', 'insert_', 'todo_', 'xxx', '{{', '}}',
+            '<your', '<insert', '<replace', '[your', '[insert'
+        ]
+        for pattern in obvious_placeholder_patterns:
+            if pattern in value_lower:
+                print(f"[COMPOSIO_PLUGIN] 🚨 PLACEHOLDER detected: {param_name}='{value}' (matched '{pattern}')")
+                return True
+        
+        # =================================================================
+        # STEP 2: SCHEMA-BASED VALIDATION (Scalable)
+        # =================================================================
+        # If we have schema info, use it to validate
+        if action_id:
+            metadata = self._get_action_metadata(action_id)
+            if metadata:
+                params_schema = metadata.get('parameters_schema', {})
+                param_props = params_schema.get('properties', {}).get(param_name, {})
+                
+                # Check if schema has enum - value must be in enum
+                if 'enum' in param_props:
+                    enum_values = param_props['enum']
+                    if value not in enum_values:
+                        print(f"[COMPOSIO_PLUGIN] 🚨 VALUE not in enum: {param_name}='{value}' (valid: {enum_values[:5]}...)")
+                        return True
+                    return False  # Value is valid per schema
+                
+                # Check if schema has pattern - value must match regex
+                if 'pattern' in param_props:
+                    pattern = param_props['pattern']
+                    try:
+                        if not re.match(pattern, value):
+                            print(f"[COMPOSIO_PLUGIN] 🚨 VALUE doesn't match pattern: {param_name}='{value}' (pattern: {pattern})")
+                            return True
+                        return False  # Value matches pattern
+                    except re.error:
+                        pass  # Invalid regex, skip
+                
+                # Check if schema has format hint
+                format_hint = param_props.get('format', '')
+                if format_hint == 'uuid' and not self._looks_like_uuid(value):
+                    print(f"[COMPOSIO_PLUGIN] 🚨 VALUE doesn't look like UUID: {param_name}='{value}'")
+                    return True
+        
+        # =================================================================
+        # STEP 3: CONSERVATIVE FALLBACK
+        # =================================================================
+        # Only flag if it REALLY looks like a placeholder (has spaces in ID field)
+        param_lower = param_name.lower()
+        is_id_param = param_lower.endswith('id') or param_lower.endswith('_id')
+        
+        if is_id_param and ' ' in value:
+            # ID params should not contain spaces - likely a name that needs resolution
+            print(f"[COMPOSIO_PLUGIN] 🚨 ID param has spaces: {param_name}='{value}' - needs resolution")
+            return True
+        
+        # Default: Trust the LLM's value
+        return False
+    
+    def _looks_like_uuid(self, value: str) -> bool:
+        """Check if value looks like a UUID."""
+        uuid_pattern = r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        return bool(re.match(uuid_pattern, value))
+    
+    def _suggest_search_action(self, action_name: str, param_name: str) -> str:
+        """
+        Dynamically suggest a SEARCH action based on the current action and parameter.
+        
+        Uses resolver_graph to find appropriate search actions.
+        NO HARDCODING - suggestions come from the schema cache.
+        """
+        try:
+            # Get app prefix from action name
+            app_prefix = action_name.split('_')[0].upper() if '_' in action_name else ''
+            
+            # Build resolver graph to find search actions
+            resolver_graph = self._build_resolver_graph()
+            
+            # Normalize param name
+            param_key = re.sub(r'(?<!^)(?=[A-Z])', '_', param_name).lower()
+            
+            # Find resolvers for this param type
+            resolvers = resolver_graph.get(param_key, [])
+            
+            # Try variations
+            if not resolvers:
+                for key in resolver_graph.keys():
+                    if param_key in key or key in param_key:
+                        resolvers = resolver_graph[key]
+                        break
+            
+            # Prefer same-app resolvers
+            best_resolver = None
+            for r in resolvers:
+                if r.get('app', '').upper() == app_prefix:
+                    best_resolver = r
+                    break
+            if not best_resolver and resolvers:
+                best_resolver = resolvers[0]
+            
+            if best_resolver:
+                return f"For example, use {best_resolver['action_id']} to find the {param_name}."
+            
+            # Fallback: suggest generic search pattern
+            if app_prefix:
+                return f"Look for a {app_prefix}_SEARCH_* or {app_prefix}_LIST_* action to find the {param_name}."
+            
+            return f"Use an appropriate SEARCH or LIST action to find the {param_name}."
+            
+        except Exception as e:
+            logger.debug(f"[COMPOSIO_PLUGIN] Error suggesting search action: {e}")
+            return f"Use an appropriate SEARCH action to find the {param_name}."
+    
+    def _suggest_similar_actions(self, action_name: str) -> str:
+        """
+        When an action doesn't exist, suggest similar actions that DO exist.
+        Helps LLM correct hallucinated action names.
+        
+        FULLY DYNAMIC - no hardcoded terms:
+        - Analyzes actual action names in the cache
+        - Uses fuzzy matching on all parts of the action name
+        - Works for any tool/action pattern
+        """
+        try:
+            # Load schema cache
+            cache = self._load_schema_cache()
+            if not cache:
+                return "Check available actions in the system."
+            
+            action_upper = action_name.upper()
+            parts = action_upper.split('_')
+            all_actions = list(cache.keys())
+            
+            # Score-based matching for flexibility
+            scored_matches = []
+            
+            for existing_action in all_actions:
+                score = 0
+                existing_upper = existing_action.upper()
+                existing_parts = existing_upper.split('_')
+                
+                # Score 1: Same app prefix (first part)
+                if parts and existing_parts and parts[0] == existing_parts[0]:
+                    score += 3
+                
+                # Score 2: Matching parts (any position)
+                matching_parts = set(parts) & set(existing_parts)
+                score += len(matching_parts) * 2
+                
+                # Score 3: Substring match (entity names)
+                for part in parts:
+                    if len(part) > 2:  # Skip short parts like "A", "TO"
+                        if part in existing_upper:
+                            score += 1
+                        # Singular/plural variations
+                        elif part.rstrip('S') in existing_upper or part + 'S' in existing_upper:
+                            score += 0.5
+                
+                if score > 0:
+                    scored_matches.append((existing_action, score))
+            
+            # Sort by score (highest first) and take top 5
+            scored_matches.sort(key=lambda x: x[1], reverse=True)
+            similar_actions = [action for action, score in scored_matches[:5]]
+            
+            if similar_actions:
+                return f"Did you mean one of these actions? {', '.join(similar_actions)}"
+            else:
+                # Fallback: show actions with same first letter
+                first_letter = action_upper[0] if action_upper else ''
+                fallback = [a for a in all_actions if a.startswith(first_letter)][:3]
+                if fallback:
+                    return f"Action not found. Some actions starting with '{first_letter}': {', '.join(fallback)}"
+                return "This action does not exist. Please check available actions."
+                
+        except Exception as e:
+            logger.debug(f"[COMPOSIO_PLUGIN] Error suggesting similar actions: {e}")
+            return "This action does not exist. Please use a valid action."
+    
+    def _resolve_param_values(
+        self,
+        action_id: str,
+        params: Dict[str, Any],
+        entity_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Resolve parameter VALUES (name → id) using DB metadata.
+        
+        Uses parameter_examples from ComposioActionSchema to detect mismatches.
+        Uses response_schema from other actions to find resolvers.
+        
+        NO HARDCODING - everything comes from DB!
+        
+        Args:
+            action_id: The action being called
+            params: Parameters from TaskWeaver
+            entity_id: User entity for auth
+            
+        Returns:
+            Params with resolved values
+        """
+        print(f"[COMPOSIO_PLUGIN] 🔍 VALUE_RESOLUTION: Starting for {action_id} with params: {list(params.keys())}")
+        
+        if not params:
+            print(f"[COMPOSIO_PLUGIN] 🔍 VALUE_RESOLUTION: No params to resolve")
+            return params
+        
+        # Get action metadata from DB (includes parameter_examples)
+        metadata = self._get_action_metadata(action_id)
+        if not metadata:
+            print(f"[COMPOSIO_PLUGIN] 🔍 VALUE_RESOLUTION: No metadata found for {action_id}")
+            return params
+        
+        parameter_examples = metadata.get('parameter_examples', {})
+        print(f"[COMPOSIO_PLUGIN] 🔍 VALUE_RESOLUTION: Found {len(parameter_examples)} param examples: {list(parameter_examples.keys())}")
+        
+        # Build resolver graph from response schemas (cached)
+        resolver_graph = self._build_resolver_graph()
+        
+        resolved = params.copy()
+        app_prefix = action_id.split('_')[0].upper() if '_' in action_id else ''
+        
+        for param_name, param_value in params.items():
+            if not isinstance(param_value, str) or not param_value:
+                continue
+            
+            # Get examples for this parameter from DB
+            examples = parameter_examples.get(param_name, [])
+            
+            # Also check camelCase/snake_case variations
+            if not examples:
+                param_snake = re.sub(r'(?<!^)(?=[A-Z])', '_', param_name).lower()
+                for key, val in parameter_examples.items():
+                    if re.sub(r'(?<!^)(?=[A-Z])', '_', key).lower() == param_snake:
+                        examples = val
+                        break
+            
+            # Check if value matches examples format (if we have examples)
+            if examples and self._value_matches_examples(param_value, examples):
+                print(f"[COMPOSIO_PLUGIN] 🔍 VALUE_RESOLUTION: {param_name}='{param_value}' matches examples format")
+                continue  # Value format looks valid
+            
+            # FALLBACK: Detect obvious placeholder patterns without needing examples
+            # This catches: 'your_spreadsheet_id_here', 'sample_value', etc.
+            is_placeholder = self._is_obvious_placeholder(param_value, param_name, action_id)
+            if not is_placeholder:
+                # Doesn't look like placeholder - assume valid
+                continue
+            
+            print(f"[COMPOSIO_PLUGIN] 🔍 VALUE_RESOLUTION: {param_name}='{param_value}' needs resolution")
+            
+            # Value doesn't match - need to resolve
+            # Normalize param name for resolver lookup
+            param_key = re.sub(r'(?<!^)(?=[A-Z])', '_', param_name).lower()
+            
+            # Find resolvers for this param type
+            resolvers = resolver_graph.get(param_key, [])
+            if not resolvers:
+                # Try variations
+                for key in resolver_graph.keys():
+                    if key.replace('_', '') == param_key.replace('_', ''):
+                        resolvers = resolver_graph[key]
+                        break
+            
+            if not resolvers:
+                continue
+            
+            # Find best resolver (prefer same app)
+            best_resolver = None
+            for r in resolvers:
+                if r['app'] == app_prefix:
+                    best_resolver = r
+                    break
+            if not best_resolver:
+                best_resolver = resolvers[0]
+            
+            # Execute resolver
+            logger.info(f"[COMPOSIO_PLUGIN] 🔍 Resolving {param_name}='{param_value}' via {best_resolver['action']}")
+            
+            try:
+                resolved_id = self._execute_resolver(
+                    resolver=best_resolver,
+                    search_value=param_value,
+                    entity_id=entity_id
+                )
+                
+                if resolved_id:
+                    resolved[param_name] = resolved_id
+                    logger.info(f"[COMPOSIO_PLUGIN] ✅ Resolved: '{param_value}' → '{resolved_id}'")
+                    
+            except Exception as e:
+                logger.warning(f"[COMPOSIO_PLUGIN] Resolution error: {e}")
+        
+        return resolved
+    
+    def _execute_resolver(
+        self,
+        resolver: Dict[str, Any],
+        search_value: str,
+        entity_id: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Execute a resolver action to convert name → id.
+        
+        Uses schema-derived info to call search and extract ID.
+        """
+        action_id = resolver['action']
+        search_param = resolver['search_param']
+        id_path = resolver['id_path']
+        name_path = resolver.get('name_path')
+        
+        search_params = {search_param: search_value}
+        
+        try:
+            if self._is_simulation_mode():
+                result, _ = self._get_mock_response(action_id, search_params)
+            else:
+                service = self._get_service()
+                
+                if not entity_id:
+                    entity_id = self.ctx.get_session_var("_composio_entity_id", None) or \
+                                self.config.get('entity_id', 'default')
+                
+                exec_result = service.execute_action(
+                    action_name=action_id,
+                    params=search_params,
+                    entity_id=entity_id
+                )
+                
+                if not (exec_result.get('success') or exec_result.get('successfull')):
+                    return None
+                
+                result = exec_result.get('data', exec_result)
+            
+            # Extract ID using schema-derived path
+            return self._extract_by_path(result, id_path, search_value, name_path)
+            
+        except Exception as e:
+            logger.warning(f"[COMPOSIO_PLUGIN] Resolver failed: {e}")
+            return None
+    
+    def _extract_by_path(
+        self,
+        data: Any,
+        id_path: str,
+        search_value: str,
+        name_path: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Extract value from data using schema-derived path.
+        
+        Navigates path like 'data.items[0].id' and matches by name if possible.
+        """
+        if not data or not isinstance(data, dict):
+            return None
+        
+        def navigate(obj: Any, path_parts: List[str], match_name: bool = False):
+            if not path_parts or obj is None:
+                return obj
+            
+            part = path_parts[0]
+            remaining = path_parts[1:]
+            
+            # Handle array notation: 'items[0]'
+            array_match = re.match(r'(\w+)\[(\d+)\]', part)
+            if array_match:
+                key, idx = array_match.groups()
+                if isinstance(obj, dict) and key in obj:
+                    arr = obj[key]
+                    if isinstance(arr, list) and arr:
+                        # If we have a name path, try to match by name
+                        if match_name and name_path:
+                            name_parts = name_path.split('.')
+                            # Find the name field in array items
+                            for item in arr:
+                                if isinstance(item, dict):
+                                    # Try to get name from item
+                                    name_val = self._get_nested_value(item, name_parts[-1:])
+                                    if name_val and str(name_val).lower() == search_value.lower():
+                                        return navigate(item, remaining, False)
+                        # Fallback to index
+                        idx_int = int(idx)
+                        if len(arr) > idx_int:
+                            return navigate(arr[idx_int], remaining, match_name)
+                return None
+            
+            # Regular key access
+            if isinstance(obj, dict) and part in obj:
+                return navigate(obj[part], remaining, match_name)
+            
+            return None
+        
+        try:
+            path_parts = id_path.split('.')
+            result = navigate(data, path_parts, match_name=True)
+            
+            if isinstance(result, str):
+                return result
+            elif isinstance(result, dict):
+                # Try to find any 'id' field in the result
+                for key, val in result.items():
+                    if key.lower().endswith('id') and isinstance(val, str):
+                        return val
+            
+            return None
+        except Exception:
+            return None
+    
+    def _get_nested_value(self, obj: Any, path_parts: List[str]) -> Any:
+        """Get nested value from object using path parts."""
+        current = obj
+        for part in path_parts:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            else:
+                return None
+        return current
+    
     def _resolve_action(self, action_name: str) -> str:
         """
         Resolve TaskWeaver's action name to actual DB action ID.
@@ -555,14 +1304,22 @@ class ComposioAction(Plugin):
         # =====================================================================
         # FALLBACK: Minimal success response (schema missing - DATA issue)
         # =====================================================================
-        # If we get here, the action's response_schema needs to be populated in DB.
-        # This is NOT a code fix - it's a data fix via sync_composio_schemas command.
-        logger.warning(f"[COMPOSIO_PLUGIN] MISSING SCHEMA: {action_name} - run 'python manage.py sync_composio_schemas'")
+        # If we get here, the action doesn't exist or isn't synced.
+        # Return a CLEAR ERROR so LLM doesn't keep retrying with non-existent action.
+        logger.warning(f"[COMPOSIO_PLUGIN] ACTION NOT FOUND: {action_name} - this action may not exist!")
         
-        mock_data = {'success': True, 'status': 'completed', '_schema_missing': True}
+        # Suggest similar actions that DO exist
+        suggestion = self._suggest_similar_actions(action_name)
+        
+        mock_data = {
+            'success': False, 
+            'error': f"ACTION '{action_name}' DOES NOT EXIST. {suggestion}",
+            '_action_not_found': True
+        }
         description = (
-            f"Executed {action_name} (simulated - schema not in DB).\n"
-            f"To get accurate mock data, run: python manage.py sync_composio_schemas"
+            f"ERROR: Action {action_name} does not exist in the system.\n"
+            f"{suggestion}\n"
+            f"Please use a different action or approach."
         )
         return mock_data, description
     
@@ -638,20 +1395,46 @@ class ComposioAction(Plugin):
         cache = self._load_schema_cache()
         
         # Try exact match first, then case-insensitive
-        response_schema = cache.get(action_name) or cache.get(action_name.upper())
+        entry = cache.get(action_name) or cache.get(action_name.upper())
         
-        if not response_schema:
+        if not entry:
             print(f"[COMPOSIO_PLUGIN] Schema not in cache: {action_name}")
             return None
         
+        # Handle both old format (entry = response_schema) and new format (entry = {response_schema, ...})
+        if isinstance(entry, dict) and 'response_schema' in entry:
+            response_schema = entry['response_schema']
+            response_examples = entry.get('response_examples', {})
+        else:
+            response_schema = entry  # Old format
+            response_examples = {}
+        
         print(f"[COMPOSIO_PLUGIN] Found schema in cache for {action_name}")
         
-        # Generate mock based on schema properties
-        full_mock = self._generate_mock_from_schema(response_schema)
+        # SCALABLE PRIORITY:
+        # 1. Use response_examples if available AND useful (actual examples from Composio API)
+        # 2. Fall back to schema-based generation with property name inference
+        full_mock = None
+        
+        if response_examples and isinstance(response_examples, dict) and len(response_examples) > 0:
+            print(f"[COMPOSIO_PLUGIN] ✅ Using response_examples for {action_name} (SCALABLE)")
+            merged = self._merge_examples_with_schema(response_schema, response_examples)
+            
+            # Validate merged result is useful (not empty/trivial)
+            if merged and isinstance(merged, dict) and len(merged) > 0:
+                full_mock = merged
+            else:
+                print(f"[COMPOSIO_PLUGIN] ⚠️ response_examples produced empty result, falling back to schema")
+        
+        if full_mock is None:
+            # Fall back to schema-based generation
+            full_mock = self._generate_mock_from_schema(response_schema)
         
         # UNWRAP: Real API returns result.get('data', result)
+        # This applies to BOTH example-based and schema-based mocks
         if isinstance(full_mock, dict) and 'data' in full_mock:
             mock_data = full_mock['data']
+            print(f"[COMPOSIO_PLUGIN] Unwrapped 'data' wrapper, keys: {list(mock_data.keys()) if isinstance(mock_data, dict) else type(mock_data)}")
         else:
             mock_data = full_mock
         
@@ -664,10 +1447,141 @@ class ComposioAction(Plugin):
             f"Use the structure above to access the data correctly."
         )
         
-        print(f"[COMPOSIO_PLUGIN] Generated schema-based mock from cache for {action_name}")
+        print(f"[COMPOSIO_PLUGIN] Generated mock from cache for {action_name}")
         return mock_data, description
     
-    def _generate_mock_from_schema(self, schema: Dict[str, Any], depth: int = 0, prop_name: str = "") -> Any:
+    def _get_schema_max_depth(self, schema: Dict[str, Any], current: int = 0, visited: set = None) -> int:
+        """Calculate the maximum nesting depth of a schema dynamically."""
+        if visited is None:
+            visited = set()
+        
+        # Prevent infinite recursion from circular refs
+        schema_id = id(schema)
+        if schema_id in visited:
+            return current
+        visited.add(schema_id)
+        
+        max_depth = current
+        schema_type = schema.get('type', 'object')
+        
+        if schema_type == 'object':
+            for prop_schema in schema.get('properties', {}).values():
+                if isinstance(prop_schema, dict):
+                    max_depth = max(max_depth, self._get_schema_max_depth(prop_schema, current + 1, visited))
+        elif schema_type == 'array':
+            items = schema.get('items', {})
+            if isinstance(items, dict):
+                max_depth = max(max_depth, self._get_schema_max_depth(items, current + 1, visited))
+        
+        return max_depth
+    
+    def _merge_examples_with_schema(self, schema: Dict[str, Any], examples: Dict[str, Any], depth: int = 0, max_depth: int = None) -> Any:
+        """
+        Merge response_examples with schema structure for complete mock data.
+        
+        SCALABLE: Uses actual examples from Composio API when available.
+        Falls back to schema-based generation for fields without examples.
+        
+        IMPORTANT: Handles wrapper structures like { data: { spreadsheets: [...] } }
+        by recursively merging nested objects even if examples are partial.
+        
+        Args:
+            schema: The response JSON schema
+            examples: Extracted examples from response_schema
+            depth: Current recursion depth
+            max_depth: Dynamic max depth (calculated from schema if not provided)
+            
+        Returns:
+            Complete mock data with examples merged in
+        """
+        # Calculate max_depth dynamically on first call
+        if max_depth is None:
+            max_depth = min(self._get_schema_max_depth(schema) + 2, 15)  # Add buffer, cap at 15
+        
+        if depth > max_depth:
+            return {}
+        
+        schema_type = schema.get('type', 'object')
+        
+        if schema_type == 'object':
+            properties = schema.get('properties', {})
+            result = {}
+            
+            for prop_name, prop_schema in list(properties.items())[:15]:
+                example_value = examples.get(prop_name) if isinstance(examples, dict) else None
+                
+                # Check if example is useful (not empty dict/list, not None)
+                example_is_useful = (
+                    example_value is not None and
+                    example_value != {} and
+                    example_value != [] and
+                    example_value != ''
+                )
+                
+                if example_is_useful:
+                    # For nested objects, recursively merge
+                    if prop_schema.get('type') == 'object' and isinstance(example_value, dict):
+                        result[prop_name] = self._merge_examples_with_schema(
+                            prop_schema, example_value, depth + 1, max_depth
+                        )
+                    # For arrays, check if it has useful content
+                    elif prop_schema.get('type') == 'array' and isinstance(example_value, list):
+                        # RECURSIVELY merge array items with items schema
+                        items_schema = prop_schema.get('items', {})
+                        items_type = items_schema.get('type', 'unknown')
+                        
+                        if len(example_value) > 0 and items_type == 'object':
+                            # Merge each array item with the items schema to add missing fields
+                            merged_items = []
+                            for item in example_value[:3]:
+                                if isinstance(item, dict):
+                                    merged = self._merge_examples_with_schema(items_schema, item, depth + 1, max_depth)
+                                    merged_items.append(merged)
+                                else:
+                                    merged_items.append(item)
+                            result[prop_name] = merged_items if merged_items else [self._generate_mock_from_schema(items_schema, depth + 1, prop_name, max_depth)]
+                        else:
+                            # Empty array or primitive items - generate from schema
+                            result[prop_name] = self._generate_mock_from_schema(prop_schema, depth + 1, prop_name, max_depth)
+                    else:
+                        # Use primitive example value directly
+                        result[prop_name] = example_value
+                else:
+                    # No useful example - generate from schema
+                    result[prop_name] = self._generate_mock_from_schema(prop_schema, depth + 1, prop_name, max_depth)
+            
+            return result
+        
+        elif schema_type == 'array':
+            items_schema = schema.get('items', {})
+            items_type = items_schema.get('type', 'unknown')
+            print(f"[COMPOSIO_PLUGIN] MERGE ARRAY: examples={type(examples)}, len={len(examples) if isinstance(examples, list) else 'N/A'}, items_type={items_type}")
+            
+            # If we have array examples, MERGE each item with the items schema
+            # This ensures missing fields like 'id', 'name' are added from schema
+            if isinstance(examples, list) and len(examples) > 0:
+                merged_items = []
+                for idx, item_example in enumerate(examples[:3]):  # Limit to 3 items
+                    print(f"[COMPOSIO_PLUGIN]   Item {idx}: type={type(item_example)}, keys={list(item_example.keys()) if isinstance(item_example, dict) else 'N/A'}")
+                    if isinstance(item_example, dict) and items_type == 'object':
+                        # Recursively merge each array item with the items schema
+                        merged_item = self._merge_examples_with_schema(items_schema, item_example, depth + 1, max_depth)
+                        print(f"[COMPOSIO_PLUGIN]   Merged keys: {list(merged_item.keys()) if isinstance(merged_item, dict) else 'N/A'}")
+                        merged_items.append(merged_item)
+                    elif item_example not in [None, {}, '', []]:
+                        merged_items.append(item_example)
+                if merged_items:
+                    return merged_items
+            # Otherwise generate from schema
+            return [self._generate_mock_from_schema(items_schema, depth + 1, "", max_depth)]
+        
+        else:
+            # For primitive types, use example if available and not empty
+            if examples is not None and examples != '' and examples != {} and examples != []:
+                return examples
+            return self._generate_mock_from_schema(schema, depth, "", max_depth)
+    
+    def _generate_mock_from_schema(self, schema: Dict[str, Any], depth: int = 0, prop_name: str = "", max_depth: int = None) -> Any:
         """
         Recursively generate mock data from JSON schema.
         
@@ -683,7 +1597,11 @@ class ComposioAction(Plugin):
         - CRM: contacts, deals, leads (Salesforce, HubSpot)
         - Generic: data, results, items, entries
         """
-        if depth > 3:  # Prevent infinite recursion
+        # Calculate max_depth dynamically on first call
+        if max_depth is None:
+            max_depth = min(self._get_schema_max_depth(schema) + 2, 15)  # Add buffer, cap at 15
+        
+        if depth > max_depth:  # Dynamic depth limit
             return {}
         
         schema_type = schema.get('type', 'object')
@@ -693,21 +1611,24 @@ class ComposioAction(Plugin):
         # SPREADSHEET/TABLE PATTERNS (Google Sheets, Excel, Airtable, Smartsheet)
         # =====================================================================
         if prop_lower == 'values':
-            # 2D array: headers + data rows
+            # 2D array: headers + data rows (6 columns to cover most use cases)
+            # Columns cover: identity, contact, category, numeric, text, date
             return [
-                ['Date', 'Amount', 'Description'],
-                ['2025-01-15', '150.00', 'Sample item 1'],
-                ['2025-02-15', '200.00', 'Sample item 2'],
+                ['Name', 'Email', 'Category', 'Amount', 'Notes', 'Date'],
+                ['John Smith', 'john@example.com', 'Research', '150.00', 'Sample notes 1', '2025-01-15'],
+                ['Jane Doe', 'jane@example.com', 'Development', '200.00', 'Sample notes 2', '2025-02-15'],
+                ['Bob Wilson', 'bob@example.com', 'Analysis', '175.00', 'Sample notes 3', '2025-03-15'],
             ]
         elif prop_lower == 'valueranges':
-            # Google Sheets BATCH_GET response
+            # Google Sheets BATCH_GET response (6 columns to cover most use cases)
             return [{
-                'range': 'Sheet1!A1:C3',
+                'range': 'Sheet1!A1:F4',
                 'majorDimension': 'ROWS',
                 'values': [
-                    ['Date', 'Amount', 'Description'],
-                    ['2025-01-15', '150.00', 'Sample item 1'],
-                    ['2025-02-15', '200.00', 'Sample item 2'],
+                    ['Name', 'Email', 'Category', 'Amount', 'Notes', 'Date'],
+                    ['John Smith', 'john@example.com', 'Research', '150.00', 'Sample notes 1', '2025-01-15'],
+                    ['Jane Doe', 'jane@example.com', 'Development', '200.00', 'Sample notes 2', '2025-02-15'],
+                    ['Bob Wilson', 'bob@example.com', 'Analysis', '175.00', 'Sample notes 3', '2025-03-15'],
                 ]
             }]
         elif prop_lower == 'rows':
@@ -859,19 +1780,47 @@ class ComposioAction(Plugin):
         
         if schema_type == 'object':
             properties = schema.get('properties', {})
-            mock_obj = {}
             
-            for pname, prop_schema in list(properties.items())[:10]:  # Limit to 10 props
-                mock_obj[pname] = self._generate_mock_from_schema(prop_schema, depth + 1, pname)
+            # DYNAMIC FIX: If schema says 'object' but property name suggests ID/string,
+            # return a sensible string value instead of empty object
+            # This handles malformed schemas where 'id', 'name', etc. are typed as objects
+            if not properties:  # Empty object schema - use property name for context
+                if prop_lower.endswith('id') or prop_lower.endswith('_id') or prop_lower == 'id':
+                    entity = prop_lower.replace('_id', '').replace('id', '').strip('_')
+                    return f'{entity}_abc123xyz' if entity else 'id_abc123xyz'
+                elif prop_lower == 'name' or prop_lower.endswith('name'):
+                    return 'Sample Name'
+                elif prop_lower == 'title':
+                    return 'Sample Title'
+                elif 'email' in prop_lower:
+                    return 'example@domain.com'
+                elif 'url' in prop_lower or 'link' in prop_lower:
+                    return 'https://example.com/resource'
+                elif 'type' in prop_lower or 'kind' in prop_lower or 'mimetype' in prop_lower:
+                    return 'default_type'
+                elif 'size' in prop_lower:
+                    return 1024
+                elif 'time' in prop_lower or 'date' in prop_lower:
+                    return '2025-01-15T10:00:00Z'
+                elif 'count' in prop_lower:
+                    return 1
+                elif prop_lower in ('shared', 'starred', 'trashed', 'private', 'public'):
+                    return False
+                else:
+                    return 'sample_value'
+            
+            mock_obj = {}
+            for pname, prop_schema in list(properties.items())[:15]:  # Limit to 15 props for completeness
+                mock_obj[pname] = self._generate_mock_from_schema(prop_schema, depth + 1, pname, max_depth)
             
             return mock_obj
             
         elif schema_type == 'array':
             items_schema = schema.get('items', {})
-            return [self._generate_mock_from_schema(items_schema, depth + 1, prop_name)]
+            return [self._generate_mock_from_schema(items_schema, depth + 1, prop_name, max_depth)]
             
         elif schema_type == 'string':
-            # Check for format hints
+            # Check for format hints first
             format_hint = schema.get('format', '')
             if 'email' in format_hint:
                 return 'example@domain.com'
@@ -879,6 +1828,31 @@ class ComposioAction(Plugin):
                 return '2024-01-01'
             elif 'uri' in format_hint or 'url' in format_hint:
                 return 'https://example.com'
+            
+            # DYNAMIC: Generate context-aware values based on property name
+            # Works for ANY API - spreadsheetId, documentId, projectId, channelId, etc.
+            if prop_lower.endswith('id') or prop_lower.endswith('_id'):
+                # Extract the entity name: spreadsheetId -> spreadsheet, channel_id -> channel
+                entity = prop_lower.replace('_id', '').replace('id', '').strip('_')
+                if entity:
+                    return f'{entity}_abc123xyz'  # e.g., 'spreadsheet_abc123xyz'
+                return 'id_abc123xyz'
+            elif prop_lower == 'name' or prop_lower.endswith('name'):
+                return 'Sample Name'
+            elif prop_lower == 'title':
+                return 'Sample Title'
+            elif prop_lower == 'description':
+                return 'Sample description text'
+            elif 'email' in prop_lower:
+                return 'example@domain.com'
+            elif 'url' in prop_lower or 'link' in prop_lower:
+                return 'https://example.com/resource'
+            elif 'path' in prop_lower:
+                return '/sample/path'
+            elif 'type' in prop_lower or 'kind' in prop_lower:
+                return 'default_type'
+            elif 'status' in prop_lower or 'state' in prop_lower:
+                return 'active'
             else:
                 return 'sample_value'
                 
@@ -1034,6 +2008,27 @@ class ComposioAction(Plugin):
         # =====================================================================
         if self._is_simulation_mode():
             logger.info(f"[COMPOSIO_PLUGIN] SIMULATION MODE: {action_name}")
+            
+            # =====================================================================
+            # PLACEHOLDER DETECTION IN SIMULATION MODE
+            # =====================================================================
+            # Even in simulation, detect obvious placeholders and return an error
+            # so the LLM is forced to generate proper code with SEARCH steps.
+            # =====================================================================
+            for param_name, param_value in (params or {}).items():
+                if isinstance(param_value, str) and param_value:
+                    if self._is_obvious_placeholder(param_value, param_name, action_name):
+                        # Build dynamic error message based on action context
+                        search_suggestion = self._suggest_search_action(action_name, param_name)
+                        
+                        error_msg = (
+                            f"ERROR: Parameter '{param_name}' has placeholder value '{param_value}'. "
+                            f"You must first use a SEARCH action to find the actual {param_name}. "
+                            f"{search_suggestion}"
+                        )
+                        print(f"[COMPOSIO_PLUGIN] ❌ {error_msg}")
+                        return {"error": error_msg, "success": False}, error_msg
+            
             return self._get_mock_response(action_name, params)
         
         # =====================================================================
@@ -1048,7 +2043,7 @@ class ComposioAction(Plugin):
             logger.info(f"[COMPOSIO_PLUGIN] Action resolved: {original_action} -> {action_name}")
         
         # =====================================================================
-        # PARAMETER RESOLUTION (sql_pull_data pattern)
+        # PARAMETER NAME RESOLUTION (sql_pull_data pattern)
         # =====================================================================
         # TaskWeaver's LLM may use approximate param names like 'name' instead of 'title'.
         # Resolve to actual schema params using semantic matching.
@@ -1058,7 +2053,22 @@ class ComposioAction(Plugin):
         
         if params != original_params:
             changed = {k: v for k, v in params.items() if k not in original_params or original_params.get(k) != v}
-            logger.info(f"[COMPOSIO_PLUGIN] Params resolved: {list(original_params.keys())} -> {list(params.keys())}")
+            logger.info(f"[COMPOSIO_PLUGIN] Param names resolved: {list(original_params.keys())} -> {list(params.keys())}")
+        
+        # =====================================================================
+        # PARAMETER VALUE RESOLUTION (sql_pull_data pattern)
+        # =====================================================================
+        # If a param value looks like a human name but schema expects an ID,
+        # automatically call a SEARCH/FIND action to resolve it.
+        # Uses parameter_examples from DB to detect format mismatch.
+        # =====================================================================
+        params_before_value_resolution = params.copy()
+        params = self._resolve_param_values(action_name, params, entity_id)
+        
+        if params != params_before_value_resolution:
+            for k, v in params.items():
+                if params_before_value_resolution.get(k) != v:
+                    logger.info(f"[COMPOSIO_PLUGIN] Param value resolved: {k}='{params_before_value_resolution.get(k)}' -> '{v}'")
         
         try:
             service = self._get_service()
