@@ -1358,6 +1358,7 @@ class ComposioAction(Plugin):
                 return None
             
             response_schema = action.response_schema
+            action_description = action.description or ''
             
             # Generate mock based on schema properties
             full_mock = self._generate_mock_from_schema(response_schema)
@@ -1372,13 +1373,17 @@ class ComposioAction(Plugin):
             # Use dynamic structure hint (same as real API)
             structure_hint = self._describe_data_structure(mock_data)
             
+            # CRITICAL: Surface action description for semantic mismatch detection!
+            # LLM sees "ACTION PURPOSE: Creates a new Google Spreadsheet" and can realize
+            # it's wrong when user wanted "create folder"
             description = (
                 f"Successfully executed {action_name}.\n"
+                f"ACTION PURPOSE: {action_description}\n"
                 f"RESPONSE STRUCTURE: {structure_hint}\n"
                 f"Use the structure above to access the data correctly."
             )
             
-            logger.info(f"[COMPOSIO_PLUGIN] SCHEMA-BASED mock for {action_name} (from DB)")
+            logger.info(f"[COMPOSIO_PLUGIN] SCHEMA-BASED mock for {action_name} (from DB, desc: {action_description[:50]}...)")
             return mock_data, description
             
         except ImportError:
@@ -1405,9 +1410,11 @@ class ComposioAction(Plugin):
         if isinstance(entry, dict) and 'response_schema' in entry:
             response_schema = entry['response_schema']
             response_examples = entry.get('response_examples', {})
+            action_description = entry.get('description', '')
         else:
             response_schema = entry  # Old format
             response_examples = {}
+            action_description = ''
         
         print(f"[COMPOSIO_PLUGIN] Found schema in cache for {action_name}")
         
@@ -1441,13 +1448,17 @@ class ComposioAction(Plugin):
         # Use dynamic structure hint
         structure_hint = self._describe_data_structure(mock_data)
         
+        # CRITICAL: Surface action description for semantic mismatch detection!
+        # LLM sees "ACTION PURPOSE: Creates a new Google Spreadsheet" and can realize
+        # it's wrong when user wanted "create folder"
         description = (
             f"Successfully executed {action_name}.\n"
+            f"ACTION PURPOSE: {action_description}\n"
             f"RESPONSE STRUCTURE: {structure_hint}\n"
             f"Use the structure above to access the data correctly."
         )
         
-        print(f"[COMPOSIO_PLUGIN] Generated mock from cache for {action_name}")
+        print(f"[COMPOSIO_PLUGIN] Generated mock from cache for {action_name} (desc: {action_description[:50] if action_description else 'N/A'}...)")
         return mock_data, description
     
     def _get_schema_max_depth(self, schema: Dict[str, Any], current: int = 0, visited: set = None) -> int:
