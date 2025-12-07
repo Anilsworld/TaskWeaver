@@ -222,12 +222,51 @@ class FormCollect(Plugin):
         
         return result
     
+    def _get_mock_value_from_registry(self, field_type: str, field_name: str = "") -> Any:
+        """
+        Get mock value from FieldTypeRegistry (SCALABLE: data-driven, not hardcoded).
+        
+        MIRRORS TOOLS PATTERN:
+        - Tools use `parameter_examples` and `response_examples` from DB
+        - Forms use `mock_examples` from FieldTypeRegistry
+        
+        Priority:
+        1. Check mock_examples for field_name keyword match → pick from list
+        2. Fall back to mock_value
+        """
+        try:
+            from apps.py_workflows.generation.forms.field_types import REGISTRY
+            import random
+            
+            field_def = REGISTRY.get(field_type)
+            if not field_def:
+                return None
+            
+            # Priority 1: Check mock_examples for keyword match (like tools' parameter_examples)
+            if field_def.mock_examples and field_name:
+                field_name_lower = field_name.lower()
+                for keyword, examples in field_def.mock_examples.items():
+                    if keyword in field_name_lower and examples:
+                        # Pick a random example for variety
+                        return random.choice(examples)
+            
+            # Priority 2: Fall back to mock_value
+            if field_def.mock_value is not None:
+                return field_def.mock_value
+                
+        except ImportError:
+            pass
+        return None
+    
     def _generate_simulated_data(self, form_schema: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate simulated form data for workflow generation phase.
         
-        Returns realistic mock data so TaskWeaver can continue generating
-        code for subsequent steps that depend on this form's output.
+        SCALABLE APPROACH (mirrors composio_action pattern):
+        1. Use field default if provided
+        2. Use first option for select types
+        3. Use mock_value from FieldTypeRegistry (DATA, not code)
+        4. Fallback to sensible defaults
         """
         simulated_data = {}
         form_id = form_schema.get('form_id', 'form')
@@ -238,12 +277,12 @@ class FormCollect(Plugin):
             options = field.get('options', [])
             default = field.get('default')
             
-            # Use default if provided
+            # Priority 1: Use default if provided in schema
             if default is not None:
                 simulated_data[name] = default
                 continue
             
-            # Use first option for select types
+            # Priority 2: Use first option for select types
             if field_type in ('select', 'multiselect') and options:
                 if field_type == 'multiselect':
                     simulated_data[name] = [options[0]]
@@ -251,7 +290,17 @@ class FormCollect(Plugin):
                     simulated_data[name] = options[0]
                 continue
             
-            # Generate type-appropriate simulated values
+            # Priority 3: Use mock_examples/mock_value from registry (SCALABLE - like tools)
+            registry_mock = self._get_mock_value_from_registry(field_type, name)
+            if registry_mock is not None:
+                # For dynamic values that need form context
+                if isinstance(registry_mock, str) and '{form_id}' in registry_mock:
+                    simulated_data[name] = registry_mock.format(form_id=form_id)
+                else:
+                    simulated_data[name] = registry_mock
+                continue
+            
+            # Priority 4: Fallback defaults (only if registry doesn't have mock_value)
             if field_type == 'email':
                 simulated_data[name] = f"user_{form_id}@example.com"
             elif field_type == 'tel':
@@ -261,7 +310,7 @@ class FormCollect(Plugin):
             elif field_type == 'datetime':
                 simulated_data[name] = "2025-01-15T10:00:00"
             elif field_type == 'number':
-                simulated_data[name] = 0
+                simulated_data[name] = 100
             elif field_type == 'boolean':
                 simulated_data[name] = True
             elif field_type == 'textarea':
@@ -269,7 +318,6 @@ class FormCollect(Plugin):
             elif field_type == 'url':
                 simulated_data[name] = "https://example.com"
             else:
-                # Default to text
                 simulated_data[name] = f"Simulated {self._humanize_field_name(name)}"
         
         # Add form metadata

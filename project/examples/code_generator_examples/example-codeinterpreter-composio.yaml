@@ -12,12 +12,12 @@ rounds:
         send_to: Planner
         attachment_list:
           - type: thought
-            content: I will use composio_action for external API calls - spreadsheet read and email.
+            content: I will use composio_action for external API calls - spreadsheet read and email. These are common actions so I can use them directly.
           - type: reply_type
             content: python
           - type: reply_content
             content: |-
-              # Read spreadsheet using composio_action
+              # Read spreadsheet using composio_action (common action - no search needed)
               data, desc = composio_action(
                   "GOOGLESHEETS_BATCH_GET",
                   {"spreadsheet_id": "abc123", "ranges": ["Sheet1!A1:D10"]},
@@ -27,7 +27,7 @@ rounds:
               # Process data
               summary = f"Found {len(data.get('values', []))} rows"
               
-              # Send email with summary using composio_action
+              # Send email with summary using composio_action (common action)
               email_result, email_desc = composio_action(
                   "GMAIL_SEND_EMAIL",
                   {"to": "user@example.com", "subject": "Data Summary", "body": summary},
@@ -43,4 +43,40 @@ rounds:
             content: SUCCESS
           - type: execution_result
             content: Spreadsheet read and email sent successfully.
+
+  - user_query: Create a shared folder in Google Drive for project documents
+    state: finished
+    post_list:
+      - message: Create a shared folder in Google Drive for project documents
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list: []
+      - message: Successfully created shared folder in Google Drive.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: I need to create a folder in Google Drive. I'll use GOOGLEDRIVE_CREATE_FOLDER which creates folders (not GOOGLESHEETS which creates spreadsheets).
+          - type: reply_type
+            content: python
+          - type: reply_content
+            content: |-
+              # Create a folder in Google Drive (NOT a spreadsheet!)
+              # GOOGLEDRIVE_CREATE_FOLDER creates folders
+              # GOOGLESHEETS_CREATE_GOOGLE_SHEET1 creates spreadsheets - WRONG for folders!
+              folder, desc = composio_action(
+                  "GOOGLEDRIVE_CREATE_FOLDER",
+                  {"name": "Project Documents"},
+                  None
+              )
+              
+              folder
+          - type: verification
+            content: CORRECT
+          - type: code_error
+            content: No code error.
+          - type: execution_status
+            content: SUCCESS
+          - type: execution_result
+            content: Created folder 'Project Documents' in Google Drive.
 

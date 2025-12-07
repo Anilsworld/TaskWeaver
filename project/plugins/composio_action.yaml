@@ -6,13 +6,38 @@ description: >-
   Execute external API actions via Composio (800+ integrations).
   
   USE THIS FOR: Flights, hotels, travel, emails (Gmail), spreadsheets (Google Sheets), 
-  messaging (Slack), calendars, CRM, and any external service or API.
+  Google Drive (folders, files), messaging (Slack), calendars, CRM, and any external service or API.
   
   This is the PRIMARY plugin for interacting with external services.
-  Action IDs follow the pattern: APPNAME_ACTION_NAME (e.g., GMAIL_SEND_EMAIL, COMPOSIO_SEARCH_FLIGHTS).
+  
+  CRITICAL - FINDING THE RIGHT ACTION:
+  =====================================
+  There are 17,000+ actions available! For any action NOT listed in the common examples below,
+  you MUST first use COMPOSIO_SEARCH_TOOLS to find the correct action ID.
+  
+  Example: If user wants "create a folder in Google Drive":
+  1. Search: tools, desc = composio_action("COMPOSIO_SEARCH_TOOLS", {"queries": [{"use_case": "create folder in Google Drive"}]})
+  2. Use returned action: result, desc = composio_action("GOOGLEDRIVE_CREATE_FOLDER", {...})
+  
+  DO NOT guess action names! Search first to get the exact action ID.
   OAuth authentication is handled automatically.
 
 examples: |-
+  # ========== CRITICAL: FINDING THE RIGHT ACTION ==========
+  # For ANY action not listed below, SEARCH FIRST to find the correct action ID!
+  # There are 17,000+ actions - never guess the action name.
+  
+  # Search for actions by describing what you need:
+  tools, desc = composio_action("COMPOSIO_SEARCH_TOOLS", {
+      "queries": [{"use_case": "create folder in Google Drive"}]
+  })
+  # Returns the exact action ID (e.g., GOOGLEDRIVE_CREATE_FOLDER) with schema
+  # Then use: result, desc = composio_action("GOOGLEDRIVE_CREATE_FOLDER", {"name": "My Folder"})
+  
+  # ========== GOOGLE DRIVE (folders, files) ==========
+  # Create a folder (NOT a spreadsheet!)
+  folder, desc = composio_action("GOOGLEDRIVE_CREATE_FOLDER", {"name": "Event Documents"})
+  
   # ========== GMAIL ==========
   # Fetch emails (get/read/list emails)
   emails, desc = composio_action("GMAIL_FETCH_EMAILS", {"query": "", "max_results": 10, "user_id": "me"})
@@ -20,21 +45,22 @@ examples: |-
   # Send an email
   result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "user@example.com", "subject": "Hello", "body": "Message", "user_id": "me"})
   
-  # Forward an email (send copy to another recipient)
-  result, desc = composio_action("GMAIL_SEND_EMAIL", {"recipient_email": "forward@example.com", "subject": "Fwd: Original", "body": original_email_content, "user_id": "me"})
-  
-  # ========== GOOGLE SHEETS ==========
+  # ========== GOOGLE SHEETS (spreadsheets, NOT folders!) ==========
   # Read data from spreadsheet (BATCH_GET)
   sheet_data, desc = composio_action("GOOGLESHEETS_BATCH_GET", {"spreadsheet_id": "...", "ranges": ["Sheet1!A1:Z"]})
   # IMPORTANT: Data is nested in valueRanges[0]['values'], NOT sheet_data['values']!
   values = sheet_data['valueRanges'][0]['values']
   df = pd.DataFrame(values[1:], columns=values[0])  # First row is headers
   
-  # Create a new spreadsheet
+  # Create a new spreadsheet (this creates a SPREADSHEET, not a folder!)
   new_sheet, desc = composio_action("GOOGLESHEETS_CREATE_GOOGLE_SHEET1", {"title": "My Spreadsheet"})
   
   # Add data to spreadsheet
   result, desc = composio_action("GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", {"spreadsheet_id": sheet_id, "range": "Sheet1!A1", "values": [["Name", "Email"], ["John", "john@example.com"]]})
+  
+  # ========== GOOGLE CALENDAR ==========
+  # Create calendar event - SEARCH FIRST to find exact action for your calendar app!
+  tools, desc = composio_action("COMPOSIO_SEARCH_TOOLS", {"queries": [{"use_case": "create calendar event"}]})
   
   # ========== FLIGHTS ==========
   # Search for flights
@@ -47,14 +73,19 @@ parameters:
     description: >-
       Action ID in the format APPNAME_ACTION_NAME (uppercase).
       
-      IMPORTANT ACTION IDs:
+      SEARCH ACTION (use this to find any action!):
+      - COMPOSIO_SEARCH_TOOLS: Find the right action for ANY task. Pass {"queries": [{"use_case": "description of what you need"}]}
+      
+      COMMON ACTION IDs (for these you can skip search):
       - GMAIL_FETCH_EMAILS: Get/read/list emails
       - GMAIL_SEND_EMAIL: Send or forward an email
-      - GOOGLESHEETS_CREATE_GOOGLE_SHEET1: Create a NEW spreadsheet
+      - GOOGLEDRIVE_CREATE_FOLDER: Create a folder in Google Drive (NOT a spreadsheet!)
+      - GOOGLESHEETS_CREATE_GOOGLE_SHEET1: Create a NEW spreadsheet (NOT a folder!)
+      - GOOGLESHEETS_BATCH_GET: Read data from spreadsheet
       - GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND: Add rows/data to EXISTING spreadsheet
-      - GOOGLESHEETS_CREATE_SPREADSHEET_ROW: Add ONE row to existing spreadsheet (NOT for creating new!)
       
-      If the action ID is invalid, an error will be returned with available actions.
+      For ANY other action, use COMPOSIO_SEARCH_TOOLS first to find the exact action ID!
+      If an action ID is invalid, an error will be returned with similar available actions.
       
   - name: params
     type: dict
