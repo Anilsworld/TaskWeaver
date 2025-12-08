@@ -349,10 +349,31 @@ class CodeGenerator(Role):
 
         planning_enrichments = memory.get_shared_memory_entries(entry_type="plan")
 
+        # =====================================================================
+        # COMPOSIO ACTION INJECTION (arch-31)
+        # Inject relevant Composio actions into prompt so LLM knows exact action IDs
+        # This prevents hallucination of action names like "COMPOSIO_SEARCH_TOOLS"
+        # =====================================================================
+        enrichment_contents = [pe.content for pe in planning_enrichments]
+        try:
+            # Dynamic import - same pattern as code_verification.py
+            from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions  # noqa: E501
+            
+            # Get relevant actions based on user query
+            composio_actions = select_composio_actions(query, top_k=10)
+            if composio_actions:
+                enrichment_contents.append(composio_actions)
+                self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")
+        except ImportError:
+            # Composio selector not available, skip silently
+            pass
+        except Exception as e:
+            self.logger.debug(f"[CODE_GENERATOR] Composio action injection skipped: {e}")
+
         prompt = self.compose_prompt(
             rounds,
             self.plugin_pool,
-            planning_enrichments=[pe.content for pe in planning_enrichments],
+            planning_enrichments=enrichment_contents,
         )
 
         self.tracing.set_span_attribute("prompt", json.dumps(prompt, indent=2))

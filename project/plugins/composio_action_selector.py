@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 # Cache for action embeddings
 _action_embeddings_cache: Dict[str, List[float]] = {}
 _action_catalog_cache: List[Dict] = []
+_sentence_model = None  # Cached SentenceTransformer model
+
+
+def _get_sentence_model():
+    """Get or create cached SentenceTransformer model"""
+    global _sentence_model
+    if _sentence_model is None:
+        from sentence_transformers import SentenceTransformer
+        _sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("[ACTION_SELECTOR] Loaded SentenceTransformer model (cached)")
+    return _sentence_model
 
 
 @dataclass
@@ -75,18 +86,25 @@ class ComposioActionSelector:
             
             from apps.integrations.models import ComposioActionSchema
             
-            actions = ComposioActionSchema.objects.all().values(
-                'action_id', 'action_name', 'app__name', 'description', 'parameters'
+            # Use existing embeddings from DB (pre-computed) - much faster!
+            actions = ComposioActionSchema.objects.select_related('integration').values(
+                'action_id', 'action_name', 'integration__integration_name', 'description', 
+                'parameters_schema', 'description_embedding'
             )
             
             for a in actions:
-                self._actions.append(ComposioAction(
+                action = ComposioAction(
                     action_id=a['action_id'],
                     action_name=a['action_name'],
-                    app_name=a['app__name'] or '',
+                    app_name=a['integration__integration_name'] or '',
                     description=a['description'] or '',
-                    parameters=a['parameters'] or {}
-                ))
+                    parameters=a['parameters_schema'] or {}
+                )
+                self._actions.append(action)
+                
+                # Use pre-computed embedding from DB if available
+                if a.get('description_embedding'):
+                    self._embeddings[a['action_id']] = a['description_embedding']
             
             # Cache for future use
             _action_catalog_cache = [
@@ -108,40 +126,52 @@ class ComposioActionSelector:
             return 0
     
     def compute_embeddings(self) -> int:
-        """Compute embeddings for all actions that don't have them"""
+        """
+        Use pre-computed embeddings from DB.
+        Only compute for actions missing embeddings (should be rare).
+        """
         global _action_embeddings_cache
         
         if _action_embeddings_cache:
-            self._embeddings = _action_embeddings_cache
+            self._embeddings.update(_action_embeddings_cache)
             return len(self._embeddings)
         
+        # Most embeddings should already be loaded from DB in load_actions_from_db()
+        # Only compute for actions that don't have pre-computed embeddings
         actions_to_embed = []
         for action in self._actions:
             if action.action_id not in self._embeddings:
-                # Combine action_id, name, and description for embedding
                 text = f"{action.action_id}: {action.action_name}. {action.description}"
                 actions_to_embed.append((action.action_id, text))
         
+        # If we have enough from DB, skip computing
+        if len(self._embeddings) > 0:
+            logger.info(f"[ACTION_SELECTOR] Using {len(self._embeddings)} pre-computed embeddings from DB")
+            if len(actions_to_embed) > 100:
+                # Too many missing - just use what we have from DB
+                logger.info(f"[ACTION_SELECTOR] Skipping {len(actions_to_embed)} missing embeddings (too many)")
+                _action_embeddings_cache = self._embeddings
+                return len(self._embeddings)
+        
         if not actions_to_embed:
+            _action_embeddings_cache = self._embeddings
             return len(self._embeddings)
         
         try:
-            # Try sentence transformers (fast, local)
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer('all-MiniLM-L6-v2')
+            model = _get_sentence_model()
             
             texts = [text for _, text in actions_to_embed]
-            embeddings = model.encode(texts).tolist()
+            embeddings = model.encode(texts, show_progress_bar=False).tolist()
             
             for i, (action_id, _) in enumerate(actions_to_embed):
                 self._embeddings[action_id] = embeddings[i]
             
-            _action_embeddings_cache = self._embeddings
-            logger.info(f"[ACTION_SELECTOR] Computed {len(actions_to_embed)} embeddings")
+            logger.info(f"[ACTION_SELECTOR] Computed {len(actions_to_embed)} missing embeddings")
             
         except Exception as e:
             logger.warning(f"[ACTION_SELECTOR] Could not compute embeddings: {e}")
         
+        _action_embeddings_cache = self._embeddings
         return len(self._embeddings)
     
     def select_actions(
@@ -164,10 +194,9 @@ class ComposioActionSelector:
         import numpy as np
         from sklearn.metrics.pairwise import cosine_similarity
         
-        # Get query embedding
+        # Get query embedding (using cached model)
         try:
-            from sentence_transformers import SentenceTransformer
-            model = SentenceTransformer('all-MiniLM-L6-v2')
+            model = _get_sentence_model()
             query_embedding = model.encode(user_query)
         except Exception as e:
             logger.warning(f"[ACTION_SELECTOR] Could not get query embedding: {e}")

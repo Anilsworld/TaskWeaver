@@ -76,22 +76,33 @@ class FormCollect(Plugin):
             logger.warning(f"[FORM_COLLECT] ⚠️ FieldTypeRegistry not available: {e}")
             return None
     
-    def _is_simulation_mode(self) -> bool:
+    def _is_generation_mode(self) -> bool:
         """
-        Detect if we're running in simulation mode (Docker CES) vs real execution.
-        """
-        if self._simulation_mode is not None:
-            return self._simulation_mode
+        Check if we're in workflow GENERATION mode (return mock data) vs EXECUTION mode (HITL).
         
+        Uses `_workflow_generation_mode` session variable (same pattern as composio_action):
+        - 'true' (Agentic mode): Return simulated data for workflow preview
+        - 'false' (Static mode): Block and wait for real user input via HITL
+        """
+        try:
+            is_generation_mode = self.ctx.get_session_var("_workflow_generation_mode", None)
+            if is_generation_mode == "true":
+                logger.info(f"[FORM_COLLECT] 🎯 GENERATION MODE - returning simulated data")
+                return True
+            elif is_generation_mode == "false":
+                logger.info(f"[FORM_COLLECT] 🚀 EXECUTION MODE - will use HITL for real input")
+                return False
+        except Exception as e:
+            logger.debug(f"[FORM_COLLECT] Could not check session var: {e}")
+        
+        # Fallback: Check if Django is available (Docker CES detection)
         try:
             import django
             os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
             django.setup()
-            self._simulation_mode = False
-            return False
+            return False  # Django available = real execution possible
         except Exception:
-            self._simulation_mode = True
-            return True
+            return True  # No Django = simulation mode
     
     def _infer_field_type(self, field_name: str, context: str = "") -> str:
         """
@@ -354,60 +365,142 @@ class FormCollect(Plugin):
         for field in form_schema['fields']:
             logger.debug(f"[FORM_COLLECT]   - {field['name']}: {field['type']} (required: {field.get('required', False)})")
         
-        # Check if we're in simulation mode
-        if self._is_simulation_mode():
-            logger.info(f"[FORM_COLLECT] SIMULATION MODE: Generating mock data for '{form_id}'")
+        # Check workflow mode (same pattern as composio_action plugin)
+        if self._is_generation_mode():
+            logger.info(f"[FORM_COLLECT] 🎯 AGENTIC MODE: Generating mock data for '{form_id}'")
             
             simulated_data = self._generate_simulated_data(form_schema)
             
             description = (
-                f"[SIMULATION] Form '{form_id}' would collect: "
+                f"[WORKFLOW_GENERATION] Form '{form_id}' would collect: "
                 f"{', '.join(f['name'] for f in form_schema['fields'])}. "
-                f"Simulated data returned for workflow generation."
+                f"Simulated data returned for workflow preview."
             )
             
             return simulated_data, description
         
         # =====================================================================
-        # REAL EXECUTION MODE
+        # STATIC MODE: Real-time HITL during step execution (Docker-compatible)
         # =====================================================================
-        # In real execution, we store the form schema and wait for HITL
-        # The actual form rendering happens via the frontend
+        # Uses HOST CALLBACK pattern (like composio_action) since Django cache
+        # is not accessible from inside Docker CES container.
+        #
+        # Flow:
+        # 1. Call host API to register form (stores in cache, sends WebSocket)
+        # 2. Poll host API for user response
+        # 3. Return real user data when received
         # =====================================================================
         
         try:
-            # Store form schema for the HITL system to render
-            session_id = self.ctx.get_session_var("session_id") if hasattr(self, 'ctx') else None
+            import time
+            import json
+            import requests
             
-            if session_id:
+            session_id = self.ctx.session_id if hasattr(self.ctx, 'session_id') else None
+            
+            if not session_id:
+                logger.warning(f"[FORM_COLLECT] No session_id, falling back to simulated data")
+                simulated_data = self._generate_simulated_data(form_schema)
+                return simulated_data, f"Form '{form_id}' (no session). Simulated data used."
+            
+            # Host URLs for Docker networking (same pattern as composio_action)
+            host_urls = [
+                "http://host.docker.internal:8000",  # Docker Desktop (Windows/Mac)
+                "http://172.17.0.1:8000",            # Docker Linux bridge
+                "http://localhost:8000",             # Local development
+            ]
+            
+            # Step 1: Register form with host (sends WebSocket event to frontend)
+            register_payload = {
+                "session_id": session_id,
+                "form_id": form_id,
+                "form_schema": form_schema,
+                "action": "register"
+            }
+            
+            host_url = None
+            for url in host_urls:
                 try:
-                    from django.core.cache import cache
-                    cache_key = f"form_schema:{session_id}:{form_id}"
-                    cache.set(cache_key, form_schema, timeout=3600)
-                    logger.info(f"[FORM_COLLECT] Stored form schema for HITL: {cache_key}")
+                    response = requests.post(
+                        f"{url}/api/v1/integrations/internal/form-hitl/",
+                        json=register_payload,
+                        timeout=10,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    if response.status_code == 200:
+                        host_url = url
+                        logger.info(f"[FORM_COLLECT] 📋 HITL: Registered form via {url}")
+                        break
+                except requests.exceptions.ConnectionError:
+                    continue
                 except Exception as e:
-                    logger.warning(f"[FORM_COLLECT] Failed to cache form schema: {e}")
+                    logger.debug(f"[FORM_COLLECT] Host {url} failed: {e}")
+                    continue
             
-            # For now, return simulated data even in real mode
-            # The actual HITL integration will replace this
+            if not host_url:
+                logger.warning(f"[FORM_COLLECT] ⚠️ No host callback available, using simulated data")
+                simulated_data = self._generate_simulated_data(form_schema)
+                simulated_data['_no_host_callback'] = True
+                return simulated_data, f"Form '{form_id}' (no host). Simulated data used."
+            
+            # Step 2: Poll host for user response
+            timeout_seconds = 300  # 5 minutes max
+            poll_interval = 1.0    # Poll every second
+            elapsed = 0
+            
+            logger.info(f"[FORM_COLLECT] ⏳ HITL: Waiting for user input (timeout: {timeout_seconds}s)...")
+            
+            poll_payload = {
+                "session_id": session_id,
+                "form_id": form_id,
+                "action": "poll"
+            }
+            
+            while elapsed < timeout_seconds:
+                try:
+                    response = requests.post(
+                        f"{host_url}/api/v1/integrations/internal/form-hitl/",
+                        json=poll_payload,
+                        timeout=5,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        
+                        if result.get('status') == 'completed':
+                            form_data = result.get('form_data', {})
+                            form_data['_form_id'] = form_id
+                            form_data['_hitl_completed'] = True
+                            
+                            logger.info(f"[FORM_COLLECT] ✅ HITL: Received user input after {elapsed:.1f}s")
+                            
+                            description = (
+                                f"✅ Form '{form_id}' completed by user. "
+                                f"Collected: {', '.join(form_data.keys())}."
+                            )
+                            return form_data, description
+                        
+                        # Still pending, continue polling
+                        
+                except Exception as e:
+                    logger.debug(f"[FORM_COLLECT] Poll error: {e}")
+                
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+            
+            # Timeout - use simulated data with warning
+            logger.warning(f"[FORM_COLLECT] ⏰ HITL: Timeout after {timeout_seconds}s")
+            
             simulated_data = self._generate_simulated_data(form_schema)
-            simulated_data['_pending_hitl'] = True
+            simulated_data['_hitl_timeout'] = True
             
-            description = (
-                f"Form '{form_id}' is ready for user input. "
-                f"Fields: {', '.join(f['name'] for f in form_schema['fields'])}. "
-                f"Waiting for HITL response."
-            )
-            
-            return simulated_data, description
+            return simulated_data, f"Form '{form_id}' timed out. Simulated data used."
             
         except Exception as e:
-            logger.error(f"[FORM_COLLECT] Error in real execution: {e}")
-            
-            # Fallback to simulation
+            logger.error(f"[FORM_COLLECT] Error in HITL execution: {e}", exc_info=True)
             simulated_data = self._generate_simulated_data(form_schema)
-            
-            return simulated_data, f"Form '{form_id}' error: {e}. Simulated data returned."
+            return simulated_data, f"Form '{form_id}' error: {e}. Simulated data used."
 
 
 # =====================================================================
