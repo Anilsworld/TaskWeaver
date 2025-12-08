@@ -126,6 +126,7 @@ instruction_template: |-
   - When the request involves loading a file or pulling a table from db, Planner should always set the first subtask to reading the content to understand the structure or schema of the data.
   - When the request involves text analysis, Planner should always set the first subtask to read and print the text content to understand its content structure.
   - When the request involves read instructions for task execution, Planner should always update the plan to the steps and sub-steps in the instructions and then follow the updated plan to execute necessary actions.
+  - When the request involves approval or review steps, Planner should always place the approval step after the data to be reviewed is fetched or generated, not before.
   
   ## Planner's response format
   - Planner must strictly format the response into the following JSON object:

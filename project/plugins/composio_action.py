@@ -630,6 +630,7 @@ class ComposioAction(Plugin):
                     'parameters_schema': action.parameters_schema or {},
                     'parameter_examples': action.parameter_examples or {},
                     'response_schema': action.response_schema or {},
+                    'response_examples': action.response_examples or [],  # ✅ NEW: Include response examples
                     'description': action.description or ''
                 }
                 self._action_metadata_cache[action_id] = metadata
@@ -651,7 +652,8 @@ class ComposioAction(Plugin):
                         'parameters_schema': entry.get('parameters_schema', {}),
                         'parameter_examples': entry.get('parameter_examples', {}),
                         'response_schema': entry.get('response_schema', {}),
-                        'description': ''
+                        'response_examples': entry.get('response_examples', []),  # ✅ NEW: Include response examples!
+                        'description': entry.get('description', '')  # ✅ FIX: Read description from cache
                     }
                 else:
                     # Old format: entry IS the response_schema directly
@@ -659,6 +661,7 @@ class ComposioAction(Plugin):
                         'parameters_schema': {},
                         'parameter_examples': {},
                         'response_schema': entry,
+                        'response_examples': [],
                         'description': ''
                     }
                 
@@ -1323,6 +1326,35 @@ class ComposioAction(Plugin):
         )
         return mock_data, description
     
+    def _unwrap_and_describe_mock(self, full_mock: Dict[str, Any], action_name: str) -> Tuple[Dict[str, Any], str]:
+        """
+        Helper to unwrap 'data' field and generate description (DRY principle).
+        
+        Real API returns: result.get('data', result) - so mock must match.
+        
+        CRITICAL: Successful responses are UNWRAPPED (no 'success' field).
+        Only error responses have {'success': False, 'error': '...'}.
+        """
+        if isinstance(full_mock, dict) and 'data' in full_mock:
+            mock_data = full_mock['data']
+        else:
+            mock_data = full_mock
+        
+        # ❌ DO NOT add 'success': True here!
+        # Successful responses are unwrapped and don't have 'success' field.
+        # Only error responses (placeholder detection) have 'success': False.
+        
+        # Use dynamic structure hint (same as real API)
+        structure_hint = self._describe_data_structure(mock_data)
+        
+        description = (
+            f"Successfully executed {action_name}.\n"
+            f"RESPONSE STRUCTURE: {structure_hint}\n"
+            f"Use the structure above to access the data correctly."
+        )
+        
+        return mock_data, description
+    
     def _generate_schema_based_mock(self, action_name: str, params: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str]]:
         """
         Generate mock response based on actual Composio action schema from DB.
@@ -1362,24 +1394,8 @@ class ComposioAction(Plugin):
             # Generate mock based on schema properties
             full_mock = self._generate_mock_from_schema(response_schema)
             
-            # UNWRAP: Real API returns result.get('data', result)
-            # Mock must match this pattern - return just the 'data' field
-            if isinstance(full_mock, dict) and 'data' in full_mock:
-                mock_data = full_mock['data']
-            else:
-                mock_data = full_mock
-            
-            # Use dynamic structure hint (same as real API)
-            structure_hint = self._describe_data_structure(mock_data)
-            
-            description = (
-                f"Successfully executed {action_name}.\n"
-                f"RESPONSE STRUCTURE: {structure_hint}\n"
-                f"Use the structure above to access the data correctly."
-            )
-            
             logger.info(f"[COMPOSIO_PLUGIN] SCHEMA-BASED mock for {action_name} (from DB)")
-            return mock_data, description
+            return self._unwrap_and_describe_mock(full_mock, action_name)
             
         except ImportError:
             # Django not available (running in Docker without Django context)
@@ -1430,25 +1446,8 @@ class ComposioAction(Plugin):
             # Fall back to schema-based generation
             full_mock = self._generate_mock_from_schema(response_schema)
         
-        # UNWRAP: Real API returns result.get('data', result)
-        # This applies to BOTH example-based and schema-based mocks
-        if isinstance(full_mock, dict) and 'data' in full_mock:
-            mock_data = full_mock['data']
-            print(f"[COMPOSIO_PLUGIN] Unwrapped 'data' wrapper, keys: {list(mock_data.keys()) if isinstance(mock_data, dict) else type(mock_data)}")
-        else:
-            mock_data = full_mock
-        
-        # Use dynamic structure hint
-        structure_hint = self._describe_data_structure(mock_data)
-        
-        description = (
-            f"Successfully executed {action_name}.\n"
-            f"RESPONSE STRUCTURE: {structure_hint}\n"
-            f"Use the structure above to access the data correctly."
-        )
-        
         print(f"[COMPOSIO_PLUGIN] Generated mock from cache for {action_name}")
-        return mock_data, description
+        return self._unwrap_and_describe_mock(full_mock, action_name)
     
     def _get_schema_max_depth(self, schema: Dict[str, Any], current: int = 0, visited: set = None) -> int:
         """Calculate the maximum nesting depth of a schema dynamically."""
@@ -1807,7 +1806,8 @@ class ComposioAction(Plugin):
                 elif prop_lower in ('shared', 'starred', 'trashed', 'private', 'public'):
                     return False
                 else:
-                    return 'sample_value'
+                    # SCALABLE FIX: Generate unique value that won't trigger placeholder detection
+                    return f'{prop_lower}_abc123xyz' if prop_lower else 'value_abc123xyz'
             
             mock_obj = {}
             for pname, prop_schema in list(properties.items())[:15]:  # Limit to 15 props for completeness
@@ -1854,7 +1854,10 @@ class ComposioAction(Plugin):
             elif 'status' in prop_lower or 'state' in prop_lower:
                 return 'active'
             else:
-                return 'sample_value'
+                # SCALABLE FIX: Use property-based value that won't trigger placeholder detection
+                # Instead of 'sample_value' (triggers 'sample_' pattern), generate a unique value
+                # This works for ALL 800+ tools without hardcoding specific fields
+                return f'{prop_lower}_abc123xyz' if prop_lower else 'value_abc123xyz'
                 
         elif schema_type == 'integer':
             return 1

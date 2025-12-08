@@ -139,11 +139,21 @@ rounds:
           - type: reply_content
             content: |-
               # PHASE 2: Approval and External APIs
+              # ✅ CRITICAL HITL PATTERN: For approval forms, include readonly display fields with prefill
+              # so the approver can see the data they're reviewing!
               approval, _ = form_collect("manager_approval", {
-                  "title": "Manager Approval",
-                  "description": f"Registration for {registration['full_name']} - ${payment['amount']}",
+                  "title": "Manager Approval Required",
+                  "description": "Please review the registration details below and approve or reject.",
                   "fields": [
-                      {"name": "decision", "label": "Decision", "type": "select", "options": ["Approve", "Reject"]},
+                      # Display context for informed decision (readonly with prefill from previous steps)
+                      {"name": "full_name", "label": "Full Name", "prefill": registration['full_name'], "readonly": True},
+                      {"name": "email", "label": "Email", "prefill": registration['email'], "readonly": True},
+                      {"name": "phone", "label": "Phone", "prefill": registration['phone'], "readonly": True},
+                      {"name": "company", "label": "Company", "prefill": registration['company'], "readonly": True},
+                      {"name": "payment_amount", "label": "Payment Amount", "prefill": f"${payment['amount']}", "readonly": True},
+                      {"name": "card_last4", "label": "Card Number", "prefill": f"****{payment['card_number'][-4:]}", "readonly": True},
+                      # Decision fields at the end
+                      {"name": "decision", "label": "Decision", "type": "select", "options": ["Approve", "Reject"], "required": True},
                       {"name": "comments", "label": "Comments", "type": "textarea"}
                   ],
                   "hitl_config": {"blocking": True, "decision_field": "decision"}

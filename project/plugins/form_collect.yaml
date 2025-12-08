@@ -15,13 +15,35 @@ description: >-
   Example: payment_form can use attendee_id from registration_form.
   
   **CRITICAL** - APPROVAL/HITL FORMS: When creating approval, review, confirmation, or decision forms,
-  ALWAYS include hitl_config with decision_field and routing. This is REQUIRED for:
+  you MUST do BOTH of the following:
+  
+  1. Include readonly display fields with prefill showing ALL relevant data for review:
+     - Use "readonly": True for display-only fields
+     - Use "prefill": upstream_data to populate them with actual data
+     - Include ALL context the approver needs (e.g., passenger details, flight info, amounts, etc.)
+     - Place readonly display fields BEFORE the decision field
+  
+  2. Include hitl_config with decision_field and routing:
+     - "blocking": True to pause workflow
+     - "decision_field": name of the field containing the approval decision
+     - "routing": dict mapping decision values to actions ("Approve": "continue", "Reject": "end")
+  
+  This pattern is REQUIRED for:
   - Manager/supervisor approvals
-  - Review and confirm steps
+  - Review and confirm steps  
   - Any workflow pause requiring human decision
   - Approval gates before proceeding
   
-  hitl_config MUST include: decision_field (which field has the decision), routing (what happens for each choice)
+  WRONG (approval without context):
+  fields: [{"name": "decision", ...}, {"name": "comments", ...}]
+  
+  CORRECT (approval with full context):
+  fields: [
+    {"name": "display_field1", "prefill": data1, "readonly": True},
+    {"name": "display_field2", "prefill": data2, "readonly": True},
+    {"name": "decision", "type": "select", ...},
+    {"name": "comments", "type": "textarea"}
+  ]
 
 examples: |-
   # ========== REGISTRATION FORM ==========
@@ -58,14 +80,26 @@ examples: |-
       }
   )
   
-  # ========== APPROVAL FORM (REQUIRES hitl_config!) ==========
-  # Get manager approval - MUST include hitl_config for approval workflows
+  # ========== APPROVAL FORM (REQUIRES hitl_config + readonly display fields!) ==========
+  # Get manager approval - MUST include:
+  # 1. Readonly display fields with prefill (showing data to approve)
+  # 2. hitl_config for workflow control
   approval, desc = form_collect(
       "approval",
       {
           "title": "Manager Approval Required",
-          "description": f"Please review and approve request from {registration_data['attendee_name']}",
+          "description": "Please review the registration details below and approve or reject.",
           "fields": [
+              # Display fields FIRST (readonly with prefill from previous steps)
+              {"name": "attendee_name", "label": "Attendee Name", 
+               "prefill": registration_data['attendee_name'], "readonly": True},
+              {"name": "email", "label": "Email", 
+               "prefill": registration_data['email'], "readonly": True},
+              {"name": "ticket_type", "label": "Ticket Type", 
+               "prefill": registration_data['ticket_type'], "readonly": True},
+              {"name": "payment_amount", "label": "Payment Amount",
+               "prefill": f"${payment_data['amount']}", "readonly": True},
+              # Decision fields AFTER display context
               {"name": "decision", "label": "Approve this request?", "type": "select",
                "options": ["Approve", "Reject", "Request Changes"], "required": True},
               {"name": "comments", "label": "Comments", "type": "textarea"}
@@ -98,26 +132,32 @@ examples: |-
   )
   
   # ========== HITL APPROVAL (Human-in-the-Loop) ==========
-  # Display previous step results and collect approval decision
-  # The 'context' field shows upstream data for review
+  # COMPLETE PATTERN: Display ALL relevant data from previous steps as readonly fields
+  # This allows the approver to make an INFORMED decision
   approval, desc = form_collect(
       "manager_approval",
       {
           "title": "Manager Approval Required",
-          "description": f"Please review the flight booking for {registration_data['attendee_name']}",
+          "description": "Please review all details below before approving or rejecting.",
           "fields": [
-              {"name": "flight_summary", "label": "Flight Details", "type": "textarea",
-               "readonly": True, "default": flight_result.get('summary', '')},
-              {"name": "total_cost", "label": "Total Cost", "type": "number",
-               "readonly": True, "default": flight_result.get('cost', 0)},
+              # Display ALL context from upstream steps (readonly + prefill)
+              {"name": "passenger_name", "label": "Passenger Name",
+               "prefill": registration_data['attendee_name'], "readonly": True},
+              {"name": "passenger_email", "label": "Email",
+               "prefill": registration_data['email'], "readonly": True},
+              {"name": "departure_city", "label": "From",
+               "prefill": flight_result['departure_city'], "readonly": True},
+              {"name": "arrival_city", "label": "To",
+               "prefill": flight_result['arrival_city'], "readonly": True},
+              {"name": "departure_date", "label": "Departure",
+               "prefill": flight_result['departure_date'], "readonly": True},
+              {"name": "total_cost", "label": "Total Cost",
+               "prefill": f"${flight_result['cost']}", "readonly": True},
+              # Decision fields at the end
               {"name": "decision", "label": "Your Decision", "type": "select",
                "options": ["Approve", "Reject", "Request Changes"], "required": True},
               {"name": "comments", "label": "Comments/Feedback", "type": "textarea"}
           ],
-          "prefill": {
-              "flight_summary": flight_result["summary"],  # From upstream tool
-              "total_cost": flight_result["cost"]
-          },
           "hitl_config": {
               "blocking": True,
               "timeout_hours": 24,

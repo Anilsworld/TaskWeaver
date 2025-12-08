@@ -360,7 +360,8 @@ class CodeGenerator(Role):
             from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions  # noqa: E501
             
             # Get relevant actions based on user query
-            composio_actions = select_composio_actions(query, top_k=10)
+            # ✅ Reduced from 10 to 7 - new schema format is richer (includes param types + response structure)
+            composio_actions = select_composio_actions(query, top_k=7)
             if composio_actions:
                 enrichment_contents.append(composio_actions)
                 self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")

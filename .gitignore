@@ -5,6 +5,9 @@ workspace/*
 set_env.sh
 sample_case_results.csv
 
+# Composio cache files (large, regenerated from Django)
+project/plugins/composio_schemas_cache.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
