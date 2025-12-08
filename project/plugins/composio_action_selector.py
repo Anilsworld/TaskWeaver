@@ -1,294 +1,249 @@
 """
-Composio Action Selector - Intelligent action matching using embeddings.
+Composio Action Selector - Intelligent action matching using pgvector.
 
-Follows TaskWeaver's PluginSelector pattern but for Composio ACTIONS.
+Uses PostgreSQL pgvector for FAST similarity search (milliseconds, not seconds).
 
 Problem: TaskWeaver knows to use composio_action plugin, but doesn't know
-which specific action ID to use (800+ actions available).
+which specific action ID to use (17,000+ actions available).
 
 Solution: 
-1. Load all Composio actions from DB with embeddings
-2. Use semantic similarity to find best matching actions
+1. Use pgvector HNSW index for fast similarity search IN DATABASE
+2. No need to load all embeddings into memory
 3. Inject matched actions into TaskWeaver prompt so LLM knows exact action IDs
 """
-import os
-import json
 import logging
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
+import hashlib
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Cache for action embeddings
-_action_embeddings_cache: Dict[str, List[float]] = {}
-_action_catalog_cache: List[Dict] = []
-_sentence_model = None  # Cached SentenceTransformer model
+# Cached OpenAI client and config
+_openai_client = None
+_embedding_deployment = None
 
 
-def _get_sentence_model():
-    """Get or create cached SentenceTransformer model"""
-    global _sentence_model
-    if _sentence_model is None:
-        from sentence_transformers import SentenceTransformer
-        _sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("[ACTION_SELECTOR] Loaded SentenceTransformer model (cached)")
-    return _sentence_model
-
-
-@dataclass
-class ComposioAction:
-    """Represents a Composio action with embedding"""
-    action_id: str
-    action_name: str
-    app_name: str
-    description: str
-    embedding: List[float] = field(default_factory=list)
-    parameters: Dict = field(default_factory=dict)
+def _get_openai_client():
+    """Get or create cached Azure OpenAI client (same pattern as action_matcher.py)"""
+    global _openai_client, _embedding_deployment
     
-    def to_prompt(self) -> str:
-        """Format for inclusion in TaskWeaver prompt"""
-        params = list(self.parameters.get('properties', {}).keys())[:5]  # Top 5 params
-        required = self.parameters.get('required', [])
-        required_str = f" (required: {', '.join(required[:3])})" if required else ""
-        return f"- {self.action_id}: {self.description}{required_str}"
-
-
-class ComposioActionSelector:
-    """
-    Selects the most relevant Composio actions for a user query.
+    if _openai_client is not None:
+        return _openai_client, _embedding_deployment
     
-    Uses TaskWeaver's PluginSelector pattern:
-    1. Load action catalog with embeddings
-    2. Compute similarity between query and actions
-    3. Return top-k most relevant actions
-    """
-    
-    def __init__(self, cache_dir: Optional[str] = None):
-        self.cache_dir = cache_dir or os.path.join(
-            os.path.dirname(__file__), '.action_cache'
+    try:
+        from openai import AzureOpenAI
+        from config.env_loader import config
+        
+        # Use EXACT same config pattern as action_matcher.py
+        _embedding_deployment = config('AZURE_OPENAI_EMBEDDING_DEPLOYMENT', default=None)
+        
+        if not _embedding_deployment:
+            logger.warning("[ACTION_SELECTOR] AZURE_OPENAI_EMBEDDING_DEPLOYMENT not configured")
+            return None, None
+        
+        _openai_client = AzureOpenAI(
+            api_key=config('AZURE_OPENAI_EMBEDDING_API_KEY', default=config('AZURE_OPENAI_API_KEY')),
+            api_version=config('AZURE_OPENAI_EMBEDDING_API_VERSION', default=config('AZURE_OPENAI_API_VERSION')),
+            azure_endpoint=config('AZURE_OPENAI_EMBEDDING_ENDPOINT', default=config('AZURE_OPENAI_ENDPOINT'))
         )
-        self._actions: List[ComposioAction] = []
-        self._embeddings: Dict[str, List[float]] = {}
-        self._loaded = False
+        
+        logger.info(f"[ACTION_SELECTOR] ✅ Azure OpenAI initialized (deployment: {_embedding_deployment})")
+        return _openai_client, _embedding_deployment
+        
+    except Exception as e:
+        logger.warning(f"[ACTION_SELECTOR] Could not initialize Azure OpenAI: {e}")
+        return None, None
+
+
+def _get_query_embedding(query: str) -> Optional[List[float]]:
+    """Get embedding for user query using Azure OpenAI (same model as DB embeddings)"""
+    try:
+        from django.core.cache import cache
+        
+        client, deployment = _get_openai_client()
+        if not client or not deployment:
+            logger.warning("[ACTION_SELECTOR] No OpenAI client available")
+            return None
+        
+        # Check cache first
+        text_hash = hashlib.md5(query.encode()).hexdigest()
+        cache_key = f"action_selector_emb:{deployment}:{text_hash}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+        
+        # Generate embedding
+        response = client.embeddings.create(
+            model=deployment,
+            input=query
+        )
+        embedding = response.data[0].embedding
+        
+        # Cache for 1 hour
+        cache.set(cache_key, embedding, timeout=3600)
+        
+        logger.debug(f"[ACTION_SELECTOR] Generated embedding ({len(embedding)} dims)")
+        return embedding
+        
+    except Exception as e:
+        logger.warning(f"[ACTION_SELECTOR] Could not embed query: {e}")
+        return None
+
+
+def select_actions_pgvector(
+    user_query: str, 
+    app_filter: Optional[str] = None,
+    top_k: int = 10
+) -> List[Dict]:
+    """
+    ⚡ FAST: Select actions using pgvector indexed search (milliseconds!)
     
-    def load_actions_from_db(self) -> int:
-        """Load all Composio actions from database"""
-        global _action_catalog_cache
+    This is the production-grade approach - no memory loading required.
+    Falls back to linear scan if pgvector extension not available.
+    """
+    try:
+        import django
+        if not django.apps.apps.ready:
+            django.setup()
         
-        if _action_catalog_cache:
-            self._actions = [ComposioAction(**a) for a in _action_catalog_cache]
-            return len(self._actions)
-        
-        try:
-            import django
-            if not django.apps.apps.ready:
-                django.setup()
-            
-            from apps.integrations.models import ComposioActionSchema
-            
-            # Use existing embeddings from DB (pre-computed) - much faster!
-            actions = ComposioActionSchema.objects.select_related('integration').values(
-                'action_id', 'action_name', 'integration__integration_name', 'description', 
-                'parameters_schema', 'description_embedding'
-            )
-            
-            for a in actions:
-                action = ComposioAction(
-                    action_id=a['action_id'],
-                    action_name=a['action_name'],
-                    app_name=a['integration__integration_name'] or '',
-                    description=a['description'] or '',
-                    parameters=a['parameters_schema'] or {}
-                )
-                self._actions.append(action)
-                
-                # Use pre-computed embedding from DB if available
-                if a.get('description_embedding'):
-                    self._embeddings[a['action_id']] = a['description_embedding']
-            
-            # Cache for future use
-            _action_catalog_cache = [
-                {
-                    'action_id': a.action_id,
-                    'action_name': a.action_name,
-                    'app_name': a.app_name,
-                    'description': a.description,
-                    'parameters': a.parameters
-                }
-                for a in self._actions
-            ]
-            
-            logger.info(f"[ACTION_SELECTOR] Loaded {len(self._actions)} Composio actions")
-            return len(self._actions)
-            
-        except Exception as e:
-            logger.warning(f"[ACTION_SELECTOR] Could not load from DB: {e}")
-            return 0
+        from apps.integrations.models import ComposioActionSchema
+    except Exception as e:
+        logger.warning(f"[ACTION_SELECTOR] Django not available: {e}")
+        return []
     
-    def compute_embeddings(self) -> int:
-        """
-        Use pre-computed embeddings from DB.
-        Only compute for actions missing embeddings (should be rare).
-        """
-        global _action_embeddings_cache
-        
-        if _action_embeddings_cache:
-            self._embeddings.update(_action_embeddings_cache)
-            return len(self._embeddings)
-        
-        # Most embeddings should already be loaded from DB in load_actions_from_db()
-        # Only compute for actions that don't have pre-computed embeddings
-        actions_to_embed = []
-        for action in self._actions:
-            if action.action_id not in self._embeddings:
-                text = f"{action.action_id}: {action.action_name}. {action.description}"
-                actions_to_embed.append((action.action_id, text))
-        
-        # If we have enough from DB, skip computing
-        if len(self._embeddings) > 0:
-            logger.info(f"[ACTION_SELECTOR] Using {len(self._embeddings)} pre-computed embeddings from DB")
-            if len(actions_to_embed) > 100:
-                # Too many missing - just use what we have from DB
-                logger.info(f"[ACTION_SELECTOR] Skipping {len(actions_to_embed)} missing embeddings (too many)")
-                _action_embeddings_cache = self._embeddings
-                return len(self._embeddings)
-        
-        if not actions_to_embed:
-            _action_embeddings_cache = self._embeddings
-            return len(self._embeddings)
-        
-        try:
-            model = _get_sentence_model()
-            
-            texts = [text for _, text in actions_to_embed]
-            embeddings = model.encode(texts, show_progress_bar=False).tolist()
-            
-            for i, (action_id, _) in enumerate(actions_to_embed):
-                self._embeddings[action_id] = embeddings[i]
-            
-            logger.info(f"[ACTION_SELECTOR] Computed {len(actions_to_embed)} missing embeddings")
-            
-        except Exception as e:
-            logger.warning(f"[ACTION_SELECTOR] Could not compute embeddings: {e}")
-        
-        _action_embeddings_cache = self._embeddings
-        return len(self._embeddings)
+    # Get query embedding
+    query_emb = _get_query_embedding(user_query)
+    if not query_emb:
+        return []
     
-    def select_actions(
-        self, 
-        user_query: str, 
-        app_filter: Optional[str] = None,
-        top_k: int = 10
-    ) -> List[Tuple[ComposioAction, float]]:
-        """
-        Select most relevant actions for user query.
+    # ✅ Try pgvector indexed search first (FAST!)
+    try:
+        from pgvector.django import CosineDistance
+        from django.db.utils import ProgrammingError
         
-        Args:
-            user_query: The user's request
-            app_filter: Optional app name to filter (e.g., "GOOGLESHEETS")
-            top_k: Number of actions to return
+        # Build query
+        queryset = ComposioActionSchema.objects.filter(
+            is_deprecated=False,
+            description_embedding__isnull=False
+        )
         
-        Returns:
-            List of (action, similarity_score) tuples
-        """
+        # Optional app filter
+        if app_filter:
+            queryset = queryset.filter(action_id__icontains=app_filter.upper())
+        
+        # pgvector similarity search - runs IN DATABASE!
+        actions = queryset.annotate(
+            distance=CosineDistance('description_embedding', query_emb)
+        ).order_by('distance')[:top_k].values(
+            'action_id',
+            'action_name', 
+            'description',
+            'parameters_schema',
+            'distance'
+        )
+        
+        results = []
+        for action in actions:
+            similarity = 1.0 - action['distance']  # Convert distance to similarity
+            results.append({
+                'action_id': action['action_id'],
+                'action_name': action['action_name'],
+                'description': action['description'] or '',
+                'parameters': action['parameters_schema'] or {},
+                'similarity': similarity
+            })
+        
+        logger.info(f"[ACTION_SELECTOR] ⚡ pgvector returned {len(results)} actions in ms")
+        return results
+        
+    except ImportError:
+        logger.debug("[ACTION_SELECTOR] pgvector not installed, using fallback")
+    except Exception as e:
+        # ProgrammingError = pgvector extension not enabled
+        logger.debug(f"[ACTION_SELECTOR] pgvector query failed ({type(e).__name__}), using fallback")
+    
+    # ❌ FALLBACK: Limited linear scan (only if pgvector fails)
+    # This is slower but works without pgvector extension
+    return _select_actions_fallback(user_query, query_emb, app_filter, top_k)
+
+
+def _select_actions_fallback(
+    user_query: str,
+    query_emb: List[float],
+    app_filter: Optional[str],
+    top_k: int
+) -> List[Dict]:
+    """
+    Fallback: Sample-based linear scan (NOT loading all 17k embeddings!)
+    
+    Strategy: Load top 500 most-used actions and scan those only.
+    """
+    try:
         import numpy as np
         from sklearn.metrics.pairwise import cosine_similarity
+        from apps.integrations.models import ComposioActionSchema
         
-        # Get query embedding (using cached model)
-        try:
-            model = _get_sentence_model()
-            query_embedding = model.encode(user_query)
-        except Exception as e:
-            logger.warning(f"[ACTION_SELECTOR] Could not get query embedding: {e}")
-            return []
+        # Only load top 500 most-used actions (not all 17k!)
+        queryset = ComposioActionSchema.objects.filter(
+            is_deprecated=False,
+            description_embedding__isnull=False
+        ).order_by('-usage_count')[:500]
         
-        # Filter actions
-        candidate_actions = self._actions
         if app_filter:
-            app_filter_upper = app_filter.upper()
-            candidate_actions = [
-                a for a in self._actions 
-                if app_filter_upper in a.action_id.upper()
-            ]
+            queryset = queryset.filter(action_id__icontains=app_filter.upper())
         
-        if not candidate_actions:
+        actions = list(queryset.values(
+            'action_id', 'action_name', 'description', 
+            'parameters_schema', 'description_embedding'
+        ))
+        
+        if not actions:
             return []
         
         # Compute similarities
-        similarities = []
-        for action in candidate_actions:
-            if action.action_id not in self._embeddings:
+        query_np = np.array(query_emb).reshape(1, -1)
+        results = []
+        
+        for action in actions:
+            emb = action.get('description_embedding')
+            if not emb:
                 continue
             
-            action_embedding = np.array(self._embeddings[action.action_id])
-            sim = cosine_similarity(
-                query_embedding.reshape(1, -1),
-                action_embedding.reshape(1, -1)
-            )[0][0]
-            similarities.append((action, float(sim)))
+            action_np = np.array(emb).reshape(1, -1)
+            sim = cosine_similarity(query_np, action_np)[0][0]
+            
+            results.append({
+                'action_id': action['action_id'],
+                'action_name': action['action_name'],
+                'description': action['description'] or '',
+                'parameters': action['parameters_schema'] or {},
+                'similarity': float(sim)
+            })
         
-        # Sort by similarity and return top_k
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return similarities[:top_k]
+        # Sort by similarity
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        logger.info(f"[ACTION_SELECTOR] 📦 Fallback scanned {len(actions)} actions")
+        return results[:top_k]
+        
+    except Exception as e:
+        logger.warning(f"[ACTION_SELECTOR] Fallback failed: {e}")
+        return []
+
+
+def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
+    """Format actions for injection into TaskWeaver prompt"""
+    if not actions:
+        return ""
     
-    def get_actions_for_prompt(
-        self, 
-        user_query: str,
-        app_hints: Optional[List[str]] = None,
-        top_k: int = 5
-    ) -> str:
-        """
-        Get formatted action list for TaskWeaver prompt.
-        
-        This injects the relevant action catalog into the LLM context,
-        so it knows the exact action IDs to use.
-        """
-        if not self._loaded:
-            self.load_actions_from_db()
-            self.compute_embeddings()
-            self._loaded = True
-        
-        all_actions = []
-        
-        # If app hints provided, get top actions from each app
-        if app_hints:
-            for app in app_hints:
-                actions = self.select_actions(user_query, app_filter=app, top_k=3)
-                all_actions.extend(actions)
-        else:
-            all_actions = self.select_actions(user_query, top_k=top_k)
-        
-        if not all_actions:
-            return ""
-        
-        # Deduplicate and sort by similarity
-        seen = set()
-        unique_actions = []
-        for action, sim in all_actions:
-            if action.action_id not in seen:
-                seen.add(action.action_id)
-                unique_actions.append((action, sim))
-        
-        unique_actions.sort(key=lambda x: x[1], reverse=True)
-        
-        # Format for prompt
-        lines = ["## Available Composio Actions (use exact action_id):"]
-        for action, sim in unique_actions[:top_k]:
-            lines.append(action.to_prompt())
-        
-        return "\n".join(lines)
-
-
-# Singleton instance
-_selector: Optional[ComposioActionSelector] = None
-
-
-def get_action_selector() -> ComposioActionSelector:
-    """Get or create the action selector"""
-    global _selector
-    if _selector is None:
-        _selector = ComposioActionSelector()
-    return _selector
+    lines = ["## Available Composio Actions (use exact action_id):"]
+    
+    for action in actions[:top_k]:
+        params = action.get('parameters', {})
+        required = params.get('required', [])
+        required_str = f" (required: {', '.join(required[:3])})" if required else ""
+        desc = (action.get('description') or '')[:100]  # Truncate long descriptions
+        lines.append(f"- {action['action_id']}: {desc}{required_str}")
+    
+    return "\n".join(lines)
 
 
 def select_composio_actions(
@@ -297,10 +252,34 @@ def select_composio_actions(
     top_k: int = 5
 ) -> str:
     """
-    Convenience function to get relevant Composio actions for a query.
+    ⚡ Main entry point - Get relevant Composio actions for a query.
     
+    Uses pgvector for fast indexed search (milliseconds).
     Returns formatted string to inject into TaskWeaver prompt.
     """
-    selector = get_action_selector()
-    return selector.get_actions_for_prompt(user_query, app_hints, top_k)
+    all_actions = []
+    
+    # If app hints provided, get top actions from each app
+    if app_hints:
+        for app in app_hints:
+            actions = select_actions_pgvector(user_query, app_filter=app, top_k=3)
+            all_actions.extend(actions)
+    else:
+        all_actions = select_actions_pgvector(user_query, top_k=top_k)
+    
+    if not all_actions:
+        return ""
+    
+    # Deduplicate by action_id
+    seen = set()
+    unique_actions = []
+    for action in all_actions:
+        if action['action_id'] not in seen:
+            seen.add(action['action_id'])
+            unique_actions.append(action)
+    
+    # Sort by similarity
+    unique_actions.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+    
+    return format_actions_for_prompt(unique_actions, top_k)
 
