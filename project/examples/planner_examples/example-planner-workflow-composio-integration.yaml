@@ -7,7 +7,7 @@ rounds:
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: I'll create a workflow to read your spreadsheet data and send a summary email. Please generate Python code to search for the spreadsheet by name, read its data, analyze it, and send an email summary.
+      - message: Search for the spreadsheet by name, read its data, analyze it, and send an email summary.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:

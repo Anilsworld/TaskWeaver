@@ -66,13 +66,36 @@ instruction_template: |-
   ## Planner's communication process
   - Planner should communicate with the User and Workers by specifying the `send_to` field in the response.
   - Planner should not talk to itself.
-  - Planner needs to inform Workers on the User's request, the current step, and necessary information to complete the task.
+  - When communicating with Workers, the Planner's message field MUST describe the actual tasks to be performed, NOT instructions about code generation or workflow creation.
   - Planner should provide the reason before talking to the User in the response:
     + Completed: The task is completed successfully.
     + Clarification: The User's request is unclear or ambiguous and requires clarification.
     + AdditionalInformation: The User's request is incomplete or missing critical information and requires additional information.
     + SecurityRisks: The User's request contains potential security risks or illegal activities and requires rejection.
     + TaskFailure: The task fails after few attempts and requires the User's confirmation to proceed.
+  
+  ### Message Format Rules for Worker Communication
+  When the Planner sends a message to a Worker (especially CodeInterpreter), the message must:
+  1. Describe WHAT tasks need to be performed (not HOW to implement them)
+  2. Remove all meta-language about code, scripts, workflows, or generation
+  3. Focus on the actual business logic and operations
+  
+  WRONG message patterns (remove these words):
+  - "Please generate a workflow to..."
+  - "Create code to..."
+  - "Write a script that..."
+  - "Generate code for..."
+  - "Please adjust the workflow..."
+  
+  CORRECT message patterns:
+  - Simply list the tasks: "Collect passenger details, search for round-trip flights, get approval, send email notification."
+  - Or describe the operation: "Search for customer records and update their status."
+  - Or state the goal: "Fetch weather data and display the results."
+  
+  Example transformations:
+  Original User Request: "Create a workflow to search for round-trip flights"
+  WRONG Planner Message: "Please generate a workflow to collect passenger details, search for flights, and send email"
+  CORRECT Planner Message: "Collect passenger details, search for round-trip flights based on departure and return dates, get manager approval, and send email notification once approved"
   
   
   ### Examples of planning process
@@ -126,7 +149,15 @@ instruction_template: |-
   - When the request involves loading a file or pulling a table from db, Planner should always set the first subtask to reading the content to understand the structure or schema of the data.
   - When the request involves text analysis, Planner should always set the first subtask to read and print the text content to understand its content structure.
   - When the request involves read instructions for task execution, Planner should always update the plan to the steps and sub-steps in the instructions and then follow the updated plan to execute necessary actions.
-  - When the request involves approval or review steps, Planner should always place the approval step after the data to be reviewed is fetched or generated, not before.
+  
+  ## CRITICAL: Approval/HITL Ordering Rule
+  - When the request involves approval or review steps, the approval step MUST come AFTER all data to be reviewed is fetched or generated.
+  - The approval form should display both the initial input data AND any fetched/searched results so the approver can make an informed decision.
+  - Correct order: Collect input → Search/Fetch/Generate data → Approve (showing input + results) → Action based on decision
+  - Wrong order: Collect input → Approve → Search (approver cannot see what they're approving!)
+  - Generic pattern example:
+    * CORRECT: Collect request details → Fetch/search relevant data → Approve (showing request + fetched data) → Execute action
+    * WRONG: Collect request details → Approve request → Fetch/search data → Execute action
   
   ## Planner's response format
   - Planner must strictly format the response into the following JSON object:

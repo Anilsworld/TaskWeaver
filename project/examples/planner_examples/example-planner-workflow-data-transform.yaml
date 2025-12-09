@@ -7,7 +7,7 @@ rounds:
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: Please generate Python code to filter and transform customer data using list comprehensions and dictionaries.
+      - message: Filter and transform customer data by age and status into the required format.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:

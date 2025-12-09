@@ -336,6 +336,11 @@ class CodeGenerator(Role):
 
         # obtain the query from the last round
         query = rounds[-1].post_list[-1].message
+        
+        # ✅ FIX: For Composio action selection, use ORIGINAL user query instead of Planner's rephrased message
+        # Planner's message can lose key domain keywords (e.g., "flights" → "passenger details")
+        # This ensures action matcher sees the full user intent with all domain-specific terms
+        original_user_query = rounds[-1].user_query if hasattr(rounds[-1], 'user_query') and rounds[-1].user_query else query
 
         self.tracing.set_span_attribute("query", query)
         self.tracing.set_span_attribute("enable_auto_plugin_selection", self.config.enable_auto_plugin_selection)
@@ -359,9 +364,9 @@ class CodeGenerator(Role):
             # Dynamic import - same pattern as code_verification.py
             from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions  # noqa: E501
             
-            # Get relevant actions based on user query
+            # Get relevant actions based on ORIGINAL user query (not Planner's rephrased message)
             # ✅ Reduced from 10 to 7 - new schema format is richer (includes param types + response structure)
-            composio_actions = select_composio_actions(query, top_k=7)
+            composio_actions = select_composio_actions(original_user_query, top_k=7)
             if composio_actions:
                 enrichment_contents.append(composio_actions)
                 self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")

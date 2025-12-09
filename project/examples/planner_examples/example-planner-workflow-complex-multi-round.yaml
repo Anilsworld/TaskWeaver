@@ -31,13 +31,13 @@ rounds:
       # =====================================================================
       # Planner -> CodeInterpreter: PHASE 1 (Forms)
       # =====================================================================
-      - message: Generate code for registration and payment forms with data flow between them.
+      - message: Collect registration information and payment details with data flow between forms.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:
           - type: plan_reasoning
             content: |-
-              This is a complex 6-step workflow. Using <interactively depends on> to generate code in phases:
+              This is a complex 6-step workflow. Using <interactively depends on> to execute in phases:
               Phase 1: Forms (registration, payment)
               Phase 2: Approval + APIs (calendar, email)  
               Phase 3: Feedback
@@ -101,7 +101,7 @@ rounds:
       # =====================================================================
       # Planner -> CodeInterpreter: PHASE 2 (Approval + APIs)
       # =====================================================================
-      - message: Phase 1 complete. Now generate approval and API calls for calendar and email.
+      - message: Phase 1 complete. Now handle manager approval, create calendar event, and send confirmation email.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:
@@ -139,20 +139,15 @@ rounds:
           - type: reply_content
             content: |-
               # PHASE 2: Approval and External APIs
-              # ✅ CRITICAL HITL PATTERN: For approval forms, include readonly display fields with prefill
-              # so the approver can see the data they're reviewing!
+              # ✅ CRITICAL HITL PATTERN: ONLY provide decision fields - system auto-injects ALL context
               approval, _ = form_collect("manager_approval", {
                   "title": "Manager Approval Required",
-                  "description": "Please review the registration details below and approve or reject.",
+                  "description": "Review the registration and decide",
                   "fields": [
-                      # Display context for informed decision (readonly with prefill from previous steps)
-                      {"name": "full_name", "label": "Full Name", "prefill": registration['full_name'], "readonly": True},
-                      {"name": "email", "label": "Email", "prefill": registration['email'], "readonly": True},
-                      {"name": "phone", "label": "Phone", "prefill": registration['phone'], "readonly": True},
-                      {"name": "company", "label": "Company", "prefill": registration['company'], "readonly": True},
-                      {"name": "payment_amount", "label": "Payment Amount", "prefill": f"${payment['amount']}", "readonly": True},
-                      {"name": "card_last4", "label": "Card Number", "prefill": f"****{payment['card_number'][-4:]}", "readonly": True},
-                      # Decision fields at the end
+                      # ONLY decision fields - system will automatically inject:
+                      # - registration details (full_name, email, phone, company)
+                      # - payment details (amount, card info)
+                      # - downstream calendar event preview
                       {"name": "decision", "label": "Decision", "type": "select", "options": ["Approve", "Reject"], "required": True},
                       {"name": "comments", "label": "Comments", "type": "textarea"}
                   ],
@@ -180,7 +175,7 @@ rounds:
       # =====================================================================
       # Planner -> CodeInterpreter: PHASE 3 (Feedback)
       # =====================================================================
-      - message: Phase 2 complete. Generate the feedback collection form.
+      - message: Phase 2 complete. Collect event feedback from attendees.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:

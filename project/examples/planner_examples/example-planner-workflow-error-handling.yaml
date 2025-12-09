@@ -7,7 +7,7 @@ rounds:
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: Please generate Python code to fetch data with try/except error handling and retry logic.
+      - message: Fetch data with error handling and retry logic on failures.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:

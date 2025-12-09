@@ -7,7 +7,7 @@ rounds:
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: Please generate Python code with nested conditionals to route tickets based on priority and category.
+      - message: Route tickets to appropriate teams based on priority and category using nested conditional logic.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:

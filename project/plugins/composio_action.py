@@ -224,6 +224,10 @@ class ComposioAction(Plugin):
                                 f"RESPONSE STRUCTURE: {structure_hint}\n"
                                 f"Use the structure above to access the data correctly."
                             )
+                            
+                            # ✅ CRITICAL: Print description so LLM can see it!
+                            print(f"\n{description}\n")
+                            
                             logger.info(f"✅ [COMPOSIO_PLUGIN] Host callback succeeded: {action_name}")
                             return data, description
                         else:
@@ -846,6 +850,89 @@ class ComposioAction(Plugin):
         uuid_pattern = r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
         return bool(re.match(uuid_pattern, value))
     
+    def _has_resolver_for_param(self, param_name: str) -> bool:
+        """
+        Check if a MEANINGFUL resolver exists for this parameter in the resolver_graph.
+        
+        SCALABLE ARCHITECTURE:
+        - Returns True if a SPECIFIC search/list action can resolve this parameter
+        - Returns False if no specific resolver OR only generic meta-actions exist
+        - Filters out meta-actions (COMPOSIO_SEARCH_TOOLS, etc.) - these aren't real resolvers
+        - Fully dynamic - no hardcoding of specific parameters!
+        
+        Examples:
+        - departure_id: Only COMPOSIO_SEARCH_TOOLS → NO meaningful resolver → collect directly
+        - product_id: PRODUCT_SEARCH exists → meaningful resolver → use search
+        - user_id: USER_LIST exists → meaningful resolver → use list
+        """
+        try:
+            # Meta-actions that are NOT meaningful resolvers
+            # These are tool discovery actions - they search for OTHER tools, not data
+            META_ACTIONS = {
+                'COMPOSIO_SEARCH_TOOLS',
+                'COMPOSIO_GET_TOOLS',
+                'COMPOSIO_LIST_TOOLS',
+            }
+            
+            # Build resolver graph
+            resolver_graph = self._build_resolver_graph()
+            
+            # Normalize param name
+            param_key = re.sub(r'(?<!^)(?=[A-Z])', '_', param_name).lower()
+            
+            # Find all resolvers for this param
+            resolvers = []
+            
+            # Check exact match
+            if param_key in resolver_graph:
+                resolvers.extend(resolver_graph[param_key])
+            
+            # Try semantic variations ONLY if no exact match
+            # SCALABLE: Match based on shared prefix/suffix, not generic substrings
+            if not resolvers:
+                # Extract the base entity name (e.g., "departure" from "departure_id")
+                param_base = param_key.replace('_id', '').replace('_', '')
+                
+                for key in resolver_graph.keys():
+                    key_base = key.replace('_id', '').replace('_', '')
+                    
+                    # Match if they share significant semantic overlap
+                    # Example: "departure_id" ↔ "departure_airport_id" (YES)
+                    # Example: "departure_id" ↔ "product_id" (NO)
+                    if len(param_base) >= 3 and len(key_base) >= 3:
+                        if param_base in key_base or key_base in param_base:
+                            resolvers.extend(resolver_graph[key])
+                            break
+            
+            # Filter out meta-actions - these don't count as meaningful resolvers
+            meaningful_resolvers = [
+                r for r in resolvers 
+                if r.get('action', '').upper() not in META_ACTIONS
+            ]
+            
+            # Has meaningful resolver only if we found non-meta actions
+            has_meaningful = len(meaningful_resolvers) > 0
+            
+            # Debug logging to see what's happening
+            if resolvers:
+                print(
+                    f"[COMPOSIO_PLUGIN] 🔍 Resolver check for '{param_name}': "
+                    f"total={len(resolvers)}, meaningful={len(meaningful_resolvers)}"
+                )
+                if not has_meaningful:
+                    print(
+                        f"[COMPOSIO_PLUGIN] ⚠️ Only meta-actions found for '{param_name}': "
+                        f"{[r.get('action') for r in resolvers]} - will suggest direct collection"
+                    )
+            
+            return has_meaningful
+            
+        except Exception as e:
+            logger.debug(f"[COMPOSIO_PLUGIN] Error checking resolver for {param_name}: {e}")
+            # Safe fallback: assume NO resolver (collect directly)
+            # This prevents suggesting search when we're unsure
+            return False
+    
     def _suggest_search_action(self, action_name: str, param_name: str) -> str:
         """
         Dynamically suggest a SEARCH action based on the current action and parameter.
@@ -1344,14 +1431,49 @@ class ComposioAction(Plugin):
         # Successful responses are unwrapped and don't have 'success' field.
         # Only error responses (placeholder detection) have 'success': False.
         
-        # Use dynamic structure hint (same as real API)
-        structure_hint = self._describe_data_structure(mock_data)
+        # =====================================================================
+        # SPECIAL CASE: COMPOSIO_SEARCH_TOOLS returns 'results' array directly
+        # =====================================================================
+        # In real execution, COMPOSIO_SEARCH_TOOLS returns just the results array,
+        # not the full data object. This ensures mock behavior matches real API.
+        # When no tools are found, return [] (empty list) so LLM can detect it.
+        # =====================================================================
+        if action_name == "COMPOSIO_SEARCH_TOOLS" and isinstance(mock_data, dict) and 'results' in mock_data:
+            mock_data = mock_data['results']  # Unwrap to just the results array
         
-        description = (
-            f"Successfully executed {action_name}.\n"
-            f"RESPONSE STRUCTURE: {structure_hint}\n"
-            f"Use the structure above to access the data correctly."
-        )
+        # =====================================================================
+        # TASKWEAVER PATTERN: Explicit description for empty results
+        # =====================================================================
+        # Follow sql_pull_data.py pattern: Tell LLM explicitly when results are empty
+        # This is more scalable than expecting LLM to check len(results) == 0
+        # =====================================================================
+        if action_name == "COMPOSIO_SEARCH_TOOLS":
+            if isinstance(mock_data, list) and len(mock_data) == 0:
+                description = (
+                    f"Successfully executed {action_name}.\n"
+                    f"The search returned NO matching tools (empty list: []).\n"
+                    f"No tools were found that match your search criteria.\n"
+                    f"Consider collecting the required data directly from the user instead."
+                )
+            else:
+                # CRITICAL: mock_data is ALREADY the list (unwrapped from 'results')
+                # Make this crystal clear in the description!
+                description = (
+                    f"Successfully executed {action_name}.\n"
+                    f"Found {len(mock_data) if isinstance(mock_data, list) else 'N/A'} matching tool(s).\n"
+                    f"IMPORTANT: The returned data IS the list directly (already unwrapped).\n"
+                    f"Access elements with: result[0], result[1], etc.\n"
+                    f"Each element structure: {self._describe_data_structure(mock_data[0]) if isinstance(mock_data, list) and len(mock_data) > 0 else 'N/A'}"
+                )
+        else:
+            # Use dynamic structure hint (same as real API)
+            structure_hint = self._describe_data_structure(mock_data)
+            
+            description = (
+                f"Successfully executed {action_name}.\n"
+                f"RESPONSE STRUCTURE: {structure_hint}\n"
+                f"Use the structure above to access the data correctly."
+            )
         
         return mock_data, description
     
@@ -1447,7 +1569,16 @@ class ComposioAction(Plugin):
             full_mock = self._generate_mock_from_schema(response_schema)
         
         print(f"[COMPOSIO_PLUGIN] Generated mock from cache for {action_name}")
-        return self._unwrap_and_describe_mock(full_mock, action_name)
+        
+        # Get the data and description
+        mock_data, description = self._unwrap_and_describe_mock(full_mock, action_name)
+        
+        # ✅ CRITICAL: Print description so LLM can see it in execution logs!
+        # TaskWeaver shows printed output to the LLM, not just return values.
+        # This follows the sql_pull_data pattern where descriptions guide the LLM.
+        print(f"\n{description}\n")
+        
+        return mock_data, description
     
     def _get_schema_max_depth(self, schema: Dict[str, Any], current: int = 0, visited: set = None) -> int:
         """Calculate the maximum nesting depth of a schema dynamically."""
@@ -1727,6 +1858,13 @@ class ComposioAction(Plugin):
         # =====================================================================
         # GENERIC PATTERNS (work across many APIs)
         # =====================================================================
+        elif prop_lower == 'value':
+            # Microsoft Graph API standard response format (Outlook, Teams, OneDrive, SharePoint)
+            # Generic array of objects with common fields
+            return [
+                {'id': 'item_001', 'name': 'Sample Item 1'},
+                {'id': 'item_002', 'name': 'Sample Item 2'},
+            ]
         elif prop_lower == 'results':
             # Generic search/list results
             return [
@@ -1780,34 +1918,17 @@ class ComposioAction(Plugin):
         if schema_type == 'object':
             properties = schema.get('properties', {})
             
-            # DYNAMIC FIX: If schema says 'object' but property name suggests ID/string,
-            # return a sensible string value instead of empty object
-            # This handles malformed schemas where 'id', 'name', etc. are typed as objects
-            if not properties:  # Empty object schema - use property name for context
-                if prop_lower.endswith('id') or prop_lower.endswith('_id') or prop_lower == 'id':
-                    entity = prop_lower.replace('_id', '').replace('id', '').strip('_')
-                    return f'{entity}_abc123xyz' if entity else 'id_abc123xyz'
-                elif prop_lower == 'name' or prop_lower.endswith('name'):
-                    return 'Sample Name'
-                elif prop_lower == 'title':
-                    return 'Sample Title'
-                elif 'email' in prop_lower:
-                    return 'example@domain.com'
-                elif 'url' in prop_lower or 'link' in prop_lower:
-                    return 'https://example.com/resource'
-                elif 'type' in prop_lower or 'kind' in prop_lower or 'mimetype' in prop_lower:
-                    return 'default_type'
-                elif 'size' in prop_lower:
-                    return 1024
-                elif 'time' in prop_lower or 'date' in prop_lower:
-                    return '2025-01-15T10:00:00Z'
-                elif 'count' in prop_lower:
-                    return 1
-                elif prop_lower in ('shared', 'starred', 'trashed', 'private', 'public'):
-                    return False
-                else:
-                    # SCALABLE FIX: Generate unique value that won't trigger placeholder detection
-                    return f'{prop_lower}_abc123xyz' if prop_lower else 'value_abc123xyz'
+            # SCALABLE FIX: If schema says 'object' but has no properties
+            # Schema has `additionalProperties: true` but no defined `properties`
+            # This means: "it's an object, but structure is unknown/dynamic"
+            if not properties:  # Empty object schema
+                # Return an empty dict - this is valid per the schema and scalable for ANY API
+                # The LLM will see it's empty and either:
+                # 1. Realize there's no data and handle gracefully
+                # 2. Get a KeyError when trying to access fields, then retry with a fix
+                # This avoids returning strings that cause TypeError when accessed as dicts
+                print(f"[COMPOSIO_PLUGIN] ⚠️ Empty object schema for '{prop_name}' - returning empty dict")
+                return {}
             
             mock_obj = {}
             for pname, prop_schema in list(properties.items())[:15]:  # Limit to 15 props for completeness
@@ -2013,24 +2134,23 @@ class ComposioAction(Plugin):
             logger.info(f"[COMPOSIO_PLUGIN] SIMULATION MODE: {action_name}")
             
             # =====================================================================
-            # PLACEHOLDER DETECTION IN SIMULATION MODE
+            # TASKWEAVER PATTERN: Let the LLM learn from natural API feedback
             # =====================================================================
-            # Even in simulation, detect obvious placeholders and return an error
-            # so the LLM is forced to generate proper code with SEARCH steps.
+            # Instead of pre-validating parameters and blocking execution,
+            # let the mock data be generated and returned.
+            # 
+            # If parameters are semantically wrong (e.g., "New York" for departure_id),
+            # the mock data structure will be returned, and the LLM will see from the
+            # description whether it needs to adjust its approach.
+            #
+            # This follows TaskWeaver's core philosophy (see sql_pull_data.py, klarna_search.py):
+            # 1. Plugins are simple executors - they don't try to outsmart the LLM
+            # 2. They return (data, description) 
+            # 3. The LLM learns from the feedback loop
+            #
+            # The LLM will self-correct through retries when it sees unexpected results.
             # =====================================================================
-            for param_name, param_value in (params or {}).items():
-                if isinstance(param_value, str) and param_value:
-                    if self._is_obvious_placeholder(param_value, param_name, action_name):
-                        # Build dynamic error message based on action context
-                        search_suggestion = self._suggest_search_action(action_name, param_name)
-                        
-                        error_msg = (
-                            f"ERROR: Parameter '{param_name}' has placeholder value '{param_value}'. "
-                            f"You must first use a SEARCH action to find the actual {param_name}. "
-                            f"{search_suggestion}"
-                        )
-                        print(f"[COMPOSIO_PLUGIN] ❌ {error_msg}")
-                        return {"error": error_msg, "success": False}, error_msg
+            # (Placeholder detection removed - following TaskWeaver's established pattern)
             
             return self._get_mock_response(action_name, params)
         
@@ -2117,6 +2237,9 @@ class ComposioAction(Plugin):
                 # RICH DESCRIPTION: Use content_preparer for human-readable output
                 # This is the SINGLE SOURCE OF TRUTH for content formatting
                 description = self._format_rich_description(data, action_name)
+                
+                # ✅ CRITICAL: Print description so LLM can see it in execution logs!
+                print(f"\n{description}\n")
                 
                 logger.info(f"[COMPOSIO_PLUGIN] Action succeeded: {action_name}")
                 return data, description

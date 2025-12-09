@@ -7,7 +7,7 @@ rounds:
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: Please generate Python code to collect a list of email addresses and send a notification to each one using a for loop.
+      - message: Collect a list of email addresses and send a notification to each recipient.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:

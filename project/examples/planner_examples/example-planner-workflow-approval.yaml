@@ -7,19 +7,20 @@ rounds:
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: Please generate Python code to collect order details using input(), add an approval step with if/else logic, and send notifications based on the approval decision.
+      - message: Collect order details, add approval step with conditional logic, and send notifications based on approval decision.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:
           - type: plan_reasoning
             content: |-
-              The user wants a workflow with order collection, approval logic, and conditional notifications. I will instruct CodeInterpreter to generate code with input() for forms, if/else for approval, and print() for notifications.
+              The user wants a workflow with order collection, approval logic, and conditional notifications. Following the CRITICAL ordering rule, I will: collect order details, check inventory/pricing, then get HITL approval showing ALL context (order + inventory results), and finally send emails based on the decision.
           - type: init_plan
             content: |-
-              1. Generate code to collect order details using input()
-              2. Add approval step with conditional logic <sequentially depends on 1>
-              3. Send notifications based on approval decision <sequentially depends on 2>
-              4. Report result to user <interactively depends on 3>
+              1. Collect order details using form_collect() with structured fields
+              2. Check inventory and get pricing for the ordered product using composio_action <sequentially depends on 1>
+              3. Add HITL approval step with decision fields only (system auto-injects all context) <sequentially depends on 2>
+              4. Send email notifications using composio_action based on approval decision <sequentially depends on 3>
+              5. Report result to user <interactively depends on 4>
           - type: plan
             content: |-
               1. Instruct CodeInterpreter to generate complete workflow code
@@ -33,28 +34,67 @@ rounds:
         send_to: Planner
         attachment_list:
           - type: thought
-            content: I will generate Python code with input() for forms, if/else for approval, and conditional notifications.
+            content: I will generate code using form_collect() for both data collection and approval. For the approval form, I will only provide decision fields - the system will automatically inject all context (upstream data and downstream action previews).
           - type: reply_type
             content: python
           - type: reply_content
             content: |-
-              # Step 1: Collect order details (FORM)
-              customer_name = input("Enter customer name: ")
-              product = input("Enter product name: ")
-              quantity = input("Enter quantity: ")
-              total_amount = input("Enter total amount: ")
+              # Step 1: Collect order details using form_collect()
+              order_details, desc = form_collect("order_details", {
+                  "title": "Order Information",
+                  "description": "Enter the order details",
+                  "fields": [
+                      {"name": "customer_name", "label": "Customer Name", "required": True},
+                      {"name": "product", "label": "Product Name", "required": True},
+                      {"name": "quantity", "label": "Quantity", "type": "number", "required": True}
+                  ]
+              })
               
-              # Step 2: Approval decision (CONDITIONAL)
-              approved = input("Approve this order? (yes/no): ").lower() == 'yes'
+              # Step 2: Check inventory and get pricing (DATA FETCH - comes BEFORE approval)
+              inventory_check, desc = composio_action("COMPOSIO_SEARCH_TOOLS", {
+                  "query": f"Check inventory for {order_details['product']}"
+              })
               
-              # Step 3: Send notification based on approval
-              if approved:
-                  print(f"Order approved for {customer_name}")
-                  print(f"Sending confirmation email for {quantity} x {product}")
-                  print("Email sent successfully!")
+              # Calculate pricing based on quantity
+              unit_price = 29.99
+              total_amount = unit_price * order_details['quantity']
+              availability_status = "In Stock" if len(inventory_check) > 0 else "Out of Stock"
+              
+              # Step 3: HITL Approval (system will auto-inject ALL context + downstream actions)
+              # ✅ CRITICAL PATTERN: Approval comes AFTER data is fetched
+              # ✅ NEW PATTERN: Only provide decision fields - system adds context automatically
+              approval, desc = form_collect("order_approval", {
+                  "title": "Order Approval Required",
+                  "description": "Review the order details and decide",
+                  "fields": [
+                      # ONLY decision fields - system will automatically inject:
+                      # - order_details (customer_name, product, quantity)
+                      # - inventory_check results
+                      # - calculated pricing (unit_price, total_amount, availability)
+                      # - downstream email preview (recipient, subject, body)
+                      {"name": "decision", "label": "Decision", "type": "select", "options": ["Approve", "Reject"], "required": True},
+                      {"name": "comments", "label": "Comments", "type": "textarea"}
+                  ],
+                  "hitl_config": {"blocking": True, "decision_field": "decision"}
+              })
+              
+              # Step 4: Send notification based on approval decision
+              if approval['decision'] == "Approve":
+                  email_result, desc = composio_action("GMAIL_SEND_EMAIL", {
+                      "to": f"{order_details['customer_name']}@example.com",
+                      "subject": "Order Approved",
+                      "body": f"Your order for {order_details['quantity']} x {order_details['product']} (${total_amount}) has been approved!"
+                  })
+                  result = "Order approved and confirmation sent"
               else:
-                  print(f"Order denied for {customer_name}")
-                  print("Sending rejection notification")
+                  email_result, desc = composio_action("GMAIL_SEND_EMAIL", {
+                      "to": f"{order_details['customer_name']}@example.com",
+                      "subject": "Order Rejected",
+                      "body": f"Your order has been rejected. Reason: {approval.get('comments', 'No reason provided')}"
+                  })
+                  result = "Order rejected and notification sent"
+              
+              result
           - type: verification
             content: CORRECT
           - type: code_error
@@ -69,17 +109,19 @@ rounds:
         attachment_list:
           - type: plan_reasoning
             content: |-
-              The workflow includes:
-              1. Form to collect order details
-              2. Approval gate with conditional logic
-              3. Different notifications for approved vs denied orders
-              The CodeInterpreter successfully implemented all steps with proper Python code.
+              The workflow correctly follows the CRITICAL ordering rule:
+              1. form_collect() to gather order details
+              2. composio_action to check inventory and calculate pricing (data fetch BEFORE approval)
+              3. HITL approval with decision fields only - system auto-injects context (order + inventory + pricing + email preview)
+              4. composio_action to send emails based on decision
+              The CodeInterpreter successfully implemented the pattern with clear separation of concerns.
           - type: init_plan
             content: |-
-              1. Generate code to collect order details using input()
-              2. Add approval step with conditional logic <sequentially depends on 1>
-              3. Send notifications based on approval decision <sequentially depends on 2>
-              4. Report result to user <interactively depends on 3>
+              1. Collect order details using form_collect() with structured fields
+              2. Check inventory and get pricing for the ordered product using composio_action <sequentially depends on 1>
+              3. Add HITL approval step with decision fields only (system auto-injects all context) <sequentially depends on 2>
+              4. Send email notifications using composio_action based on approval decision <sequentially depends on 3>
+              5. Report result to user <interactively depends on 4>
           - type: plan
             content: |-
               1. Instruct CodeInterpreter to generate complete workflow code

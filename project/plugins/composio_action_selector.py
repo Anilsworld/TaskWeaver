@@ -161,6 +161,11 @@ def select_actions_pgvector(
         # These are orchestration tools, not app-specific actions
         queryset = queryset.exclude(action_id__startswith='COMPOSIO_')
         
+        # NOTE: External form services (BYTEFORMS, FEATHERY, etc.) are NOT filtered here.
+        # The LLM is guided via prompt instructions to prefer internal form_collect() plugin
+        # for user input/HITL. External form services may still be useful for edge cases
+        # (e.g., publishing forms to external websites).
+        
         # Optional app filter
         if app_filter:
             queryset = queryset.filter(action_id__icontains=app_filter.upper())
@@ -333,7 +338,8 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
         
         # ✅ Response schema (CRITICAL for preventing type errors!)
         response_hint = ""
-        response_schema = action.get('response_schema')
+        # Support both 'response' (from action_matcher) and 'response_schema' (from old selector)
+        response_schema = action.get('response') or action.get('response_schema')
         
         if response_schema and isinstance(response_schema, dict):
             response_type = response_schema.get('type', 'object')
@@ -405,50 +411,60 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
             # Build example call with first required param
             first_param = required[0]
             example_values = param_examples.get(first_param)
-            if example_values and len(example_values) > 0:
-                example_value = example_values[0]
-                # Format the example value
-                if isinstance(example_value, str):
-                    example_value = f'"{example_value}"'
-                line += f"\n  Example: result, desc = composio_action(\"{action_id}\", {{\"{first_param}\": {example_value}}})"
-                
-                # ✅ CRITICAL: Show error check in usage example (LLMs learn from examples, not just instructions)
-                line += f"\n           if 'error' in result: raise Exception(result['error'])"
-                
-                # Show how to extract from response based on structure
-                if response_schema and isinstance(response_schema, dict):
-                    props = response_schema.get('properties', {})
+            
+            # Handle both list and single value examples
+            if example_values:
+                if isinstance(example_values, list) and len(example_values) > 0:
+                    example_value = example_values[0]
+                elif not isinstance(example_values, (list, dict)):
+                    # Single value (int, str, etc.)
+                    example_value = example_values
+                else:
+                    example_value = None
                     
-                    # Check for Composio wrapper pattern
-                    if 'data' in props and 'successful' in props:
-                        data_schema = props.get('data', {})
-                        data_type = data_schema.get('type')
-                        data_props = data_schema.get('properties', {})
+                if example_value is not None:
+                    # Format the example value
+                    if isinstance(example_value, str):
+                        example_value = f'"{example_value}"'
+                    line += f"\n  Example: result, desc = composio_action(\"{action_id}\", {{\"{first_param}\": {example_value}}})"
+                    
+                    # ✅ CRITICAL: Show error check in usage example (LLMs learn from examples, not just instructions)
+                    line += f"\n           if 'error' in result: raise Exception(result['error'])"
+                    
+                    # Show how to extract from response based on structure
+                    if response_schema and isinstance(response_schema, dict):
+                        props = response_schema.get('properties', {})
                         
-                        if data_type == 'array':
-                            line += f"\n           data = result  # List"
-                        elif data_type == 'object' and data_props:
-                            first_field = list(data_props.keys())[0]
-                            first_field_schema = data_props[first_field]
+                        # Check for Composio wrapper pattern
+                        if 'data' in props and 'successful' in props:
+                            data_schema = props.get('data', {})
+                            data_type = data_schema.get('type')
+                            data_props = data_schema.get('properties', {})
                             
-                            # Check if first field is an array
-                            if first_field_schema.get('type') == 'array':
-                                items_props = first_field_schema.get('items', {}).get('properties', {})
-                                if items_props:
-                                    first_item_key = list(items_props.keys())[0]
-                                    line += f"\n           {first_field} = result['{first_field}']  # List of dicts"
-                                    line += f"\n           item_key = {first_field}[0]['{first_item_key}']  # Array element"
+                            if data_type == 'array':
+                                line += f"\n           data = result  # List"
+                            elif data_type == 'object' and data_props:
+                                first_field = list(data_props.keys())[0]
+                                first_field_schema = data_props[first_field]
+                                
+                                # Check if first field is an array
+                                if first_field_schema.get('type') == 'array':
+                                    items_props = first_field_schema.get('items', {}).get('properties', {})
+                                    if items_props:
+                                        first_item_key = list(items_props.keys())[0]
+                                        line += f"\n           {first_field} = result['{first_field}']  # List of dicts"
+                                        line += f"\n           item_key = {first_field}[0]['{first_item_key}']  # Array element"
+                                    else:
+                                        line += f"\n           {first_field} = result['{first_field}']  # List"
                                 else:
-                                    line += f"\n           {first_field} = result['{first_field}']  # List"
+                                    line += f"\n           {first_field} = result['{first_field}']"
                             else:
-                                line += f"\n           {first_field} = result['{first_field}']"
-                        else:
-                            line += f"\n           data = result"
-                    elif response_type == 'array':
-                        line += f"\n           first_item = result[0]  # List of dicts"
-                    elif response_type == 'object' and props:
-                        first_field = list(props.keys())[0]
-                        line += f"\n           {first_field} = result['{first_field}']"
+                                line += f"\n           data = result"
+                        elif response_type == 'array':
+                            line += f"\n           first_item = result[0]  # List of dicts"
+                        elif response_type == 'object' and props:
+                            first_field = list(props.keys())[0]
+                            line += f"\n           {first_field} = result['{first_field}']"
         
         lines.append(line)
     
@@ -463,13 +479,80 @@ def select_composio_actions(
     """
     ⚡ Main entry point - Get relevant Composio actions for a query.
     
-    Uses pgvector for fast indexed search (milliseconds).
+    ✅ NEW: Uses TWO-STAGE search (apps → actions) instead of global search.
+    This matches Composio's own architecture and dramatically improves precision.
+    
+    Architecture:
+        1. Find relevant APPS (200 apps, fast pgvector search)
+        2. Search ACTIONS within those apps (10-50 actions, scoped search)
+    
     Returns formatted string to inject into TaskWeaver prompt.
     """
     # ✅ LIVE DEBUGGING: Mark start of new action selection session
-    _log_to_debug_file(f"\n{'#'*80}\n[NEW SESSION] User Query: {user_query[:150]}\n{'#'*80}")
+    _log_to_debug_file(f"\n{'#'*80}\n[NEW SESSION - TWO STAGE] User Query: {user_query[:150]}\n{'#'*80}")
     if app_hints:
         _log_to_debug_file(f"[APP HINTS] {app_hints}")
+    
+    try:
+        # ✅ Use the WORKING two-stage matcher (action_matcher.py)
+        from apps.integrations.services.action_matcher import ComposioActionMatcher
+        
+        matcher = ComposioActionMatcher(enable_warmup=False)  # No warmup for speed
+        
+        # Match actions using two-stage approach
+        action_dicts = matcher.match_for_subtask(
+            subtask_description=user_query,
+            app_hints=app_hints,
+            top_k_apps=10 if not app_hints else len(app_hints),  # Search 10 apps (increased for multi-concept queries)
+            top_k_actions_per_app=2,  # 2 actions per app = ~20 total
+            min_confidence=0.25  # Lower threshold for better recall
+        )
+        
+        if not action_dicts:
+            _log_to_debug_file("[TWO STAGE] No actions matched")
+            return ""
+        
+        # Log the matched apps and actions
+        matched_apps = list(set([a['app_name'] for a in action_dicts]))
+        _log_to_debug_file(f"[TWO STAGE] Matched apps: {matched_apps}")
+        _log_to_debug_file(f"[TWO STAGE] Found {len(action_dicts)} actions:")
+        
+        # Enhanced logging - show ALL actions returned
+        logger.info(f"[TWO STAGE] 🎯 Returned {len(action_dicts)} actions from two-stage search:")
+        for i, action in enumerate(action_dicts[:top_k], 1):
+            action_id = action['action_id']
+            app_name = action['app_name']
+            confidence = action.get('confidence', 0)
+            _log_to_debug_file(
+                f"  {i}. {action_id} "
+                f"(app: {app_name}, confidence: {confidence:.4f})"
+            )
+            logger.info(f"[TWO STAGE]   {i}. {action_id} (app: {app_name}, confidence: {confidence:.3f})")
+        
+        # Format for TaskWeaver prompt (same format as before)
+        return format_actions_for_prompt(action_dicts, top_k)
+        
+    except ImportError as e:
+        _log_to_debug_file(f"[TWO STAGE] Import error, falling back to old method: {e}")
+        # Fallback to old global search if action_matcher not available
+        return _select_composio_actions_fallback(user_query, app_hints, top_k)
+    except Exception as e:
+        logger.error(f"[TWO STAGE] Error in two-stage search: {e}", exc_info=True)
+        _log_to_debug_file(f"[TWO STAGE] Error: {e}")
+        # Fallback to old global search
+        return _select_composio_actions_fallback(user_query, app_hints, top_k)
+
+
+def _select_composio_actions_fallback(
+    user_query: str,
+    app_hints: Optional[List[str]] = None,
+    top_k: int = 5
+) -> str:
+    """
+    ⚠️  FALLBACK: Old global pgvector search (less accurate).
+    Only used if ComposioActionMatcher is unavailable.
+    """
+    _log_to_debug_file(f"[FALLBACK] Using old global search method")
     
     all_actions = []
     
@@ -496,7 +579,7 @@ def select_composio_actions(
     unique_actions.sort(key=lambda x: x.get('similarity', 0), reverse=True)
     
     # ✅ LIVE DEBUGGING: Log final actions sent to LLM
-    _log_to_debug_file(f"[FINAL SELECTION] Top {min(top_k, len(unique_actions))} actions being sent to LLM:")
+    _log_to_debug_file(f"[FALLBACK SELECTION] Top {min(top_k, len(unique_actions))} actions being sent to LLM:")
     for i, action in enumerate(unique_actions[:top_k], 1):
         _log_to_debug_file(f"  {i}. {action['action_id']} (similarity: {action.get('similarity', 0):.4f})")
     

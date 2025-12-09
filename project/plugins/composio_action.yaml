@@ -61,10 +61,6 @@ examples: |-
   # ========== GOOGLE CALENDAR ==========
   # Create calendar event - SEARCH FIRST to find exact action for your calendar app!
   tools, desc = composio_action("COMPOSIO_SEARCH_TOOLS", {"queries": [{"use_case": "create calendar event"}]})
-  
-  # ========== FLIGHTS ==========
-  # Search for flights
-  flights, desc = composio_action("COMPOSIO_SEARCH_FLIGHTS", {"departure_id": "JFK", "arrival_id": "LAX", "outbound_date": "2025-01-15"})
 
 parameters:
   - name: action_name

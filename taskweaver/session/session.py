@@ -187,6 +187,7 @@ class Session:
                         self.workspace,
                         f"planner_prompt_log_{chat_round.id}_{post.id}.json",
                     ),
+                    session_var=self.session_var,
                 )
             elif recipient in self.worker_instances.keys():
                 reply_post = self.worker_instances[recipient].reply(

@@ -7,7 +7,7 @@ rounds:
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: Please generate code to collect customer details, then search for similar tickets, display results, get approval, and if approved send notifications
+      - message: Collect customer details, search for similar tickets, display results, get approval, and if approved send email notifications.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:

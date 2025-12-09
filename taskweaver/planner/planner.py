@@ -187,16 +187,32 @@ class Planner(Role):
 
         return conversation
 
-    def get_env_context(self) -> str:
+    def get_env_context(self, session_var: dict = None) -> str:
         # get the current time
         now = datetime.datetime.now()
         current_time = now.strftime("%Y-%m-%d %H:%M:%S")
 
-        return f"- Current time: {current_time}"
+        context = f"- Current time: {current_time}"
+        
+        # Check if we're in workflow generation mode
+        if session_var:
+            is_generation_mode = session_var.get("_workflow_generation_mode", "false")
+            if is_generation_mode == "true":
+                context += (
+                    "\n- WORKFLOW GENERATION MODE: You are generating a complete workflow structure, NOT executing it."
+                    "\n  * Generate ALL workflow steps in ONE instruction to CodeInterpreter (do NOT split across multiple rounds)"
+                    "\n  * Include approval/HITL steps as form_collect() calls with conditional logic in the SAME code block"
+                    "\n  * After approval steps, continue with post-approval actions (e.g., send emails, update records)"
+                    "\n  * Do NOT stop and talk to User for approval - generate the full workflow including post-approval steps"
+                    "\n  * The workflow will be executed later; your job is to define the complete structure now"
+                )
+        
+        return context
 
     def compose_prompt(
         self,
         rounds: List[Round],
+        session_var: dict = None,
     ) -> List[ChatMessageType]:
         experiences = self.format_experience(
             template=self.prompt_data["experience_instruction"],
@@ -205,7 +221,7 @@ class Planner(Role):
         chat_history = [
             format_chat_message(
                 role="system",
-                message=f"{self.compose_sys_prompt(context=self.get_env_context())}" f"\n{experiences}",
+                message=f"{self.compose_sys_prompt(context=self.get_env_context(session_var=session_var))}" f"\n{experiences}",
             ),
         ]
 
@@ -255,7 +271,8 @@ class Planner(Role):
         post_proxy = self.event_emitter.create_post_proxy(self.alias)
 
         post_proxy.update_status("composing prompt")
-        chat_history = self.compose_prompt(rounds)
+        session_var = kwargs.get("session_var", None)
+        chat_history = self.compose_prompt(rounds, session_var=session_var)
 
         def check_post_validity(post: Post):
             missing_elements: List[str] = []
