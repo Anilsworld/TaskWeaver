@@ -13,9 +13,14 @@ Solution:
 """
 import logging
 import hashlib
+import os
+from datetime import datetime
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# ✅ LIVE DEBUGGING: File path for embedding query logs
+DEBUG_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'embedding_debug.log')
 
 # Configuration constants
 EMBEDDING_CACHE_TTL = 3600  # 1 hour
@@ -28,6 +33,21 @@ MAX_RESPONSE_FIELDS = 3  # Max response fields to show
 # Cached OpenAI client and config
 _openai_client = None
 _embedding_deployment = None
+
+
+def _log_to_debug_file(message: str):
+    """
+    Write debug message to file for live testing analysis.
+    
+    ✅ This allows us to see EXACTLY what pgvector returns during workflow generation.
+    File: TaskWeaver/project/embedding_debug.log
+    """
+    try:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(DEBUG_LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"[{timestamp}] {message}\n")
+    except Exception as e:
+        logger.warning(f"[ACTION_SELECTOR] Failed to write debug log: {e}")
 
 
 def _get_openai_client():
@@ -123,6 +143,9 @@ def select_actions_pgvector(
     if not query_emb:
         return []
     
+    # ✅ LIVE DEBUGGING: Write query to file for analysis
+    _log_to_debug_file(f"\n{'='*80}\n[PGVECTOR QUERY] {user_query[:200]}\n{'='*80}")
+    
     # ✅ Try pgvector indexed search first (FAST!)
     try:
         from pgvector.django import CosineDistance
@@ -171,7 +194,30 @@ def select_actions_pgvector(
         # Return top_k after filtering
         results = results[:top_k]
         
-        logger.info(f"[ACTION_SELECTOR] ⚡ pgvector returned {len(results)} actions in ms")
+        # ✅ CRITICAL: Log query and results for debugging embedding quality
+        logger.info(f"[ACTION_SELECTOR] 🔍 Query: '{user_query[:80]}...'")
+        logger.info(f"[ACTION_SELECTOR] ⚡ pgvector returned {len(results)} actions:")
+        for i, r in enumerate(results[:5], 1):  # Show top 5
+            logger.info(f"[ACTION_SELECTOR]   {i}. {r['action_id']} (similarity: {r['similarity']:.3f})")
+        
+        # ✅ LIVE DEBUGGING: Write detailed results to file
+        _log_to_debug_file(f"[PGVECTOR RESULTS] Returned {len(results)} actions (top {min(10, len(results))} shown):")
+        for i, r in enumerate(results[:10], 1):
+            # Get app category for analysis
+            try:
+                from apps.integrations.models import ComposioActionSchema
+                action_obj = ComposioActionSchema.objects.filter(action_id=r['action_id']).select_related('integration').first()
+                app_category = action_obj.integration.integration_category if action_obj and action_obj.integration else 'NULL'
+                app_id = action_obj.integration.integration_id if action_obj and action_obj.integration else 'N/A'
+            except:
+                app_category = 'ERROR'
+                app_id = 'ERROR'
+            
+            _log_to_debug_file(
+                f"  {i:2d}. {r['action_id']:40s} | sim: {r['similarity']:.4f} | "
+                f"app: {app_id:15s} | category: {app_category}"
+            )
+        
         return results
         
     except ImportError:
@@ -420,6 +466,11 @@ def select_composio_actions(
     Uses pgvector for fast indexed search (milliseconds).
     Returns formatted string to inject into TaskWeaver prompt.
     """
+    # ✅ LIVE DEBUGGING: Mark start of new action selection session
+    _log_to_debug_file(f"\n{'#'*80}\n[NEW SESSION] User Query: {user_query[:150]}\n{'#'*80}")
+    if app_hints:
+        _log_to_debug_file(f"[APP HINTS] {app_hints}")
+    
     all_actions = []
     
     # If app hints provided, get top actions from each app
@@ -443,6 +494,11 @@ def select_composio_actions(
     
     # Sort by similarity
     unique_actions.sort(key=lambda x: x.get('similarity', 0), reverse=True)
+    
+    # ✅ LIVE DEBUGGING: Log final actions sent to LLM
+    _log_to_debug_file(f"[FINAL SELECTION] Top {min(top_k, len(unique_actions))} actions being sent to LLM:")
+    for i, action in enumerate(unique_actions[:top_k], 1):
+        _log_to_debug_file(f"  {i}. {action['action_id']} (similarity: {action.get('similarity', 0):.4f})")
     
     return format_actions_for_prompt(unique_actions, top_k)
 
