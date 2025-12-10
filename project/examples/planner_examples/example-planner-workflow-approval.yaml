@@ -1,4 +1,5 @@
-enabled: True
+enabled: False
+description: "[DISABLED - OLD FORMAT with composio_action() calls. Use WORKFLOW dict format instead]"
 rounds:
   - user_query: Create a workflow to process orders with approval and notification
     state: created
@@ -13,7 +14,15 @@ rounds:
         attachment_list:
           - type: plan_reasoning
             content: |-
-              The user wants a workflow with order collection, approval logic, and conditional notifications. Following the CRITICAL ordering rule, I will: collect order details, check inventory/pricing, then get HITL approval showing ALL context (order + inventory results), and finally send emails based on the decision.
+              **PATTERN RECOGNITION:** User wants: collect data → approve → send notification based on decision.
+              This demonstrates the UNIVERSAL "fetch → approve → act" pattern that applies to ANY workflow.
+              
+              Following the complete workflow rules:
+              1. Fetch ALL data BEFORE approval (order details + inventory/pricing) so approver sees complete context
+              2. User said "send notification" AFTER approval → MUST include notification step in plan
+              3. Notification is CONDITIONAL on approval decision → Use if/else logic
+              
+              This pattern works for ANY scenario: orders→emails, messages→replies, documents→publish, requests→process, etc.
           - type: init_plan
             content: |-
               1. Collect order details using form_collect() with structured fields
@@ -34,7 +43,15 @@ rounds:
         send_to: Planner
         attachment_list:
           - type: thought
-            content: I will generate code using form_collect() for both data collection and approval. For the approval form, I will only provide decision fields - the system will automatically inject all context (upstream data and downstream action previews).
+            content: |-
+              **IMPLEMENTING UNIVERSAL "FETCH → APPROVE → ACT" PATTERN:**
+              
+              1. Collect input using form_collect()
+              2. Fetch data using composio_action (before approval so approver sees context)
+              3. HITL approval with decision field (system auto-injects all context)
+              4. **CRITICAL: Execute post-approval action based on decision** (if approved → send email, if rejected → send rejection)
+              
+              This demonstrates the complete workflow pattern that works for ANY scenario - the key is including the ACTION after approval, not just collecting approval!
           - type: reply_type
             content: python
           - type: reply_content
@@ -80,14 +97,14 @@ rounds:
               
               # Step 4: Send notification based on approval decision
               if approval['decision'] == "Approve":
-                  email_result, desc = composio_action("GMAIL_SEND_EMAIL", {
+                  email_result, desc = composio_action("OUTLOOK_SEND_EMAIL", {
                       "to": f"{order_details['customer_name']}@example.com",
                       "subject": "Order Approved",
                       "body": f"Your order for {order_details['quantity']} x {order_details['product']} (${total_amount}) has been approved!"
                   })
                   result = "Order approved and confirmation sent"
               else:
-                  email_result, desc = composio_action("GMAIL_SEND_EMAIL", {
+                  email_result, desc = composio_action("OUTLOOK_SEND_EMAIL", {
                       "to": f"{order_details['customer_name']}@example.com",
                       "subject": "Order Rejected",
                       "body": f"Your order has been rejected. Reason: {approval.get('comments', 'No reason provided')}"
@@ -109,12 +126,19 @@ rounds:
         attachment_list:
           - type: plan_reasoning
             content: |-
-              The workflow correctly follows the CRITICAL ordering rule:
-              1. form_collect() to gather order details
-              2. composio_action to check inventory and calculate pricing (data fetch BEFORE approval)
-              3. HITL approval with decision fields only - system auto-injects context (order + inventory + pricing + email preview)
-              4. composio_action to send emails based on decision
-              The CodeInterpreter successfully implemented the pattern with clear separation of concerns.
+              **PATTERN SUCCESSFULLY APPLIED (works for ANY workflow):**
+              
+              ✅ Step 1: Collect input (form_collect for order details)
+              ✅ Step 2: Fetch context BEFORE approval (composio_action for inventory/pricing)
+              ✅ Step 3: HITL approval showing ALL data (system auto-injects order + inventory + pricing + downstream preview)
+              ✅ Step 4: **POST-APPROVAL ACTION** (composio_action to send email - CONDITIONAL on decision)
+              
+              **This GENERIC pattern applies to:**
+              - Orders → Emails (this example)
+              - Messages → Replies (substitute message fetch + reply actions)
+              - Documents → Publish (substitute document fetch + publish actions)
+              - Requests → Process (substitute request fetch + process actions)
+              - ANY "fetch → review → act" workflow (fully dynamic, no hardcoding)
           - type: init_plan
             content: |-
               1. Collect order details using form_collect() with structured fields

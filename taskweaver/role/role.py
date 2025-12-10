@@ -260,6 +260,17 @@ class Role:
                 sub_path,
             ),
         )
+        
+        # 🔍 DEBUG: Log which example files are being used (to trace old vs new format)
+        if self.examples:
+            import os
+            for idx, example in enumerate(self.examples, 1):
+                # Extract filename from YAML source if available
+                example_desc = example.description if hasattr(example, 'description') else 'N/A'
+                example_rounds = len(example.rounds) if hasattr(example, 'rounds') else 0
+                self.logger.info(
+                    f"  📄 Example {idx}: rounds={example_rounds}, desc={example_desc[:60]}..."
+                )
 
 
 class RoleModuleConfig(ModuleConfig):

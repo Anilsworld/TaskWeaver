@@ -867,11 +867,12 @@ class ComposioAction(Plugin):
         """
         try:
             # Meta-actions that are NOT meaningful resolvers
-            # These are tool discovery actions - they search for OTHER tools, not data
+            # These are ORCHESTRATION tools - they discover OTHER tools, not application data
+            # NOTE: COMPOSIO_SEARCH_FLIGHTS/SCHOLAR/HOTEL are NOT meta-tools - they're real search tools!
             META_ACTIONS = {
-                'COMPOSIO_SEARCH_TOOLS',
-                'COMPOSIO_GET_TOOLS',
-                'COMPOSIO_LIST_TOOLS',
+                'COMPOSIO_SEARCH_TOOLS',  # Tool discovery API - finds other tools
+                'COMPOSIO_GET_TOOLS',     # Tool listing API
+                'COMPOSIO_LIST_TOOLS',    # Tool catalog API
             }
             
             # Build resolver graph

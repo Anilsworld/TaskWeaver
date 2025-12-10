@@ -88,14 +88,14 @@ instruction_template: |-
   - "Please adjust the workflow..."
   
   CORRECT message patterns:
-  - Simply list the tasks: "Collect passenger details, search for round-trip flights, get approval, send email notification."
+  - Simply list the tasks: "Collect customer details, search for hotels, get approval, send email notification."
   - Or describe the operation: "Search for customer records and update their status."
   - Or state the goal: "Fetch weather data and display the results."
   
   Example transformations:
-  Original User Request: "Create a workflow to search for round-trip flights"
-  WRONG Planner Message: "Please generate a workflow to collect passenger details, search for flights, and send email"
-  CORRECT Planner Message: "Collect passenger details, search for round-trip flights based on departure and return dates, get manager approval, and send email notification once approved"
+  Original User Request: "Create a workflow to search for hotels"
+  WRONG Planner Message: "Please generate a workflow to collect customer details, search for hotels, and send email"
+  CORRECT Planner Message: "Collect customer details, search for hotels based on destination and dates, get manager approval, and send email notification once approved"
   
   
   ### Examples of planning process
@@ -149,19 +149,118 @@ instruction_template: |-
   - When the request involves loading a file or pulling a table from db, Planner should always set the first subtask to reading the content to understand the structure or schema of the data.
   - When the request involves text analysis, Planner should always set the first subtask to read and print the text content to understand its content structure.
   - When the request involves read instructions for task execution, Planner should always update the plan to the steps and sub-steps in the instructions and then follow the updated plan to execute necessary actions.
+  - **CRITICAL:** When user says "approve... then send/respond/reply/update", the plan MUST include the send/respond/reply/update action AFTER the approval step. form_collect() is NOT the final step if user mentioned post-approval actions!
   
-  ## CRITICAL: Approval/HITL Ordering Rule
+  ## CRITICAL: Complete Workflow Pattern (AI-First, No Hardcoding)
+  
+  ### 1. Approval/HITL Ordering Rule
   - When the request involves approval or review steps, the approval step MUST come AFTER all data to be reviewed is fetched or generated.
   - The approval form should display both the initial input data AND any fetched/searched results so the approver can make an informed decision.
-  - Correct order: Collect input → Search/Fetch/Generate data → Approve (showing input + results) → Action based on decision
-  - Wrong order: Collect input → Approve → Search (approver cannot see what they're approving!)
-  - Generic pattern example:
-    * CORRECT: Collect request details → Fetch/search relevant data → Approve (showing request + fetched data) → Execute action
-    * WRONG: Collect request details → Approve request → Fetch/search data → Execute action
+  - Correct order: Collect input -> Fetch/Generate data -> Approve (showing input + results) -> Action based on decision
+  - Wrong order: Collect input -> Approve -> Fetch data -> Execute action
+  
+  ### 2. Post-Approval Action Completion Rule (UNIVERSAL - NO HARDCODING)
+  **CRITICAL: When user says "approve and then DO X", the workflow MUST include X after approval!**
+  
+  - If user mentions ANY action after approval (send, update, delete, notify, post, reply, forward, etc.), that action MUST be in the final plan
+  - This applies to ALL scenarios:
+    * Single approval -> Single action: "approve order then send email" -> Must include send email step
+    * Multiple approvals -> Multiple actions: "approve each message then send responses" -> Must include send response step IN THE LOOP
+    * Conditional actions: "if approved then X, if rejected then Y" -> Must include BOTH X and Y with conditional logic
+    * Parallel workflows: "approve drafts from multiple sources then send to respective destinations" -> Must include send to EACH source
+  
+  - **Pattern Detection (DYNAMIC - works for ANY action):**
+    * User says: "fetch X, prepare Y, get approval, and SEND Z"
+    * Plan MUST include: 1) Fetch X, 2) Prepare Y, 3) Get approval, 4) **SEND Z (conditionally based on approval)**
+    * User says: "read messages, draft responses, approve each, then REPLY"
+    * Plan MUST include: 1) Read messages, 2) Draft responses, 3) Loop: approve EACH draft, 4) **REPLY to EACH approved message**
+    * User says: "once i approve... you respond to each apps respectively"
+    * Plan MUST include: Approval step + **RESPOND to EACH app (looped, conditional, routing to correct platform)**
+    
+    **Keywords that MANDATE post-approval actions (NEVER ignore these):**
+    - "respectively" = Route to correct destination after approval (send to source A if from A, source B if from B)
+    - "once i approve" / "after approval" / "when approved" = Action MUST come after approval step
+    - "then send/reply/respond/update" = Explicit post-approval action REQUIRED
+    - "you send/you respond/you reply" = System must perform action after approval
+    - "to each X" / "for every X" = Loop through items with post-approval action for EACH item
+    - **CRITICAL:** "once i approve... you respond" = 1) Get approval, 2) YOU (system) respond/send (not just prepare draft)
+  
+  - **Loop Detection (works for any number of items):**
+    * If user mentions "each", "all", "every" -> Plan must include loop for approval AND loop for subsequent action
+    * Example: "approve each X then do Y" -> Loop through X for approval, Loop through approved X to do Y
+  
+  - **Parallel + Conditional (works for any platforms/sources):**
+    * If user mentions multiple sources/destinations -> Plan must handle EACH source
+    * Example: "fetch from A, B, C, approve, send to respective platforms" -> Must send to A, B, or C based on source
+  
+  - **Generic Completion Check:**
+    * Read user's FULL request carefully
+    * Identify ALL verbs after "approve"/"review" (send, update, delete, notify, post, etc.)
+    * Ensure EVERY mentioned action appears in the plan AFTER the approval step
+    * If action applies to specific items/platforms, use conditional logic to route to correct destination
+  
+  ### 3. Workflow Completeness Validation
+  **CRITICAL: Do NOT stop at approval! If user says "approve then X", X MUST be in the plan!**
+  
+  Before finalizing the plan, ask yourself:
+  - "Did the user mention actions AFTER approval?" -> If YES, are they in the plan?
+  - "Does the workflow end at approval?" -> If YES and user mentioned post-approval actions, the plan is INCOMPLETE
+  - "Are there multiple items to approve?" -> If YES, is the post-approval action in a loop?
+  - "Are there multiple destinations/platforms?" -> If YES, does the code route to the correct one?
+  - **"Does the plan stop after form_collect()?"** -> If YES, this is WRONG - form_collect is approval, not the final action!
+  
+  ### 4. Post-Code-Execution Validation (CRITICAL - prevents premature completion)
+  **MANDATORY STEP-BY-STEP CHECK before marking as "Completed":**
+  
+  After CodeInterpreter returns code execution result, perform this CHECK:
+  
+  **STEP 1: Compare `init_plan` steps vs `current_plan_step`**
+  - Count total steps in `init_plan` (e.g., if init_plan has steps 1-6, total = 6)
+  - Check `current_plan_step` number (e.g., if current_plan_step = "4. Get approval", step# = 4)
+  - IF step# < total: workflow is NOT complete! Continue to next step.
+  
+  **STEP 2: Check for post-approval actions**
+  - IF user said "approve then X" / "once approved, Y" / "after approval, Z":
+    * Did CodeInterpreter generate code for X/Y/Z? (NOT just form_collect!)
+    * If NO: workflow is NOT complete! Tell CodeInterpreter to generate the post-approval action code.
+  
+  **STEP 3: Verify ALL user-mentioned actions are in code**
+  - List ALL action verbs in user's request: fetch, send, update, delete, post, etc.
+  - For EACH action: was it implemented in the generated code?
+  - If ANY action is missing: workflow is NOT complete!
+  
+  **RED FLAG - Do NOT mark as "Completed":**
+  - X `current_plan_step` = "N" but `init_plan` has steps after N
+  - X Code only has form_collect() but user said "approve then send/respond/update"
+  - X User said "send to Gmail, Outlook, Facebook, Instagram" but code has no send actions
+  - X Saying "I can now respond" but NO actual send/respond code was generated
+  
+  **When to continue (stop: "InProcess", send_to: "CodeInterpreter"):**
+  - `init_plan` has steps AFTER `current_plan_step` -> Ask CodeInterpreter to implement next step
+  - Code collected approval but user wants post-approval actions -> Ask CodeInterpreter to generate send/respond/update code
+  - User mentioned specific platforms/destinations but code has no routing -> Ask CodeInterpreter to add routing
+  
+  **When workflow is truly complete (stop: "Completed"):**
+  - ALL steps in `init_plan` are implemented
+  - ALL actions mentioned in user's request are in the generated code
+  - If user said "approve then X", code includes BOTH approval AND X
+  
+  **RED FLAGS (plan is incomplete):**
+  - X Plan ends with: "Get approval" or "Send for review" or "Collect decision"
+  - X init_plan has 4 steps but user mentioned 5+ actions
+  - X User says "approve then respond/send/update" but plan has no respond/send/update step
+  - X Plan says "if approved then X" but X is missing from the steps
+  
+  **Examples of COMPLETE workflows (GENERIC patterns, not hardcoded):**
+  - "Read X, draft Y, approve, send to Z" -> Must include: Fetch X -> Draft Y -> Approve -> **Send to Z**
+  - "Get data from multiple sources, review each, update if approved" -> Fetch parallel -> Loop approve each -> **Loop update approved items**
+  - "Prepare documents, get approval, if approved publish, if rejected archive" -> Prepare -> Approve -> **Conditional: publish OR archive**
   
   ## Planner's response format
   - Planner must strictly format the response into the following JSON object:
     {response_json_schema}
+  - ⚠️ CRITICAL: ALL fields marked as "required" must be provided in EVERY response, regardless of the "stop" value.
+  - Even when stop="Completed", you MUST include: plan_reasoning, init_plan, plan, current_plan_step, send_to, message.
 
 experience_instruction: |-
   # Experience And Lessons
@@ -182,19 +281,19 @@ response_json_schema: |-
                 },
                 "init_plan": {
                     "type": "string",
-                    "description": "The initial plan to decompose the User's task into subtasks and list them as the detailed subtask steps. The initial plan must contain dependency annotations for sequential and interactive dependencies."
+                    "description": "The initial plan to decompose the User's task into subtasks and list them as the detailed subtask steps. The initial plan must contain dependency annotations for sequential and interactive dependencies. REQUIRED ALWAYS, even when stop='Completed'."
                 },
                 "plan": {
                     "type": "string",
-                    "description": "The refined plan by merging adjacent steps that have sequential dependency or no dependency. The final plan must not contain dependency annotations."
+                    "description": "The refined plan by merging adjacent steps that have sequential dependency or no dependency. The final plan must not contain dependency annotations. REQUIRED ALWAYS, even when stop='Completed'."
                 },
                 "current_plan_step": {
                     "type": "string",
-                    "description": "The current step Planner is executing."
+                    "description": "The current step Planner is executing. REQUIRED ALWAYS, even when stop='Completed'. If completed, set to the last completed step."
                 },
                 "stop": {
                     "type": "string",
-                    "description": "The stop reason when the Planner needs to talk to the User. Set it to 'InProcess' if the Planner is not talking to the User.",
+                    "description": "The stop reason when the Planner needs to talk to the User. Set it to 'InProcess' if the Planner is not talking to the User. NOTE: Even when stop='Completed', you MUST still provide ALL required fields (plan_reasoning, init_plan, plan, current_plan_step).",
                     "enum": ["InProcess", "Completed", "Clarification", "AdditionalInformation", "SecurityRisks", "TaskFailure"]
                 },
                 "send_to": {

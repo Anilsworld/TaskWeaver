@@ -17,7 +17,7 @@ def read_yaml(path: str) -> Dict[str, Any]:
     import yaml
 
     try:
-        with open(path, "r") as file:
+        with open(path, "r", encoding="utf-8") as file:
             return yaml.safe_load(file)
     except Exception as e:
         raise ValueError(f"Yaml loading failed due to: {e}")
@@ -27,8 +27,8 @@ def write_yaml(path: str, content: Dict[str, Any]):
     import yaml
 
     try:
-        with open(path, "w") as file:
-            yaml.safe_dump(content, file, sort_keys=False)
+        with open(path, "w", encoding="utf-8") as file:
+            yaml.safe_dump(content, file, sort_keys=False, allow_unicode=True)
     except Exception as e:
         raise ValueError(f"Yaml writing failed due to: {e}")
 

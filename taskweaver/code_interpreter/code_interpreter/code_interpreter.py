@@ -178,6 +178,14 @@ class CodeInterpreter(Role, Interpreter):
                 self.retry_count += 1
             else:
                 self.retry_count = 0
+                post_proxy.update_send_to("User")
+                post_proxy.update_message(
+                    "❌ Failed to generate code after 3 attempts. "
+                    "The workflow may be too complex. Please try:\n"
+                    "1. Simplifying your request (fewer apps/steps)\n"
+                    "2. Breaking it into smaller workflows\n"
+                    "3. Contacting support if the issue persists"
+                )
 
             return post_proxy.end()
 
@@ -220,8 +228,19 @@ class CodeInterpreter(Role, Interpreter):
                 )
                 post_proxy.update_send_to("CodeInterpreter")
                 self.retry_count += 1
+                self.logger.warning(f"⚠️ [RETRY] Code verification failed, retry attempt {self.retry_count}/{self.config.max_retry_count}")
             else:
+                # 🚨 MAX RETRIES REACHED - Send to User
+                self.logger.error(f"🚨 [MAX_RETRY] Reached max retry limit ({self.config.max_retry_count})")
                 self.retry_count = 0
+                post_proxy.update_send_to("User")
+                post_proxy.update_message(
+                    f"❌ Code verification failed after {self.config.max_retry_count} attempts. "
+                    "The generated code contains errors. Please try:\n"
+                    "1. Simplifying your request\n"
+                    "2. Breaking it into smaller workflows\n"
+                    f"Error: {code_error[:200]}"
+                )
 
             # add execution status and result
             update_execution(
@@ -238,6 +257,26 @@ class CodeInterpreter(Role, Interpreter):
         if self.config.code_prefix:
             full_code_prefix = f"{self.config.code_prefix}\n" "## CODE START ##\n"
             executable_code = f"{full_code_prefix}{executable_code}"
+
+        # 🔍 EARLY TRUNCATION DETECTION: Check if WORKFLOW dict is incomplete
+        if "WORKFLOW" in executable_code and "result = WORKFLOW" in executable_code:
+            # Check for common truncation patterns
+            if executable_code.rstrip().endswith(("${from_step:", '"${from_step:', "'${from_step:")):
+                self.logger.error("🚨 [TRUNCATION] Detected incomplete WORKFLOW dict - code ends mid-parameter")
+                truncation_error = (
+                    "❌ Code generation was truncated (incomplete WORKFLOW dict). "
+                    "The workflow is too complex for the current token limit. "
+                    "Please simplify your request by:\n"
+                    "1. Using fewer apps/platforms (try 2-3 instead of 4+)\n"
+                    "2. Breaking it into smaller workflows\n"
+                    "3. Reducing the number of steps"
+                )
+                update_verification(post_proxy, "INCORRECT", truncation_error)
+                update_execution(post_proxy, "NONE", "Code not executed due to truncation.")
+                post_proxy.update_message(truncation_error)
+                post_proxy.update_send_to("User")
+                self.retry_count = 0
+                return post_proxy.end()
 
         post_proxy.update_status("executing code")
         self.logger.info(f"Code to be executed: {executable_code}")
@@ -284,6 +323,17 @@ class CodeInterpreter(Role, Interpreter):
         )
 
         if exec_result.is_success or self.retry_count >= self.config.max_retry_count:
+            if not exec_result.is_success and self.retry_count >= self.config.max_retry_count:
+                # 🚨 MAX RETRIES REACHED - Send to User, not Planner
+                self.logger.error(f"🚨 [MAX_RETRY] Reached max retry limit ({self.config.max_retry_count})")
+                post_proxy.update_send_to("User")
+                post_proxy.update_message(
+                    f"❌ Failed to execute code after {self.config.max_retry_count} attempts. "
+                    "The workflow may be too complex or contains errors. Please try:\n"
+                    "1. Simplifying your request\n"
+                    "2. Breaking it into smaller workflows\n"
+                    "3. Using fewer apps/platforms"
+                )
             self.retry_count = 0
         else:
             post_proxy.update_send_to("CodeInterpreter")
@@ -292,6 +342,7 @@ class CodeInterpreter(Role, Interpreter):
                 AttachmentType.revise_message,
             )
             self.retry_count += 1
+            self.logger.warning(f"⚠️ [RETRY] Code execution failed, retry attempt {self.retry_count}/{self.config.max_retry_count}")
 
         if not exec_result.is_success:
             self.tracing.set_span_status("ERROR", "Code execution failed.")
