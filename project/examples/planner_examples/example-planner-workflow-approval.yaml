@@ -96,14 +96,14 @@ rounds:
               
               # Step 4: Send notification based on approval decision
               if approval['decision'] == "Approve":
-                  email_result, desc = composio_action("GMAIL_SEND_EMAIL", {
+                  email_result, desc = composio_action("OUTLOOK_SEND_EMAIL", {
                       "to": f"{order_details['customer_name']}@example.com",
                       "subject": "Order Approved",
                       "body": f"Your order for {order_details['quantity']} x {order_details['product']} (${total_amount}) has been approved!"
                   })
                   result = "Order approved and confirmation sent"
               else:
-                  email_result, desc = composio_action("GMAIL_SEND_EMAIL", {
+                  email_result, desc = composio_action("OUTLOOK_SEND_EMAIL", {
                       "to": f"{order_details['customer_name']}@example.com",
                       "subject": "Order Rejected",
                       "body": f"Your order has been rejected. Reason: {approval.get('comments', 'No reason provided')}"

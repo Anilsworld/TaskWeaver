@@ -88,14 +88,14 @@ instruction_template: |-
   - "Please adjust the workflow..."
   
   CORRECT message patterns:
-  - Simply list the tasks: "Collect passenger details, search for round-trip flights, get approval, send email notification."
+  - Simply list the tasks: "Collect customer details, search for hotels, get approval, send email notification."
   - Or describe the operation: "Search for customer records and update their status."
   - Or state the goal: "Fetch weather data and display the results."
   
   Example transformations:
-  Original User Request: "Create a workflow to search for round-trip flights"
-  WRONG Planner Message: "Please generate a workflow to collect passenger details, search for flights, and send email"
-  CORRECT Planner Message: "Collect passenger details, search for round-trip flights based on departure and return dates, get manager approval, and send email notification once approved"
+  Original User Request: "Create a workflow to search for hotels"
+  WRONG Planner Message: "Please generate a workflow to collect customer details, search for hotels, and send email"
+  CORRECT Planner Message: "Collect customer details, search for hotels based on destination and dates, get manager approval, and send email notification once approved"
   
   
   ### Examples of planning process
@@ -259,6 +259,8 @@ instruction_template: |-
   ## Planner's response format
   - Planner must strictly format the response into the following JSON object:
     {response_json_schema}
+  - ⚠️ CRITICAL: ALL fields marked as "required" must be provided in EVERY response, regardless of the "stop" value.
+  - Even when stop="Completed", you MUST include: plan_reasoning, init_plan, plan, current_plan_step, send_to, message.
 
 experience_instruction: |-
   # Experience And Lessons
@@ -279,19 +281,19 @@ response_json_schema: |-
                 },
                 "init_plan": {
                     "type": "string",
-                    "description": "The initial plan to decompose the User's task into subtasks and list them as the detailed subtask steps. The initial plan must contain dependency annotations for sequential and interactive dependencies."
+                    "description": "The initial plan to decompose the User's task into subtasks and list them as the detailed subtask steps. The initial plan must contain dependency annotations for sequential and interactive dependencies. REQUIRED ALWAYS, even when stop='Completed'."
                 },
                 "plan": {
                     "type": "string",
-                    "description": "The refined plan by merging adjacent steps that have sequential dependency or no dependency. The final plan must not contain dependency annotations."
+                    "description": "The refined plan by merging adjacent steps that have sequential dependency or no dependency. The final plan must not contain dependency annotations. REQUIRED ALWAYS, even when stop='Completed'."
                 },
                 "current_plan_step": {
                     "type": "string",
-                    "description": "The current step Planner is executing."
+                    "description": "The current step Planner is executing. REQUIRED ALWAYS, even when stop='Completed'. If completed, set to the last completed step."
                 },
                 "stop": {
                     "type": "string",
-                    "description": "The stop reason when the Planner needs to talk to the User. Set it to 'InProcess' if the Planner is not talking to the User.",
+                    "description": "The stop reason when the Planner needs to talk to the User. Set it to 'InProcess' if the Planner is not talking to the User. NOTE: Even when stop='Completed', you MUST still provide ALL required fields (plan_reasoning, init_plan, plan, current_plan_step).",
                     "enum": ["InProcess", "Completed", "Clarification", "AdditionalInformation", "SecurityRisks", "TaskFailure"]
                 },
                 "send_to": {

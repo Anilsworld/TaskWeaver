@@ -13,7 +13,7 @@ rounds:
               User wants to collect customer info FIRST (form node), then search emails (agent_with_tools), 
               get approval (hitl), and reply (agent_with_tools).
               
-              PRE-FLIGHT CHECK: Checking available actions...
+              PRE-CHECK: Checking available actions...
               ✅ OUTLOOK_LIST_MESSAGES - exists in actions list
               ✅ OUTLOOK_SEND_EMAIL - exists in actions list
               

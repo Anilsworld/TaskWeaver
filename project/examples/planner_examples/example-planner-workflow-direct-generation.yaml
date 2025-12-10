@@ -1,46 +1,46 @@
-enabled: True
-description: Direct workflow generation when user says "create a workflow" - no clarification needed
+enabled: False
+description: "Direct workflow generation when user says create a workflow - no clarification needed (DISABLED - Contains Gmail references that cause hallucination)"
 
 rounds:
   # PATTERN: User says "create a workflow" with clear requirements → Planner IMMEDIATELY calls CodeInterpreter
-  - user_query: create a workflow to read emails from Gmail and send summaries to Slack
+  - user_query: create a workflow to read emails from Outlook and send summaries to Slack
     state: created
     post_list:
-      - message: create a workflow to read emails from Gmail and send summaries to Slack
+      - message: create a workflow to read emails from Outlook and send summaries to Slack
         send_from: User
         send_to: Planner
         attachment_list: []
       
       # Planner IMMEDIATELY generates workflow - NO clarification questions!
-      - message: I'll create a workflow to read Gmail emails and send summaries to Slack.
+      - message: I'll create a workflow to read Outlook emails and send summaries to Slack.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:
           - type: plan_reasoning
             content: |-
               The user explicitly requested a workflow with clear requirements:
-              1. Read emails from Gmail
+              1. Read emails from Outlook
               2. Send summaries to Slack
               This is complete enough to generate a workflow immediately. No clarification needed.
           
           - type: init_plan
             content: |-
-              1. Generate workflow code with Gmail email fetch action
+              1. Generate workflow code with Outlook email fetch action
               2. Generate workflow code with Slack message send action
               3. Return completed workflow to user
           
           - type: plan
             content: |-
-              1. Generate workflow with Gmail and Slack integration
+              1. Generate workflow with Outlook and Slack integration
               2. Report completion to user
           
           - type: current_plan_step
-            content: 1. Generate workflow with Gmail and Slack integration
+            content: 1. Generate workflow with Outlook and Slack integration
           
           - type: stop
             content: InProcess
       
-      - message: Workflow generated successfully with Gmail email reading and Slack summary posting.
+      - message: Workflow generated successfully with Outlook email reading and Slack summary posting.
         send_from: CodeInterpreter
         send_to: Planner
         attachment_list:

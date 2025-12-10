@@ -218,9 +218,15 @@ def select_actions_pgvector(
             description_embedding__isnull=False
         )
         
-        # ✅ CRITICAL: Exclude meta-tools (COMPOSIO_* actions)
-        # These are orchestration tools, not app-specific actions
-        queryset = queryset.exclude(action_id__startswith='COMPOSIO_')
+        # ✅ CRITICAL: Exclude ONLY orchestration meta-tools, NOT actual search tools
+        # COMPOSIO_SEARCH_TOOLS = Meta-tool for discovering other tools (exclude this)
+        # COMPOSIO_SEARCH_FLIGHTS/SCHOLAR/HOTEL = Actual search tools (INCLUDE these!)
+        META_ORCHESTRATION_TOOLS = [
+            'COMPOSIO_SEARCH_TOOLS',  # Tool discovery API
+            'COMPOSIO_GET_TOOLS',     # Tool listing API
+            'COMPOSIO_LIST_TOOLS',    # Tool catalog API
+        ]
+        queryset = queryset.exclude(action_id__in=META_ORCHESTRATION_TOOLS)
         
         # NOTE: External form services (BYTEFORMS, FEATHERY, etc.) are NOT filtered here.
         # The LLM is guided via prompt instructions to prefer internal form_collect() plugin
@@ -317,7 +323,11 @@ def _select_actions_fallback(
         queryset = ComposioActionSchema.objects.filter(
             is_deprecated=False,
             description_embedding__isnull=False
-        ).exclude(action_id__startswith='COMPOSIO_').order_by('-usage_count')[:FALLBACK_ACTIONS_LIMIT]  # ✅ Exclude meta-tools
+        ).exclude(action_id__in=[
+            'COMPOSIO_SEARCH_TOOLS',  # Tool discovery API
+            'COMPOSIO_GET_TOOLS',     # Tool listing API
+            'COMPOSIO_LIST_TOOLS',    # Tool catalog API
+        ]).order_by('-usage_count')[:FALLBACK_ACTIONS_LIMIT]  # ✅ Exclude ONLY orchestration meta-tools
         
         if app_filter:
             queryset = queryset.filter(action_id__icontains=app_filter.upper())
@@ -388,6 +398,7 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
     
     for action in actions[:top_k]:
         action_id = action['action_id']
+        app_name = action.get('app_name', 'unknown')  # ✅ Extract app_name
         desc = (action.get('description') or '')[:MAX_DESCRIPTION_LENGTH]
         
         # ✅ Parameter schema with types AND descriptions
@@ -469,8 +480,9 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
                 else:
                     response_hint = " | Returns: Dict"
         
-        # Format: - ACTION_ID: description | Params: x: type, y: type | Returns: structure
-        line = f"- {action_id}: {desc}{params_str}{response_hint}"
+        # Format: - ACTION_ID (app: app_name): description | Params: x: type, y: type | Returns: structure
+        # ✅ FIX: Include app_name so LLM uses correct app in workflow nodes
+        line = f"- {action_id} (app: {app_name}): {desc}{params_str}{response_hint}"
         
         # ✅ CRITICAL: Error handling pattern for placeholder detection (mock mode only)
         # Successful responses are unwrapped data dicts (NO 'success' field).
