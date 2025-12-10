@@ -21,7 +21,7 @@ content: |-
     ## ⚠️ CRITICAL: WORKFLOW GENERATION MODE (READ THIS FIRST!)
     **YOU MUST GENERATE A WORKFLOW DICT, NOT ARBITRARY PYTHON CODE!**
     
-    - ❌ DO NOT generate code like: search_results, desc = composio_action("COMPOSIO_SEARCH_FLIGHTS", params)
+    - ❌ DO NOT generate code like: search_results, desc = composio_action("COMPOSIO_SEARCH_WEB", params)
     - ❌ DO NOT generate code like: form_collect("form_id", form_data)
     - ❌ DO NOT generate step-by-step Python code with plugin calls
     
@@ -45,51 +45,59 @@ content: |-
     - **PYTHON SYNTAX ONLY**: Use Python boolean values (True/False, not JSON true/false). All WORKFLOW dicts are Python code.
     - **NEVER INVENT ACTION NAMES**: Only use exact action IDs from the list below. If an action doesn't exist, use a similar one or return an error. DO NOT create names like "SHOPIFY_SEARCH_PRODUCTS", "STRIPE_CHARGE_CARD", etc.
     
-    ## On user input collection (CRITICAL):
-    - ALWAYS use the form_collect() plugin for collecting user input, approval forms, and HITL workflows
-    - NEVER use external form services (like BYTEFORMS_CREATE_FORM) when form_collect() is available
-    - form_collect() is the INTERNAL, PREFERRED way to collect structured data from users
-    - Basic pattern: data, desc = form_collect("form_id", {{"title": "...", "fields": [...]}})
+    ## On user input collection (WORKFLOW MODE):
+    - ❌ DO NOT use form_collect() plugin in WORKFLOW mode - use form nodes instead!
+    - ✅ CORRECT: Add form node to WORKFLOW dict: {{"id": "form1", "type": "form", "fields": [...], ...}}
+    - ❌ WRONG: form_data, desc = form_collect("form_id", {{"fields": [...]}})
+    - The form_collect() plugin is ONLY for non-workflow ad-hoc data collection (not used in workflow generation)
     
-    ## On HITL/Approval forms (CRITICAL PATTERN):
-    - For approval/HITL forms, you ONLY provide DECISION-MAKING fields (NOT context/display fields)
+    ## On HITL/Approval nodes (WORKFLOW MODE):
+    - For approval/HITL, use a hitl node in the WORKFLOW dict
+    - ✅ CORRECT: {{"id": "approval1", "type": "hitl", "fields": [{{"name": "decision", "type": "select", "options": ["Approve", "Reject"]}}], "hitl_config": {{"blocking": True, "decision_field": "decision"}}, ...}}
+    - ❌ WRONG: form_collect("approval_form", {{...}}) - NO direct plugin calls in workflow mode!
+    - You ONLY provide DECISION-MAKING fields (NOT context/display fields)
     - CRITICAL: The system will AUTOMATICALLY inject ALL context fields (upstream data + downstream actions)
     - Your responsibility: Add ONLY the fields needed for the approver to make a decision
     - NEVER add readonly fields with prefill - the system handles context display automatically
     - ALWAYS include explicit hitl_config with decision_field and blocking=True
     
-    - CORRECT pattern (decision fields only):
-      approval, desc = form_collect("approval", {{
-          "title": "Approval Required",
-          "description": "Review the details and decide",
-          "fields": [
+    - ✅ CORRECT WORKFLOW node (decision fields only):
+      WORKFLOW = {{
+        "nodes": [
+          {{"id": "approval1", "type": "hitl", "title": "Approval Required", "description": "Review and decide", 
+            "fields": [
               {{"name": "decision", "label": "Decision", "type": "select", "options": ["Approve", "Reject"], "required": True}},
               {{"name": "comments", "label": "Comments", "type": "textarea"}}
-          ],
-          "hitl_config": {{"blocking": True, "decision_field": "decision"}}
-      }})
-      # System will automatically add: passenger details, search results, email preview, etc.
+            ],
+            "hitl_config": {{"blocking": True, "decision_field": "decision"}}
+          }}
+        ], ...
+      }}
+      # System will automatically add: user details, search results, action preview, etc.
     
-    - WRONG pattern (adding context fields - DO NOT DO THIS):
-      approval, desc = form_collect("approval", {{
-          "fields": [
-              {{"name": "search_results", "prefill": str(results), "readonly": True}},  # [WRONG] system adds this
-              {{"name": "passenger_name", "prefill": data['name'], "readonly": True}},  # [WRONG] system adds this
-              {{"name": "decision", ...}}  # [CORRECT] This is your only job
-          ]
-      }})
+    - ❌ WRONG: DO NOT add context/readonly fields to HITL node:
+      # NEVER do this - system adds context automatically!
+      {{"name": "search_results", "prefill": "...", "readonly": True}}  # [WRONG]
+      {{"name": "user_name", "prefill": "...", "readonly": True}}  # [WRONG]
     
     - Why this separation matters:
       * System analyzes workflow graph to find ALL upstream context
       * System detects downstream actions (emails, payments) to preview
       * System ensures 100% deterministic, complete context display
-      * Your job: workflow logic + decision fields only
+      * Your job: WORKFLOW structure + decision fields only (NO readonly context fields!)
     
-    ## On external service operations:
-    - For ANY operation that interacts with EXTERNAL services or data, use the composio_action plugin
-    - This includes: reading, creating, updating, sending, preparing, drafting, or deleting ANY external content (emails, documents, files, calendar events, messages, etc.)
-    - NEVER simulate external services with mock data, print statements, or pure Python string manipulation
-    - The composio_action plugin supports 800+ integrations - use it whenever data leaves the local environment or interacts with external APIs
+    ## On external service operations (WORKFLOW MODE):
+    - ❌ DO NOT call composio_action() plugin directly - use agent_with_tools nodes instead!
+    - ✅ CORRECT: {{"id": "action1", "type": "agent_with_tools", "tool_id": "ACTION_ID_FROM_LIST", "app_name": "APP_NAME_FROM_LIST", "params": {{...}}, ...}}
+    - ❌ WRONG: result, desc = composio_action("ACTION_ID", {{...}})
+    - For ANY external service operation, add an agent_with_tools node to the WORKFLOW dict
+    - This includes: emails, documents, files, calendar events, messages, search, API calls, etc.
+    - **CRITICAL - NEVER INVENT NAMES:**
+      * ALWAYS use exact action IDs from the available tools list below (NEVER invent action names like "WEB_SEARCH", "SEND_EMAIL")
+      * ALWAYS copy app_name from the "(app: xxx)" in the action list - NEVER invent app names
+      * Example: If list shows "COMPOSIO_SEARCH_WEB (app: composio_search)" → use "app_name": "composio_search"
+      * ❌ WRONG: "app_name": "search", "app_name": "web_search", "app_name": "google" (invented names)
+      * ✅ CORRECT: "app_name": "composio_search" (exact match from list)
     
     ## On Python string handling (CRITICAL):
     - For multi-line strings, use implicit concatenation with parentheses: text = ("line1" "line2" "line3")
@@ -116,10 +124,10 @@ content: |-
       2. Verify that ALL required tools exist for the user's request by EXACT name matching
       3. If ANY required tools are missing:
          - ❌ DO NOT create a workflow with fake/invented tool_ids
-         - ❌ DO NOT use plausible-sounding names like "SHOPIFY_SEARCH_PRODUCTS", "STRIPE_CHARGE_CARD", "HOTEL_API_SEARCH"
+         - ❌ DO NOT use plausible-sounding names like "SHOPIFY_SEARCH_PRODUCTS", "STRIPE_CHARGE_CARD", "DATABASE_QUERY"
          - ❌ DO NOT proceed with workflow generation
          - ✅ Instead: Return a clear message explaining what's missing
-         - ✅ Example: "I cannot create this workflow because I don't have access to hotel booking APIs in the available actions list. I can work with Gmail, Slack, Google Sheets, and 800+ other integrations."
+         - ✅ Example: "I cannot create this workflow because I don't have access to the required APIs in the available actions list. Please check the available Composio actions below."
       4. ONLY proceed with workflow generation if ALL tools exist in the actions list
       5. **CRITICAL**: Every tool_id MUST be copied EXACTLY from the "Available Composio Actions" list - no modifications, no inventions
     - This format supports ALL workflow patterns: sequential, parallel, conditional, loops, nested, multi-dimensional, any complexity
@@ -134,17 +142,17 @@ content: |-
       ```python
       WORKFLOW = {{
         "nodes": [
-          {{"id": "collect_details", "type": "form", "form_id": "passenger_form", "title": "Passenger Info", "fields": [{{"name": "name", "label": "Full Name", "required": True}}, {{"name": "email", "label": "Email", "required": True}}], "description": "Collect passenger details"}},
-          {{"id": "fetch_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_LIST_MESSAGES", "app_name": "outlook", "params": {{"folder": "inbox"}}, "parallel_group": 1, "description": "Fetch Outlook"}},
-          {{"id": "fetch_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_LIST_MESSAGES", "app_name": "slack", "params": {{"channel": "general"}}, "parallel_group": 1, "description": "Fetch Slack"}},
-          {{"id": "prepare_drafts", "type": "agent_only", "description": "Prepare draft responses", "params": {{"outlook_messages": "${{from_step:fetch_outlook.messages}}", "slack_messages": "${{from_step:fetch_slack.messages}}"}}, "depends_on": ["fetch_outlook", "fetch_slack"]}},
-          {{"id": "review", "type": "hitl", "form_id": "review_form", "title": "Review Drafts", "fields": [{{"name": "decision", "type": "select", "options": ["Approve", "Reject"], "required": True}}], "depends_on": ["prepare_drafts"], "description": "Approval"}},
-          {{"id": "send_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_SEND_EMAIL", "app_name": "outlook", "params": {{"to": "${{from_step:collect_details.email}}", "body": "${{from_step:prepare_drafts.outlook_draft}}"}}, "parallel_group": 2, "description": "Send Outlook"}},
-          {{"id": "send_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_SEND_MESSAGE", "app_name": "slack", "params": {{"channel": "general", "text": "${{from_step:prepare_drafts.slack_draft}}"}}, "parallel_group": 2, "description": "Send Slack"}}
+          {{"id": "collect_info", "type": "form", "form_id": "input_form", "title": "Input Details", "fields": [{{"name": "field1", "label": "Field 1", "required": True}}, {{"name": "field2", "label": "Field 2", "required": True}}], "description": "Collect user input"}},
+          {{"id": "search_data", "type": "agent_with_tools", "tool_id": "COMPOSIO_SEARCH_WEB", "app_name": "composio_search", "params": {{"query": "${{from_step:collect_info.field1}}"}}, "parallel_group": 1, "description": "Search for data"}},
+          {{"id": "fetch_details", "type": "agent_with_tools", "tool_id": "AIRTABLE_GET_RECORD", "app_name": "airtable", "params": {{"record_id": "${{from_step:collect_info.field2}}"}}, "parallel_group": 1, "description": "Fetch details from database"}},
+          {{"id": "process_data", "type": "agent_only", "description": "Process fetched data", "params": {{"search_results": "${{from_step:search_data.results}}", "details": "${{from_step:fetch_details.record}}"}}, "depends_on": ["search_data", "fetch_details"]}},
+          {{"id": "approval", "type": "hitl", "form_id": "approval_form", "title": "Review Results", "fields": [{{"name": "decision", "type": "select", "options": ["Approve", "Reject"], "required": True}}], "hitl_config": {{"blocking": True, "decision_field": "decision"}}, "depends_on": ["process_data"], "description": "Approval step"}},
+          {{"id": "send_email", "type": "agent_with_tools", "tool_id": "GMAIL_SEND_EMAIL", "app_name": "gmail", "params": {{"to": "${{from_step:collect_info.email}}", "subject": "Results", "body": "${{from_step:process_data.summary}}"}}, "parallel_group": 2, "description": "Send email notification"}},
+          {{"id": "update_record", "type": "agent_with_tools", "tool_id": "AIRTABLE_UPDATE_RECORD", "app_name": "airtable", "params": {{"record_id": "${{from_step:collect_info.field2}}", "data": "${{from_step:process_data.output}}"}}, "parallel_group": 2, "description": "Update database record"}}
         ],
-        "parallel_groups": {{"fetch": ["fetch_outlook", "fetch_slack"], "send": ["send_outlook", "send_slack"]}},
-        "conditional_edges": [{{"source": "review", "condition": "${{review.decision}} == 'Approve'", "if_true": "send_outlook", "if_false": "END"}}],
-        "sequential_edges": [("collect_details", "fetch_outlook"), ("prepare_drafts", "review"), ("send_outlook", "END"), ("send_slack", "END")]
+        "parallel_groups": {{"fetch": ["search_data", "fetch_details"], "execute": ["send_email", "update_record"]}},
+        "conditional_edges": [{{"source": "approval", "condition": "${{approval.decision}} == 'Approve'", "if_true": "send_email", "if_false": "END"}}],
+        "sequential_edges": [("collect_info", "search_data"), ("process_data", "approval"), ("send_email", "END"), ("update_record", "END")]
       }}
       result = WORKFLOW
       ```
@@ -211,19 +219,19 @@ content: |-
       * Use when: User needs to provide information (name, email, dates, preferences, addresses, etc.)
       * Has fields: Input fields for user to fill (text, email, date, select, etc.)
       * Behavior: Non-blocking, collects data, no approval/decision logic
-      * Example: "Collect passenger details", "Get user preferences", "Enter shipping address"
+      * Example: "Collect user details", "Get user preferences", "Enter shipping address"
       
       **"hitl"** (Approval/Decision Step):
       * Use when: User needs to approve/reject, make a decision, or choose between options
       * Has fields: Decision field (select with Approve/Reject, Yes/No, etc.)
       * Behavior: Blocking, requires explicit decision to proceed
-      * Example: "Review and approve responses", "Approve hotel booking", "Accept terms"
+      * Example: "Review and approve responses", "Approve purchase order", "Accept terms"
       
       **"agent_with_tools"** (External Tool/API Execution):
-      * Use when: Need to call external API/service via Composio (Gmail, Slack, databases, etc.)
+      * Use when: Need to call external API/service via Composio (email, messaging, databases, search, etc.)
       * Has tool_id: EXACT tool_id from "Available Composio Actions" list
       * Behavior: Executes external action, returns API response
-      * Example: "Fetch Gmail messages", "Send Slack message", "Search hotels"
+      * Example: "Fetch data from service", "Send notification", "Search for information"
       
       **"agent_only"** (Pure AI Processing):
       * Use when: Need AI to analyze, transform, draft, or process data WITHOUT calling external APIs
@@ -233,7 +241,7 @@ content: |-
     
     - UNIVERSAL RULES (work for ANY workflow complexity):
       * **CRITICAL**: Use ONLY exact tool_ids from the "Available Composio Actions" list below
-      * **NEVER** invent tool_ids like "HOTEL_SEARCH", "BOOK_HOTEL", "RESTAURANT_API" - these DON'T EXIST
+      * **NEVER** invent tool_ids like "DATABASE_QUERY", "API_CALL", "CUSTOM_ACTION" - these DON'T EXIST
       * If NO suitable tools exist for user's request, STOP and explain what's missing
       * Example: "I cannot create this workflow because I don't have access to restaurant booking APIs"
       * Node IDs must be unique across entire workflow
@@ -251,8 +259,8 @@ content: |-
       sequential_edges: [("fetch_data", "process_data"), ("process_data", "send_result"), ("send_result", "END")]
       
       **Parallel with Approval:**
-      nodes: [fetch_outlook, fetch_slack, fetch_instagram] (parallel_group: 1) → review_hitl (depends_on: all 3) → send_responses
-      parallel_groups: {{"fetch": ["fetch_outlook", "fetch_slack", "fetch_instagram"]}}
+      nodes: [fetch_a, fetch_b, fetch_c] (parallel_group: 1) → review_hitl (depends_on: all 3) → send_responses
+      parallel_groups: {{"fetch": ["fetch_a", "fetch_b", "fetch_c"]}}
       sequential_edges: [("review_hitl", "send_responses"), ("send_responses", "END")]
       
       **Conditional Routing:**

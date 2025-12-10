@@ -363,33 +363,88 @@ class CodeGenerator(Role):
         try:
             # Dynamic import - same pattern as code_verification.py
             from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions
+            import re
             
             # ✅ SCALABLE: action_matcher.py now handles ALL app detection semantically
             # No more keyword matching or hardcoded app lists
             # The select_composio_actions() function will auto-detect apps using pgvector embeddings
             
-            # ✅ ADAPTIVE APPROACH:
-            # - query: Step-specific intent from Planner ("Fetch emails from Outlook")
-            # - context: Full user request for domain/app discovery ("read emails... send responses")
-            # - adaptive_top_k=True: Auto-scales based on detected apps
-            #
-            # ✅ COMPLETE WORKFLOW INJECTION:
-            # For multi-platform workflows (3+ apps), the action selector will set intent="both"
-            # This ensures BOTH read (fetch/list) AND write (send/reply) actions are available
-            composio_actions = select_composio_actions(
-                user_query=query,  # Step query - action selector detects multi-platform and sets intent="both"
-                context=original_user_query,  # Full query for domain/app discovery
-                top_k=10,  # Balanced - enough for both read and write actions
-                adaptive_top_k=True  # Enable automatic scaling based on detected apps
-            )
-            if composio_actions:
-                enrichment_contents.append(composio_actions)
-                self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")
+            # ✅ SMART STEP EXTRACTION FOR ALL-IN-ONE WORKFLOWS:
+            # Planner's message in ALL-IN-ONE mode contains MULTIPLE steps:
+            # "Collect passenger details, search for round-trip flights, get approval, send email"
+            # 
+            # We need to extract EACH step and match tools INDIVIDUALLY:
+            # Step 1: "Collect passenger details" → form tools
+            # Step 2: "search for round-trip flights" → flight search tools (composio_search!)
+            # Step 3: "get approval" → approval/hitl tools
+            # Step 4: "send email" → email tools
+            
+            # Parse steps from Planner's message
+            steps = []
+            
+            # Check if message contains numbered steps (format: "1. Do X\n2. Do Y\n3. Do Z")
+            numbered_steps = re.findall(r'^\s*\d+\.\s*(.+?)$', query, re.MULTILINE)
+            if numbered_steps:
+                steps = numbered_steps
+                self.logger.info(f"🔍 [TOOL_SELECT] Detected {len(steps)} numbered steps in Planner message")
+            else:
+                # Check if message is a comma/and-separated list
+                # "Collect details, search flights, get approval, and send email"
+                step_delimiters = r',\s+(?:and\s+)?|;\s*|(?:\.\s+(?:Then|Next|Finally)\s+)'
+                potential_steps = re.split(step_delimiters, query)
+                
+                # Filter out short/non-actionable fragments
+                steps = [s.strip() for s in potential_steps if len(s.strip()) > 20]
+                
+                if len(steps) >= 2:
+                    self.logger.info(f"🔍 [TOOL_SELECT] Detected {len(steps)} workflow steps in Planner message")
+                else:
+                    # Single-step workflow
+                    steps = [query]
+                    self.logger.info(f"🔍 [TOOL_SELECT] Single-step workflow detected")
+            
+            # Select actions for EACH step and aggregate
+            all_actions = []
+            seen_action_ids = set()
+            
+            for i, step in enumerate(steps, 1):
+                self.logger.info(f"   📝 Step {i}/{len(steps)}: {step[:60]}...")
+                
+                # Get actions for this specific step
+                step_actions = select_composio_actions(
+                    user_query=step,  # ✅ INDIVIDUAL step, not full workflow!
+                    context=original_user_query,  # Full context for domain keywords
+                    top_k=5,  # Fewer per step, but aggregate across all steps
+                    adaptive_top_k=True
+                )
+                
+                if step_actions:
+                    # Parse action IDs from step_actions to avoid duplicates
+                    step_action_ids = re.findall(r'- ([A-Z_]+)\s+\(app:', step_actions)
+                    new_actions = [aid for aid in step_action_ids if aid not in seen_action_ids]
+                    
+                    if new_actions:
+                        all_actions.append(step_actions)
+                        seen_action_ids.update(new_actions)
+                        self.logger.info(f"      ✅ Found {len(new_actions)} new actions for step {i}")
+                    else:
+                        self.logger.info(f"      ℹ️  No new actions (already covered)")
+            
+            # Combine all actions and inject into prompt
+            if all_actions:
+                combined_actions = "\n\n".join(all_actions)
+                enrichment_contents.append(combined_actions)
+                self.logger.info(f"✅ [CODE_GENERATOR] Injected {len(seen_action_ids)} unique Composio actions from {len(steps)} steps")
+            else:
+                self.logger.warning("⚠️  [CODE_GENERATOR] No Composio actions found for any step")
+                
         except ImportError:
             # Composio selector not available, skip silently
             pass
         except Exception as e:
-            self.logger.debug(f"[CODE_GENERATOR] Composio action injection skipped: {e}")
+            self.logger.error(f"❌ [CODE_GENERATOR] Composio action injection failed: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
 
         prompt = self.compose_prompt(
             rounds,

@@ -712,11 +712,8 @@ def _select_composio_actions_fallback(
     if not all_actions:
         return ""
     
-    # ✅ APPLY INTENT FILTERING (same as two-stage search)
-    query_intent = detect_query_intent(user_query)
-    _log_to_debug_file(f"[FALLBACK] Query intent: {query_intent}")
-    all_actions = _filter_actions_by_intent(all_actions, query_intent)
-    _log_to_debug_file(f"[FALLBACK] After intent filter: {len(all_actions)} actions remain")
+    # Note: Intent filtering is already applied in pgvector search ranking
+    # No additional filtering needed here as it may discard valid actions
     
     # Deduplicate by action_id
     seen = set()

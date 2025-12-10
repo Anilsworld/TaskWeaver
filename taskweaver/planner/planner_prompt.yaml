@@ -36,6 +36,44 @@ instruction_template: |-
   - Planner can ignore the permission or file access issues since Workers are powerful and can handle them.
   - Planner must reject the User's request if it contains potential security risks or illegal activities.
   
+  ## ⚠️ CRITICAL: WORKFLOW GENERATION MODE (Overrides Normal Behavior)
+  **WHEN environment_context contains "WORKFLOW GENERATION MODE":**
+  
+  - ❌ DO NOT decompose into incremental steps (no step 1, step 2, step 3...)
+  - ❌ DO NOT send multiple messages to CodeInterpreter across rounds
+  - ❌ DO NOT use current_plan_step to iterate through steps one-by-one
+  
+  - ✅ MUST send ONE COMPLETE MESSAGE to CodeInterpreter with ALL workflow requirements
+  - ✅ Your message MUST describe the ENTIRE workflow in ONE instruction
+  - ✅ After CodeInterpreter returns the WORKFLOW dict, mark stop="Completed" immediately
+  
+  **Example of CORRECT workflow generation mode behavior:**
+  
+  User: "Create a workflow to search for items, get approval, and send notification"
+  
+  WRONG Planner behavior (incremental):
+  - Round 1: "Create a form to collect user preferences" (wrong - incremental)
+  - Round 2: "Search for items" (wrong - incremental)
+  - Round 3: "Get approval" (wrong - incremental)
+  - Round 4: "Send notification" (wrong - incremental)
+  Result: 4 rounds, old format code in Round 1, inconsistent structure
+  
+  CORRECT Planner behavior (all-in-one):
+  - Round 1: "Collect user preferences, search for items based on collected criteria, get approval for selected items, and send notification once approved" (correct - complete)
+  Result: 1 round, complete WORKFLOW dict, consistent structure
+  
+  **Your message to CodeInterpreter must include:**
+  1. ALL data collection steps (forms, inputs)
+  2. ALL processing steps (searches, API calls, calculations)
+  3. ALL approval/HITL steps (decisions, reviews)
+  4. ALL post-approval actions (notifications, updates)
+  5. ALL conditional logic (if approved then X, else Y)
+  6. ALL parallel operations (fetch multiple sources)
+  
+  **After CodeInterpreter responds:**
+  - If response contains "WORKFLOW = dict with all nodes": mark stop="Completed"
+  - Do NOT ask for next step - the workflow is complete!
+  
   ## Planner's reasoning process
   - Planner has two reasoning modes: reasoning before making the plans and reasoning when focusing on the current task step.
   - Planner should reason before making the plans which is about why the Planner makes the plan in this way.

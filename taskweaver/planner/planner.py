@@ -198,14 +198,40 @@ class Planner(Role):
         if session_var:
             is_generation_mode = session_var.get("_workflow_generation_mode", "false")
             if is_generation_mode == "true":
-                context += (
-                    "\n- WORKFLOW GENERATION MODE: You are generating a complete workflow structure, NOT executing it."
-                    "\n  * Generate ALL workflow steps in ONE instruction to CodeInterpreter (do NOT split across multiple rounds)"
-                    "\n  * Include approval/HITL steps as form_collect() calls with conditional logic in the SAME code block"
-                    "\n  * After approval steps, continue with post-approval actions (e.g., send emails, update records)"
-                    "\n  * Do NOT stop and talk to User for approval - generate the full workflow including post-approval steps"
-                    "\n  * The workflow will be executed later; your job is to define the complete structure now"
-                )
+                # ✨ NEW: Use LangGraph-native strategies
+                try:
+                    from .langgraph_native_strategies import LangGraphNativeStrategies
+                    
+                    user_request = session_var.get("_user_request", "")
+                    strategies = LangGraphNativeStrategies()
+                    strategy = strategies.select_strategy(user_request)
+                    
+                    context += (
+                        f"\n- ⚠️ WORKFLOW GENERATION MODE: {strategy.mode}"
+                        f"\n{strategy.planner_instructions}"
+                    )
+                    
+                    self.logger.info(
+                        f"🎯 [PLANNER] Using LangGraph strategy: {strategy.mode} "
+                        f"(max_nodes={strategy.max_nodes_per_graph}, "
+                        f"subgraphs={strategy.use_subgraphs})"
+                    )
+                    
+                except ImportError:
+                    # Fallback to simple all-in-one if strategies not available
+                    self.logger.warning(
+                        "⚠️ [PLANNER] LangGraph strategies not available, using fallback"
+                    )
+                    context += (
+                        "\n- ⚠️ WORKFLOW GENERATION MODE ACTIVE (READ THIS CAREFULLY!):"
+                        "\n  * You are generating a COMPLETE workflow definition, NOT executing step-by-step code"
+                        "\n  * CRITICAL: Send ONE message to CodeInterpreter with ALL workflow steps (forms → processing → approval → notifications)"
+                        "\n  * DO NOT decompose into incremental rounds (no 'step 1: collect data', 'step 2: search', etc.)"
+                        "\n  * DO NOT use current_plan_step to iterate - describe the ENTIRE workflow in ONE instruction"
+                        "\n  * CodeInterpreter will return a WORKFLOW dict with all nodes - mark stop='Completed' immediately after"
+                        "\n  * Example message: 'Collect user preferences, search for items based on criteria, get approval, and send notification once approved'"
+                        "\n  * The workflow will be executed later; your ONLY job right now is to define the complete structure in ONE message"
+                    )
         
         return context
 
