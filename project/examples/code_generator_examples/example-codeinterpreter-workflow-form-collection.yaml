@@ -1,0 +1,45 @@
+enabled: true
+description: Demonstrates DATA COLLECTION using form nodes (NOT hitl approval nodes)
+rounds:
+  - user_query: Collect customer info, search my Outlook inbox for unread emails, show me a summary for approval, then reply to each sender with a standard acknowledgment.
+    state: finished
+    post_list:
+      - message: I'll create a workflow with form collection, email search, approval, and automated replies.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: |-
+              User wants to collect customer info FIRST (form node), then search emails (agent_with_tools), 
+              get approval (hitl), and reply (agent_with_tools).
+              
+              PRE-FLIGHT CHECK: Checking available actions...
+              ✅ OUTLOOK_LIST_MESSAGES - exists in actions list
+              ✅ OUTLOOK_SEND_EMAIL - exists in actions list
+              
+              Node types:
+              - "form": Collect customer name, email (user input)
+              - "agent_with_tools": Search Outlook inbox via OUTLOOK_LIST_MESSAGES
+              - "agent_only": Generate summary (no external tool)
+              - "hitl": Approval step (approve/reject replies)
+              - "agent_with_tools": Send replies via OUTLOOK_SEND_EMAIL
+          
+          - type: reply_type
+            content: python
+          
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                "nodes": [
+                  {"id": "collect_customer_info", "type": "form", "form_id": "customer_form", "title": "Customer Information", "fields": [{"name": "full_name", "label": "Full Name", "type": "text", "required": True}, {"name": "email", "label": "Email Address", "type": "email", "required": True}, {"name": "department", "label": "Department", "type": "text", "required": True}], "description": "Collect customer details"},
+                  {"id": "search_emails", "type": "agent_with_tools", "tool_id": "OUTLOOK_LIST_MESSAGES", "app_name": "outlook", "params": {"folder": "inbox", "filter": "isRead eq false", "top": 10}, "depends_on": ["collect_customer_info"], "description": "Search for unread emails"},
+                  {"id": "generate_summary", "type": "agent_only", "description": "Generate email summary", "params": {"emails": "${from_step:search_emails.messages}", "customer": "${from_step:collect_customer_info.full_name}"}, "depends_on": ["search_emails"]},
+                  {"id": "review_summary", "type": "hitl", "form_id": "approval_form", "title": "Review Email Summary", "fields": [{"name": "decision", "type": "select", "options": ["Approve", "Reject"], "required": True}, {"name": "notes", "type": "textarea", "label": "Additional Notes"}], "depends_on": ["generate_summary"], "description": "User approves email replies"},
+                  {"id": "send_replies", "type": "agent_with_tools", "tool_id": "OUTLOOK_SEND_EMAIL", "app_name": "outlook", "params": {"to": "${from_step:search_emails.sender}", "subject": "Re: Your Inquiry", "body": "Thank you for your email. We have received it and will respond shortly."}, "depends_on": ["review_summary"], "description": "Send acknowledgment emails"}
+                ],
+                "parallel_groups": {},
+                "conditional_edges": [{"source": "review_summary", "condition": "${review_summary.decision} == 'Approve'", "if_true": "send_replies", "if_false": "END"}],
+                "sequential_edges": [("collect_customer_info", "search_emails"), ("search_emails", "generate_summary"), ("generate_summary", "review_summary"), ("send_replies", "END")]
+              }
+              result = WORKFLOW
+

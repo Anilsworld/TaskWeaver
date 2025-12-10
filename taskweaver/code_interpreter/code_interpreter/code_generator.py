@@ -362,11 +362,26 @@ class CodeGenerator(Role):
         enrichment_contents = [pe.content for pe in planning_enrichments]
         try:
             # Dynamic import - same pattern as code_verification.py
-            from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions  # noqa: E501
+            from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions
             
-            # Get relevant actions based on ORIGINAL user query (not Planner's rephrased message)
-            # ✅ Reduced from 10 to 7 - new schema format is richer (includes param types + response structure)
-            composio_actions = select_composio_actions(original_user_query, top_k=7)
+            # ✅ SCALABLE: action_matcher.py now handles ALL app detection semantically
+            # No more keyword matching or hardcoded app lists
+            # The select_composio_actions() function will auto-detect apps using pgvector embeddings
+            
+            # ✅ ADAPTIVE APPROACH:
+            # - query: Step-specific intent from Planner ("Fetch emails from Outlook")
+            # - context: Full user request for domain/app discovery ("read emails... send responses")
+            # - adaptive_top_k=True: Auto-scales based on detected apps
+            #
+            # ✅ COMPLETE WORKFLOW INJECTION:
+            # For multi-platform workflows (3+ apps), the action selector will set intent="both"
+            # This ensures BOTH read (fetch/list) AND write (send/reply) actions are available
+            composio_actions = select_composio_actions(
+                user_query=query,  # Step query - action selector detects multi-platform and sets intent="both"
+                context=original_user_query,  # Full query for domain/app discovery
+                top_k=10,  # Balanced - enough for both read and write actions
+                adaptive_top_k=True  # Enable automatic scaling based on detected apps
+            )
             if composio_actions:
                 enrichment_contents.append(composio_actions)
                 self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")
@@ -420,6 +435,19 @@ class CodeGenerator(Role):
             if attachment.type == AttachmentType.reply_content:
                 if reply_type == "python":
                     generated_code = attachment.content
+                    
+                    # 🔍 EARLY TRUNCATION DETECTION for WORKFLOW dicts
+                    if "WORKFLOW" in generated_code and "result = WORKFLOW" in generated_code:
+                        # Check if code ends with incomplete string (common truncation pattern)
+                        if generated_code.rstrip().endswith(("${from_step:", '"${from_step:', "'${from_step:", ', "params":', ', "text":')):
+                            self.logger.error("🚨 [TRUNCATION] LLM output was truncated - WORKFLOW dict is incomplete")
+                            # Don't break - let code_interpreter handle it with proper retry message
+                            post_proxy.update_attachment(
+                                "⚠️ WARNING: Generated code appears to be truncated (incomplete WORKFLOW dict). "
+                                "This usually means the workflow is too complex. Try simplifying your request.",
+                                AttachmentType.revise_message,
+                            )
+                    
                     break
                 elif reply_type == "text":
                     post_proxy.update_message(attachment.content)

@@ -1,0 +1,80 @@
+enabled: True
+description: >-
+  Universal workflow definition format supporting ALL patterns (ULTRA-COMPACT).
+  
+  🚨 CRITICAL - TOOL AVAILABILITY CHECK (MANDATORY):
+  =====================================================
+  Before creating ANY workflow, you MUST check if required tools exist in the "Available Composio Actions" list!
+  
+  ❌ IF TOOLS DON'T EXIST - DO NOT PROCEED:
+  - DO NOT invent fake tool_ids like "COMPOSIO_SEARCH_FLIGHTS", "COMPOSIO_BOOK_FLIGHT", "FLIGHT_API_SEARCH"
+  - DO NOT use plausible-sounding names that seem like they should exist
+  - DO NOT generate a workflow hoping the tools will work
+  - Instead: Explain clearly what tools are missing
+  - Example: "I cannot create a flight booking workflow because I don't have access to flight booking APIs 
+    in the available actions list. I can create workflows using Gmail, Google Sheets, Slack, Outlook, 
+    and 800+ other verified integrations."
+  
+  ✅ ONLY CREATE WORKFLOWS when ALL required tools exist in the actions list!
+  ✅ Every tool_id MUST be copied EXACTLY from the "Available Composio Actions" list
+  ✅ Use Python booleans (True/False), NOT JSON booleans (true/false)
+
+rounds:
+  - user_query: Create a workflow to read emails and messages from Gmail, Outlook, Slack, and Instagram, prepare draft responses for each, show them to me for review, and once I approve send the responses back to each platform respectively.
+    state: finished
+    post_list:
+      - message: Create a workflow to read emails and messages from Gmail, Outlook, Slack, and Instagram, prepare draft responses for each, show them to me for review, and once I approve send the responses back to each platform respectively.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list: []
+      
+      - message: I've created a comprehensive workflow with parallel fetching, HITL approval, and conditional responses using ultra-compact format.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: |-
+              🔍 PRE-FLIGHT CHECK: Reviewing available actions for required tools...
+              
+              ✅ GMAIL_FETCH_MESSAGE_BY_THREAD_ID - CONFIRMED in actions list
+              ✅ GMAIL_SEND_EMAIL_V2 - CONFIRMED in actions list
+              ✅ OUTLOOK_LIST_MESSAGES - CONFIRMED in actions list
+              ✅ OUTLOOK_SEND_EMAIL - CONFIRMED in actions list
+              ✅ SLACKBOT_LIST_ALL_DIRECT_MESSAGES - CONFIRMED in actions list
+              ✅ SLACKBOT_SEND_MESSAGE - CONFIRMED in actions list
+              ✅ INSTAGRAM_LIST_ALL_MESSAGES - CONFIRMED in actions list
+              ✅ INSTAGRAM_SEND_MESSAGE - CONFIRMED in actions list
+              
+              All required tools exist! Safe to proceed with workflow generation.
+              
+              I'll use 4 node types:
+              1. agent_with_tools: External API calls (fetch/send via Composio) - uses verified tool_ids
+              2. agent_only: AI processing (draft preparation, no external tools)
+              3. hitl: Approval/decision step (blocking with decision field)
+              4. form: Data collection from user (if user asked for name/email/date inputs)
+              
+              I'll create an ultra-compact WORKFLOW dict with Python booleans (True/False, not true/false).
+          
+          - type: reply_type
+            content: python
+          
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                "nodes": [
+                  {"id": "fetch_gmail", "type": "agent_with_tools", "tool_id": "GMAIL_FETCH_MESSAGE_BY_THREAD_ID", "app_name": "gmail", "params": {"thread_id": "${EXTRACT:gmail_thread_id}"}, "parallel_group": 1, "description": "Fetch Gmail messages"},
+                  {"id": "fetch_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_LIST_MESSAGES", "app_name": "outlook", "params": {"folder": "inbox"}, "parallel_group": 1, "description": "Fetch Outlook messages"},
+                  {"id": "fetch_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_LIST_ALL_DIRECT_MESSAGES", "app_name": "slack", "params": {"limit": 10}, "parallel_group": 1, "description": "Fetch Slack messages"},
+                  {"id": "fetch_instagram", "type": "agent_with_tools", "tool_id": "INSTAGRAM_LIST_ALL_MESSAGES", "app_name": "instagram", "params": {"limit": 10}, "parallel_group": 1, "description": "Fetch Instagram messages"},
+                  {"id": "prepare_drafts", "type": "agent_only", "description": "Prepare draft responses for each message", "params": {"gmail_messages": "${from_step:fetch_gmail.messages}", "outlook_messages": "${from_step:fetch_outlook.messages}", "slack_messages": "${from_step:fetch_slack.messages}", "instagram_messages": "${from_step:fetch_instagram.messages}"}, "depends_on": ["fetch_gmail", "fetch_outlook", "fetch_slack", "fetch_instagram"]},
+                  {"id": "review_responses", "type": "hitl", "form_id": "review_form", "title": "Review Draft Responses", "fields": [{"name": "decision", "type": "select", "options": ["Approve All", "Reject All"], "required": True}, {"name": "comments", "type": "textarea"}], "depends_on": ["prepare_drafts"], "description": "Review and approve responses"},
+                  {"id": "send_gmail", "type": "agent_with_tools", "tool_id": "GMAIL_SEND_EMAIL_V2", "app_name": "gmail", "params": {"to": "${from_step:fetch_gmail.from}", "subject": "Re: ${from_step:fetch_gmail.subject}", "body": "${from_step:prepare_drafts.gmail_draft}"}, "parallel_group": 2, "description": "Send Gmail response"},
+                  {"id": "send_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_SEND_EMAIL", "app_name": "outlook", "params": {"to": "${from_step:fetch_outlook.from}", "subject": "Re: ${from_step:fetch_outlook.subject}", "body": "${from_step:prepare_drafts.outlook_draft}"}, "parallel_group": 2, "description": "Send Outlook response"},
+                  {"id": "send_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_SEND_MESSAGE", "app_name": "slack", "params": {"channel": "${from_step:fetch_slack.channel}", "text": "${from_step:prepare_drafts.slack_draft}"}, "parallel_group": 2, "description": "Send Slack response"},
+                  {"id": "send_instagram", "type": "agent_with_tools", "tool_id": "INSTAGRAM_SEND_MESSAGE", "app_name": "instagram", "params": {"recipient_id": "${from_step:fetch_instagram.sender_id}", "message": "${from_step:prepare_drafts.instagram_draft}"}, "parallel_group": 2, "description": "Send Instagram response"}
+                ],
+                "parallel_groups": {"fetch": ["fetch_gmail", "fetch_outlook", "fetch_slack", "fetch_instagram"], "send": ["send_gmail", "send_outlook", "send_slack", "send_instagram"]},
+                "conditional_edges": [{"source": "review_responses", "condition": "${review_responses.decision} == 'Approve All'", "if_true": "send_gmail", "if_false": "END"}],
+                "sequential_edges": [("prepare_drafts", "review_responses"), ("send_gmail", "END"), ("send_outlook", "END"), ("send_slack", "END"), ("send_instagram", "END")]
+              }
+              result = WORKFLOW

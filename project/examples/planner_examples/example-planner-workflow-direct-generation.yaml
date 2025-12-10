@@ -1,0 +1,299 @@
+enabled: True
+description: Direct workflow generation when user says "create a workflow" - no clarification needed
+
+rounds:
+  # PATTERN: User says "create a workflow" with clear requirements → Planner IMMEDIATELY calls CodeInterpreter
+  - user_query: create a workflow to read emails from Gmail and send summaries to Slack
+    state: created
+    post_list:
+      - message: create a workflow to read emails from Gmail and send summaries to Slack
+        send_from: User
+        send_to: Planner
+        attachment_list: []
+      
+      # Planner IMMEDIATELY generates workflow - NO clarification questions!
+      - message: I'll create a workflow to read Gmail emails and send summaries to Slack.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              The user explicitly requested a workflow with clear requirements:
+              1. Read emails from Gmail
+              2. Send summaries to Slack
+              This is complete enough to generate a workflow immediately. No clarification needed.
+          
+          - type: init_plan
+            content: |-
+              1. Generate workflow code with Gmail email fetch action
+              2. Generate workflow code with Slack message send action
+              3. Return completed workflow to user
+          
+          - type: plan
+            content: |-
+              1. Generate workflow with Gmail and Slack integration
+              2. Report completion to user
+          
+          - type: current_plan_step
+            content: 1. Generate workflow with Gmail and Slack integration
+          
+          - type: stop
+            content: InProcess
+      
+      - message: Workflow generated successfully with Gmail email reading and Slack summary posting.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: |-
+              The user wants a workflow, so I'll generate a WORKFLOW dict (not arbitrary Python code).
+              The workflow should:
+              1. Fetch emails from Gmail
+              2. Send summary to Slack
+              I'll use the new structured WORKFLOW dict format.
+          
+          - type: reply_type
+            content: python
+          
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                  "nodes": [
+                      {
+                          "id": "fetch_gmail",
+                          "type": "tool",
+                          "tool_id": "GMAIL_FETCH_MESSAGE_BY_THREAD_ID",
+                          "app_name": "gmail",
+                          "params": {
+                              "thread_id": "${EXTRACT:gmail_thread_id}"
+                          },
+                          "description": "Fetch Gmail emails"
+                      },
+                      {
+                          "id": "send_slack",
+                          "type": "tool",
+                          "tool_id": "SLACK_SEND_MESSAGE",
+                          "app_name": "slack",
+                          "params": {
+                              "channel": "${EXTRACT:slack_channel}",
+                              "text": "Email Summary: ${from_step:fetch_gmail.subject}"
+                          },
+                          "description": "Send summary to Slack"
+                      }
+                  ],
+                  "sequential_edges": [
+                      ("fetch_gmail", "send_slack"),
+                      ("send_slack", "END")
+                  ]
+              }
+              
+              # Validate workflow
+              execute_workflow_definition(WORKFLOW, mock_mode=True)
+      
+      - message: Workflow is complete and ready for execution.
+        send_from: Planner
+        send_to: User
+        attachment_list:
+          - type: plan
+            content: |-
+              Workflow generated successfully:
+              - 2 nodes (Gmail fetch, Slack send)
+              - Sequential execution
+              - Ready for use
+          
+          - type: stop
+            content: Completed
+
+  # PATTERN: Multi-platform workflow with approval
+  - user_query: create a workflow to read messages from multiple platforms, show me for review, and respond after approval
+    state: created
+    post_list:
+      - message: create a workflow to read messages from multiple platforms, show me for review, and respond after approval
+        send_from: User
+        send_to: Planner
+        attachment_list: []
+      
+      - message: I'll create a multi-platform workflow with approval and response logic.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              Clear workflow request:
+              1. Read messages from multiple platforms (parallel)
+              2. Show for review (HITL)
+              3. Respond after approval (conditional)
+              Generate immediately - no clarification needed.
+          
+          - type: init_plan
+            content: |-
+              1. Generate parallel message fetch nodes for each platform
+              2. Generate HITL approval node
+              3. Generate conditional response nodes
+              4. Return workflow to user
+          
+          - type: plan
+            content: |-
+              1. Generate complete multi-platform workflow with approval
+              2. Report completion to user
+          
+          - type: current_plan_step
+            content: 1. Generate complete multi-platform workflow with approval
+          
+          - type: stop
+            content: InProcess
+      
+      - message: Multi-platform workflow with approval generated successfully.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: |-
+              This requires a comprehensive WORKFLOW dict with:
+              - Parallel fetch nodes (multiple platforms)
+              - HITL approval node
+              - Conditional routing
+              - Parallel response nodes
+          
+          - type: reply_type
+            content: python
+          
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                  "nodes": [
+                      {
+                          "id": "fetch_gmail",
+                          "type": "tool",
+                          "tool_id": "GMAIL_FETCH_MESSAGE_BY_THREAD_ID",
+                          "app_name": "gmail",
+                          "params": {"thread_id": "${EXTRACT:thread_id}"},
+                          "parallel_group": 1,
+                          "description": "Fetch Gmail messages"
+                      },
+                      {
+                          "id": "fetch_slack",
+                          "type": "tool",
+                          "tool_id": "SLACK_LIST_MESSAGES",
+                          "app_name": "slack",
+                          "params": {"channel": "${EXTRACT:channel}"},
+                          "parallel_group": 1,
+                          "description": "Fetch Slack messages"
+                      },
+                      {
+                          "id": "review_messages",
+                          "type": "hitl",
+                          "form_id": "message_review",
+                          "title": "Review Messages",
+                          "fields": [
+                              {"name": "decision", "type": "select", "options": ["Approve", "Reject"], "required": true},
+                              {"name": "gmail_response", "type": "textarea", "label": "Gmail Response"},
+                              {"name": "slack_response", "type": "textarea", "label": "Slack Response"}
+                          ],
+                          "depends_on": ["fetch_gmail", "fetch_slack"],
+                          "description": "Review and approve responses"
+                      },
+                      {
+                          "id": "send_gmail",
+                          "type": "tool",
+                          "tool_id": "GMAIL_SEND_EMAIL_V2",
+                          "app_name": "gmail",
+                          "params": {
+                              "to": "${from_step:fetch_gmail.from}",
+                              "subject": "Re: ${from_step:fetch_gmail.subject}",
+                              "body": "${from_step:review_messages.gmail_response}"
+                          },
+                          "parallel_group": 2,
+                          "description": "Send Gmail response"
+                      },
+                      {
+                          "id": "send_slack",
+                          "type": "tool",
+                          "tool_id": "SLACK_SEND_MESSAGE",
+                          "app_name": "slack",
+                          "params": {
+                              "channel": "${from_step:fetch_slack.channel}",
+                              "text": "${from_step:review_messages.slack_response}"
+                          },
+                          "parallel_group": 2,
+                          "description": "Send Slack response"
+                      }
+                  ],
+                  "parallel_groups": {
+                      "fetch": ["fetch_gmail", "fetch_slack"],
+                      "send": ["send_gmail", "send_slack"]
+                  },
+                  "conditional_edges": [
+                      {
+                          "source": "review_messages",
+                          "condition": "${review_messages.decision} == 'Approve'",
+                          "if_true": "send_gmail",
+                          "if_false": "END"
+                      }
+                  ],
+                  "sequential_edges": [
+                      ("send_gmail", "END"),
+                      ("send_slack", "END")
+                  ]
+              }
+              
+              execute_workflow_definition(WORKFLOW, mock_mode=True)
+      
+      - message: Workflow complete with parallel execution, approval, and conditional responses.
+        send_from: Planner
+        send_to: User
+        attachment_list:
+          - type: plan
+            content: |-
+              Multi-platform workflow generated:
+              - Parallel message fetch (Gmail, Slack)
+              - HITL approval with form
+              - Conditional routing based on approval
+              - Parallel response sending
+              Ready for execution!
+          
+          - type: stop
+            content: Completed
+
+  # ANTI-PATTERN: Do NOT ask for clarification when "create a workflow" is clear
+  - user_query: create a workflow to process customer feedback
+    state: created
+    post_list:
+      - message: create a workflow to process customer feedback
+        send_from: User
+        send_to: Planner
+        attachment_list: []
+      
+      # WRONG: Asking for clarification
+      # RIGHT: Generate workflow immediately with reasonable assumptions
+      - message: I'll create a workflow to process customer feedback.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              User said "create a workflow" - this is a DIRECT workflow generation request.
+              Even though some details are missing (where is feedback stored? how to process?),
+              I should generate a reasonable workflow with common patterns:
+              - Fetch feedback from a source
+              - Analyze/process it
+              - Store or send results
+              Do NOT ask for clarification - generate the workflow!
+          
+          - type: init_plan
+            content: |-
+              1. Generate workflow with feedback fetch, processing, and output
+              2. Use common tools and patterns
+              3. Return workflow to user
+          
+          - type: plan
+            content: |-
+              1. Generate customer feedback workflow
+              2. Report completion
+          
+          - type: current_plan_step
+            content: 1. Generate customer feedback workflow
+          
+          - type: stop
+            content: InProcess
+

@@ -35,6 +35,67 @@ _openai_client = None
 _embedding_deployment = None
 
 
+def detect_query_intent(user_query: str) -> str:
+    """
+    Detect if query is asking to READ/FETCH or WRITE/SEND.
+    
+    Returns: "read" | "write" | "both"
+    
+    Examples:
+        "fetch emails" → "read"
+        "send message" → "write"
+        "read emails and send responses" → "both"
+    """
+    query_lower = user_query.lower()
+    
+    # Read/fetch intent keywords
+    read_keywords = ['fetch', 'get', 'read', 'list', 'query', 'retrieve', 'download', 
+                     'find', 'search', 'view', 'show', 'check', 'load']
+    
+    # Write/send intent keywords
+    write_keywords = ['send', 'post', 'create', 'update', 'delete', 'reply', 'forward',
+                      'publish', 'upload', 'write', 'draft', 'compose']
+    
+    # Count occurrences to determine PRIMARY intent
+    read_count = sum(query_lower.count(kw) for kw in read_keywords)
+    write_count = sum(query_lower.count(kw) for kw in write_keywords)
+    
+    # ✅ CRITICAL: For complete workflows, if BOTH read AND write are present, return "both"
+    # This ensures actions for entire workflow are available (fetch + process + send)
+    if read_count > 0 and write_count > 0:
+        # If write keywords appear explicitly (send, reply, respond), include write actions
+        # This handles: "fetch messages and send responses" -> both
+        explicit_write_keywords = ['send', 'post', 'reply', 'respond', 'forward', 'publish']
+        has_explicit_write = any(kw in query_lower for kw in explicit_write_keywords)
+        
+        if has_explicit_write:
+            # User explicitly wants to WRITE after READ -> return "both"
+            return "both"
+        
+        # Otherwise use priority-based detection
+        first_read_pos = min((query_lower.find(kw) for kw in read_keywords if kw in query_lower), default=999)
+        first_write_pos = min((query_lower.find(kw) for kw in write_keywords if kw in query_lower), default=999)
+        
+        # If read comes first OR is mentioned 2x more, treat as read
+        if first_read_pos < first_write_pos and read_count >= write_count * 2:
+            return "read"
+        elif write_count >= read_count * 2:
+            return "write"
+        else:
+            return "both"
+    elif read_count > 0:
+        return "read"
+    elif write_count > 0:
+        return "write"
+    else:
+        return "both"  # Default to both if unclear
+
+
+# ✅ DELETED: detect_apps_from_query() function
+# No longer needed - action_matcher.py now handles ALL app detection semantically!
+# This removes 130+ lines of keyword matching and hardcoded app lists.
+
+
 def _log_to_debug_file(message: str):
     """
     Write debug message to file for live testing analysis.
@@ -311,7 +372,19 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
     if not actions:
         return ""
     
-    lines = ["## Available Composio Actions (use exact action_id):"]
+    lines = [
+        "## Available Composio Actions (use exact action_id):",
+        "",
+        "⚠️ CRITICAL RULES:",
+        "1. You MUST ONLY use action IDs from the numbered list below",
+        "2. DO NOT invent action names based on patterns (e.g., INSTAGRAM_FETCH_MESSAGES does NOT exist)",
+        "3. DO NOT extrapolate from similar names (GMAIL_FETCH_EMAILS ≠ OUTLOOK_FETCH_MESSAGES)",
+        "4. If you use an action NOT in this list, your code will FAIL at runtime",
+        "5. Copy the EXACT action_id shown below - character-for-character",
+        "",
+        "📋 Available Actions:",
+        ""
+    ]
     
     for action in actions[:top_k]:
         action_id = action['action_id']
@@ -474,24 +547,50 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
 def select_composio_actions(
     user_query: str,
     app_hints: Optional[List[str]] = None,
-    top_k: int = 5
+    top_k: int = 5,
+    context: Optional[str] = None,
+    adaptive_top_k: bool = True
 ) -> str:
     """
     ⚡ Main entry point - Get relevant Composio actions for a query.
     
-    ✅ NEW: Uses TWO-STAGE search (apps → actions) instead of global search.
-    This matches Composio's own architecture and dramatically improves precision.
+    ✅ HYBRID APPROACH (Option 2):
+    - user_query: Step-specific task for INTENT matching ("Fetch emails from Outlook")
+    - context: Full user request for DOMAIN keywords ("read emails... send responses")
+    
+    ✅ ADAPTIVE TOP_K (NEW):
+    - Single platform: top_k=7 (fast)
+    - Multi-platform (4 apps): top_k=12 (comprehensive)
+    - Scales dynamically: top_k = max(7, len(apps) * 3)
+    
+    ✅ Uses TWO-STAGE search (apps → actions) for precision.
     
     Architecture:
-        1. Find relevant APPS (200 apps, fast pgvector search)
-        2. Search ACTIONS within those apps (10-50 actions, scoped search)
+        1. Find relevant APPS using context (domain keywords)
+        2. Search ACTIONS using user_query (step intent)
+        3. Adapt top_k based on detected apps (if adaptive_top_k=True)
     
     Returns formatted string to inject into TaskWeaver prompt.
     """
     # ✅ LIVE DEBUGGING: Mark start of new action selection session
-    _log_to_debug_file(f"\n{'#'*80}\n[NEW SESSION - TWO STAGE] User Query: {user_query[:150]}\n{'#'*80}")
-    if app_hints:
-        _log_to_debug_file(f"[APP HINTS] {app_hints}")
+    _log_to_debug_file(f"\n{'#'*80}\n[NEW SESSION - ADAPTIVE] Step Query: {user_query[:100]}\n{'#'*80}")
+    if context:
+        _log_to_debug_file(f"[FULL CONTEXT] {context[:150]}")
+    
+    # ✅ INTENT DETECTION: Detect if query is asking to read or write
+    # Use step-specific query (user_query), NOT full context (context may have multiple intents)
+    query_intent = detect_query_intent(user_query)
+    _log_to_debug_file(f"[INTENT_DETECT] Query intent: {query_intent} (from step: {user_query[:80]}...)")
+    logger.info(f"[INTENT_DETECT] Step intent: {query_intent} | Step: {user_query[:60]}...")
+    
+    # ✅ SCALABLE: Let action_matcher.py do SEMANTIC app detection
+    # No keyword matching, no hardcoding - pure AI-first pgvector search!
+    # action_matcher.py will:
+    # 1. Use app_embedding semantic search to find relevant apps
+    # 2. Re-rank with default_app_preferences (gmail > outlook for "email")
+    # 3. Search actions only in the best-matched apps
+    _log_to_debug_file(f"[APP_DETECTION] Delegating to action_matcher.py for semantic app search")
+    logger.info(f"[APP_DETECTION] Using semantic search (no keyword hints) for scalability")
     
     try:
         # ✅ Use the WORKING two-stage matcher (action_matcher.py)
@@ -499,23 +598,57 @@ def select_composio_actions(
         
         matcher = ComposioActionMatcher(enable_warmup=False)  # No warmup for speed
         
-        # Match actions using two-stage approach
+        # ✅ SCALABLE ARCHITECTURE: Let action_matcher.py do ALL app detection semantically
+        # - NO app_hints → action_matcher uses pgvector semantic search at app level
+        # - NO keyword matching → pure AI-first approach
+        # - context for domain/app discovery
+        # - user_query for action intent matching
+        
+        _log_to_debug_file(f"[SEMANTIC_MATCH] Using action_matcher.py for both app AND action detection")
+        
         action_dicts = matcher.match_for_subtask(
-            subtask_description=user_query,
-            app_hints=app_hints,
-            top_k_apps=10 if not app_hints else len(app_hints),  # Search 10 apps (increased for multi-concept queries)
-            top_k_actions_per_app=2,  # 2 actions per app = ~20 total
-            min_confidence=0.25  # Lower threshold for better recall
+            subtask_description=user_query,  # Step-specific intent
+            app_hints=None,  # ✅ Let matcher do semantic app search!
+            top_k_apps=10,  # How many apps to consider
+            top_k_actions_per_app=3,  # Actions per app
+            min_confidence=0.35,  # Quality threshold
+            context=context  # Full user query for domain/app discovery
         )
         
         if not action_dicts:
             _log_to_debug_file("[TWO STAGE] No actions matched")
             return ""
         
+        # ✅ INTENT-BASED FILTERING: Filter actions based on detected intent
+        if query_intent == "read":
+            # Filter OUT write actions (send, create, update, delete, post, publish)
+            write_action_keywords = ['SEND', 'CREATE', 'UPDATE', 'DELETE', 'POST', 'PUBLISH', 'UPLOAD', 
+                                     'DRAFT', 'REPLY', 'FORWARD', 'COMPOSE', 'WRITE']
+            read_action_keywords = ['FETCH', 'GET', 'LIST', 'QUERY', 'RETRIEVE', 'DOWNLOAD', 'FIND', 
+                                   'SEARCH', 'VIEW', 'SHOW', 'READ', 'LOAD']
+            
+            filtered_actions = []
+            for action in action_dicts:
+                action_id = action['action_id'].upper()
+                # Prefer read actions, exclude pure write actions
+                is_read = any(kw in action_id for kw in read_action_keywords)
+                is_write = any(kw in action_id for kw in write_action_keywords)
+                
+                # Include if it's a read action OR if it's ambiguous (neither read nor write)
+                if is_read or not is_write:
+                    filtered_actions.append(action)
+                else:
+                    _log_to_debug_file(f"[INTENT_FILTER] Filtered OUT {action_id} (write action, but intent={query_intent})")
+            
+            if len(filtered_actions) < len(action_dicts):
+                logger.info(f"[INTENT_FILTER] Filtered {len(action_dicts) - len(filtered_actions)} write actions (intent={query_intent})")
+                _log_to_debug_file(f"[INTENT_FILTER] Kept {len(filtered_actions)}/{len(action_dicts)} actions after intent filtering")
+                action_dicts = filtered_actions
+        
         # Log the matched apps and actions
         matched_apps = list(set([a['app_name'] for a in action_dicts]))
         _log_to_debug_file(f"[TWO STAGE] Matched apps: {matched_apps}")
-        _log_to_debug_file(f"[TWO STAGE] Found {len(action_dicts)} actions:")
+        _log_to_debug_file(f"[TWO STAGE] Found {len(action_dicts)} actions (after intent filter):")
         
         # Enhanced logging - show ALL actions returned
         logger.info(f"[TWO STAGE] 🎯 Returned {len(action_dicts)} actions from two-stage search:")
@@ -566,6 +699,12 @@ def _select_composio_actions_fallback(
     
     if not all_actions:
         return ""
+    
+    # ✅ APPLY INTENT FILTERING (same as two-stage search)
+    query_intent = detect_query_intent(user_query)
+    _log_to_debug_file(f"[FALLBACK] Query intent: {query_intent}")
+    all_actions = _filter_actions_by_intent(all_actions, query_intent)
+    _log_to_debug_file(f"[FALLBACK] After intent filter: {len(all_actions)} actions remain")
     
     # Deduplicate by action_id
     seen = set()
