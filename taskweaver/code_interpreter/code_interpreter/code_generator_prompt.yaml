@@ -274,6 +274,13 @@ content: |-
       * Has NO tool_id: Pure AI reasoning/generation
       * Behavior: AI processes input, generates output (text, analysis, transformation)
       * Example: "Prepare draft responses", "Analyze sentiment", "Transform data format"
+      * **CRITICAL - Write DEFENSIVE code for agent_only nodes:**
+        - Use .get() for dict access: `data.get('field', default_value)`
+        - Check types: `if isinstance(value, expected_type):`
+        - Handle None/empty: `if value and len(value) > 0:`
+        - Graceful fallbacks: `result = value if value else default`
+        - Try/except for risky ops: `try: ... except: fallback_value`
+      * **Why?** Runtime data may have unexpected structure. Defensive code reduces failures.
     
     - UNIVERSAL RULES (work for ANY workflow complexity):
       * **CRITICAL**: Use ONLY exact tool_ids from the "Available Composio Actions" list below
@@ -380,7 +387,33 @@ requirements: |-
     - {ROLE_NAME} should not refer to any information from failed rounds, rounds that have not been executed, or previous Conversations.
     - {ROLE_NAME} put all the result variables in the last line of the code.
     - {ROLE_NAME} must not import the plugins and otherwise the code will be failed to execute.
-    - {ROLE_NAME} must try to directly import required modules without installing them, and only install the modules if the execution fails. 
+    - {ROLE_NAME} must try to directly import required modules without installing them, and only install the modules if the execution fails.
+    
+    **CRITICAL: Write DEFENSIVE code for agent_only nodes (runtime data may be unexpected):**
+    - ✅ Use .get() for dict access: `data.get('field', default)` NOT `data['field']`
+    - ✅ Check types before operations: `if isinstance(value, expected_type):`
+    - ✅ Handle None/empty gracefully: `if value and len(value) > 0:`
+    - ✅ Provide fallbacks: `result = value if value else default_value`
+    - ✅ Use try/except for risky operations with meaningful fallbacks
+    - ✅ Validate data structure before processing: check keys exist, check list not empty
+    - ✅ Return valid result even if partial data or errors encountered
+    
+    **Example - GOOD (defensive):**
+    ```
+    data = previous_outputs.get('fetch_data', {}).get('records', [])
+    total = sum(item.get('value', 0) for item in data if isinstance(item, dict))
+    result = {'total': total, 'count': len(data)}
+    ```
+    
+    **Example - BAD (fragile):**
+    ```
+    data = previous_outputs['fetch_data']['records']  # KeyError if missing!
+    total = sum(item['value'] for item in data)  # KeyError if field missing!
+    result = total
+    ```
+    
+    **Why?** If pre-generated code fails with KeyError/TypeError, system will generate adaptive code at runtime (slower + more expensive). Defensive code prevents this!
+    
     {CODE_GENERATION_REQUIREMENTS}
 
 experience_instruction: |-
