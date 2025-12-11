@@ -1,27 +1,27 @@
-enabled: True
+enabled: False
 rounds:
-  - user_query: Create a workflow to process orders with approval and notification
+  - user_query: Create a workflow to perform action_A with decision_step and conditional action_B
     state: created
     post_list:
-      - message: Create a workflow to process orders with approval and notification
+      - message: Create a workflow to perform action_A with decision_step and conditional action_B
         send_from: User
         send_to: Planner
         attachment_list:
-      - message: Collect order details, add approval step with conditional logic, and send notifications based on approval decision.
+      - message: Perform action_A, add decision step with conditional logic, and execute action_B based on decision outcome.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list:
           - type: plan_reasoning
             content: |-
-              **PATTERN RECOGNITION:** User wants: collect data → approve → send notification based on decision.
-              This demonstrates the UNIVERSAL "fetch → approve → act" pattern that applies to ANY workflow.
+              **PATTERN RECOGNITION:** User wants: action_A → decision → conditional action_B.
+              This demonstrates the UNIVERSAL "execute → decide → act_conditionally" pattern that applies to ANY workflow.
               
               Following the complete workflow rules:
-              1. Fetch ALL data BEFORE approval (order details + inventory/pricing) so approver sees complete context
-              2. User said "send notification" AFTER approval → MUST include notification step in plan
-              3. Notification is CONDITIONAL on approval decision → Use if/else logic
+              1. Execute ALL preparatory actions BEFORE decision step so decision-maker has complete context
+              2. User mentioned "action_B" AFTER decision → MUST include action_B step in plan
+              3. Action_B is CONDITIONAL on decision outcome → Use if/else logic
               
-              This pattern works for ANY scenario: orders→emails, messages→replies, documents→publish, requests→process, etc.
+              This pattern works for ANY scenario and ANY actions in ANY domain.
           - type: init_plan
             content: |-
               1. Collect order details using form_collect() with structured fields

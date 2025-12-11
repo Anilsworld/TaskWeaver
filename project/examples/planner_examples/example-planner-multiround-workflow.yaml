@@ -84,19 +84,28 @@ rounds:
         attachment_list:
           - type: plan_reasoning
             content: |-
-              **CRITICAL VALIDATION PERFORMED (UNIVERSAL PATTERN):**
+              **CRITICAL VALIDATION PERFORMED (100% PATTERN-AGNOSTIC):**
               
-              Checking Round 1 WORKFLOW dict nodes:
-              - ✓ Has fetch_source_a node
-              - ✓ Has fetch_source_b node
-              - ✓ Has review_data node (approval)
-              - ✗ Missing: action_source_a node
-              - ✗ Missing: action_source_b node
+              STEP 1: Count actions in init_plan
+              - 1. Fetch from source A
+              - 2. Fetch from source B
+              - 3. Get approval
+              - 4. Perform action on A
+              - 5. Perform action on B
+              Total: 5 actions
               
-              User said: "perform actions on approved items"
-              init_plan step 4-5: "Perform action if approved"
+              STEP 2: Count nodes in Round 1 WORKFLOW dict
+              - fetch_source_a (action: fetch)
+              - fetch_source_b (action: fetch)
+              - review_data (action: approve)
+              Total: 3 nodes
               
-              → Workflow is NOT complete! Need Round 2 to generate action nodes.
+              STEP 3: Compare
+              - Planned: 5 actions
+              - Implemented: 3 actions
+              - Missing: 2 actions (perform action on A, perform action on B)
+              
+              → Workflow is NOT complete! Need Round 2 to generate missing action nodes.
               
               Setting stop="InProcess" to continue with next step.
           - type: init_plan
@@ -156,23 +165,34 @@ rounds:
         attachment_list:
           - type: plan_reasoning
             content: |-
-              **VALIDATION COMPLETE (UNIVERSAL CHECK):**
+              **VALIDATION COMPLETE (100% PATTERN-AGNOSTIC CHECK):**
               
-              Round 1 nodes: fetch_source_a, fetch_source_b, review_data
-              Round 2 nodes: action_source_a, action_source_b
+              STEP 1: Count actions in init_plan
+              - 1. Fetch from source A
+              - 2. Fetch from source B
+              - 3. Get approval
+              - 4. Perform action on A
+              - 5. Perform action on B
+              Total: 5 actions
               
-              Checking against user request pattern "fetch, approve, perform actions":
-              - ✓ Fetch: fetch_source_a, fetch_source_b
-              - ✓ Approve: review_data
-              - ✓ Actions: action_source_a, action_source_b
+              STEP 2: Count nodes across ALL rounds (merged WORKFLOW dict)
+              - Round 1: fetch_source_a, fetch_source_b, review_data (3 nodes)
+              - Round 2: action_source_a, action_source_b (2 nodes)
+              - Total: 5 nodes
               
-              All required nodes are present! Workflow is COMPLETE.
+              STEP 3: Compare
+              - Planned: 5 actions
+              - Implemented: 5 actions
+              - Match: YES!
+              
+              All required actions are implemented! Workflow is COMPLETE.
               Setting stop="Completed".
               
-              **THIS PATTERN WORKS FOR ANY:**
-              - Sources: email/database/API/files/etc.
-              - Actions: send/update/delete/notify/post/etc.
-              - Tools: Composio/custom/internal/external/etc.
+              **THIS VALIDATION WORKS FOR ANY PATTERN:**
+              - Sequential, parallel, conditional, loops, or mixed
+              - ANY industry: healthcare, finance, retail, manufacturing, etc.
+              - ANY tools: Composio, custom APIs, databases, file systems, etc.
+              - ANY actions: CRUD operations, AI processing, notifications, transformations, etc.
           - type: init_plan
             content: |-
               1. Fetch data from source A <no dependency>

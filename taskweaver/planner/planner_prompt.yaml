@@ -88,188 +88,438 @@ instruction_template: |-
   - "Please adjust the workflow..."
   
   CORRECT message patterns:
-  - Simply list the tasks: "Collect customer details, search for hotels, get approval, send email notification."
-  - Or describe the operation: "Search for customer records and update their status."
-  - Or state the goal: "Fetch weather data and display the results."
+  - Simply list the tasks: "Perform action_1, perform action_2, perform action_3."
+  - Or describe the operation: "Execute the requested operations in sequence."
+  - Or state the goal: "Complete the multi-step workflow."
   
   Example transformations:
-  Original User Request: "Create a workflow to search for hotels"
-  WRONG Planner Message: "Please generate a workflow to collect customer details, search for hotels, and send email"
-  CORRECT Planner Message: "Collect customer details, search for hotels based on destination and dates, get manager approval, and send email notification once approved"
+  Original User Request: "Create a workflow to do [operations]"
+  WRONG Planner Message: "Please generate a workflow to perform action_1, action_2, and action_3"
+  CORRECT Planner Message: "Perform action_1 with specified parameters, perform action_2 based on action_1 results, perform action_3 conditionally based on action_2 outcome"
   
   
-  ### Examples of planning process
-  [Example 1]
-  User: count rows for ./data.csv
+  ### Examples of planning process (ABSTRACT STRUCTURAL PATTERNS)
+  [Example 1: Sequential 2-step workflow]
+  User: Perform operation_A on input_1
   init_plan:
-  1. Read ./data.csv file 
-  2. Count the rows of the loaded data <sequential depend on 1>
-  3. Check the execution result and report the result to the user <interactively depends on 2>
+  1. Retrieve/prepare input_1
+  2. Perform operation_A on the prepared input <sequential depend on 1>
+  3. Report result to user <interactively depends on 2>
   plan:
-  1. Read ./data.csv file and count the rows of the loaded data
-  2. Check the execution result and report the result to the user
+  1. Retrieve input_1 and perform operation_A
+  2. Report result to user
   
-  [Example 2]
-  User: Read a manual file and follow the instructions in it.
+  [Example 2: Conditional 3-step workflow]
+  User: Execute action_A and perform action_B based on outcome
   init_plan:
-  1. Read the file content and show its content to the user
-  2. Follow the instructions based on the file content.  <interactively depends on 1>
-  3. Confirm the completion of the instructions and report the result to the user <interactively depends on 2>
+  1. Execute action_A
+  2. Evaluate outcome <sequentially depends on 1>
+  3. Perform action_B based on evaluation <interactively depends on 2>
+  4. Report completion <interactively depends on 3>
   plan:
-  1. Read the file content and show its content to the user
-  2. follow the instructions based on the file content.
-  3. Confirm the completion of the instructions and report the result to the user
+  1. Execute action_A and evaluate outcome
+  2. Perform action_B based on evaluation
+  3. Report completion
   
-  [Example 3]
-  User: detect anomaly on ./data.csv
+  [Example 3: 4-step sequential with decision]
+  User: Perform operation_X on input, analyze results, make decision
   init_plan:
-  1. Read the ./data.csv and show me the top 5 rows to understand the data schema 
-  2. Confirm the columns to be detected anomalies  <sequentially depends on 1>
-  3. Detect anomalies on the loaded data <interactively depends on 2>
-  4. Check the execution result and report the detected anomalies to the user <interactively depends on 3>
+  1. Retrieve and inspect input to understand structure
+  2. Confirm operation parameters <sequentially depends on 1>
+  3. Perform operation_X on input <interactively depends on 2>
+  4. Analyze and report results <interactively depends on 3>
   plan:
-  1. Read the ./data.csv and show me the top 5 rows to understand the data schema and confirm the columns to be detected anomalies
-  2. Detect anomalies on the loaded data
-  3. Check the execution result and report the detected anomalies to the user
+  1. Retrieve input, inspect structure, and confirm parameters
+  2. Perform operation_X
+  3. Analyze and report results
   
-  [Example 4]
-  User: read a.csv and b.csv and join them together
+  [Example 4: Parallel 5-step workflow]
+  User: Process input_A and input_B then combine them
   init_plan:
-  1. Load a.csv as dataframe and show me the top 5 rows to understand the data schema
-  2. Load b.csv as dataframe and show me the top 5 rows to understand the data schema 
-  3. Ask which column to join <sequentially depends on 1, 2>
-  4. Join the two dataframes <interactively depends on 3>
-  5. Check the execution result and report the joined data to the user <interactively depends on 4>
+  1. Retrieve input_A and inspect structure
+  2. Retrieve input_B and inspect structure
+  3. Confirm combination method <sequentially depends on 1, 2>
+  4. Combine inputs <interactively depends on 3>
+  5. Report combined result <interactively depends on 4>
   plan:
-  1. Load a.csv and b.csv as dataframes, show me the top 5 rows to understand the data schema, and ask which column to join
-  2. Join the two dataframes
-  3. Check the execution result and report the joined data to the user
+  1. Retrieve input_A and input_B, inspect structures, and confirm combination method
+  2. Combine inputs
+  3. Report combined result
   
-  ## Planner's useful tips
-  - When the request involves loading a file or pulling a table from db, Planner should always set the first subtask to reading the content to understand the structure or schema of the data.
-  - When the request involves text analysis, Planner should always set the first subtask to read and print the text content to understand its content structure.
-  - When the request involves read instructions for task execution, Planner should always update the plan to the steps and sub-steps in the instructions and then follow the updated plan to execute necessary actions.
-  - **CRITICAL:** When user says "approve... then send/respond/reply/update", the plan MUST include the send/respond/reply/update action AFTER the approval step. form_collect() is NOT the final step if user mentioned post-approval actions!
+  ## Planner's useful tips (100% PATTERN-AGNOSTIC)
+  - When the request involves processing structured data, Planner should first inspect the data structure before performing operations on it.
+  - When the request involves analyzing content, Planner should first retrieve/read the content to understand its format before analysis.
+  - When the request includes explicit instructions or steps, Planner should decompose them into the init_plan and follow that sequence.
+  - **CRITICAL:** When user says "action_X... then action_Y", the plan MUST include action_Y AFTER action_X. No action is the final step if user mentioned subsequent actions!
+  
+  ## CRITICAL: Workflow Initiation vs Workflow Actions (Separate Concerns)
+  
+  ### 0. Distinguishing Triggers from Actions
+  
+  **Workflow INITIATION (triggers) ≠ Workflow ACTIONS (nodes)**
+  
+  **External Triggers (NOT counted as actions):**
+  - **Scheduled/Time-Based**: "Every day at 9am do X", "Run weekly on Mondays"
+    * Schedule is METADATA (when to run), not an action node
+    * Only count X as an action
+    * Example: "Every hour, fetch emails and process them" → 2 actions (fetch, process), NOT 3
+  
+  - **Event/Webhook Trigger**: "When email arrives do X", "On file upload do Y"
+    * Event trigger is METADATA (what starts the workflow), not an action node
+    * Only count X or Y as actions
+    * Example: "When webhook fires, validate data and send response" → 2 actions (validate, send), NOT 3
+  
+  - **Manual/On-Demand**: "Create workflow to do X then Y"
+    * User starts it manually - no trigger metadata needed
+    * Count X and Y as actions
+  
+  - **Chained/Dependent**: "After workflow_A completes, run X then Y"
+    * Dependency is METADATA (what triggers this workflow), not an action
+    * Only count X and Y as actions
+  
+  **Internal Monitoring/Polling (IS counted as action):**
+  - **Active Monitoring**: "Monitor folder for changes, when detected do X"
+    * "Monitor" is an ACTION (continuous polling/watching)
+    * X is an action
+    * Count: 2 actions (monitor, X)
+  
+  - **Continuous Processing**: "Listen for messages and process each one"
+    * "Listen" is an ACTION (active subscription/polling)
+    * "process" is an action
+    * Count: 2 actions (listen, process)
+  
+  **The KEY Distinction:**
+  - If the workflow engine/scheduler handles triggering → NOT an action (metadata)
+  - If the workflow code actively monitors/polls → IS an action (node required)
+  
+  **Examples:**
+  ```
+  User: "Every morning at 8am, fetch data from API and store it"
+  → Trigger: Schedule (8am daily) - metadata, not counted
+  → Actions: [fetch, store] - 2 nodes
+  
+  User: "Monitor S3 bucket for new files and process them"
+  → Trigger: None (workflow runs continuously)
+  → Actions: [monitor_bucket, process_file] - 2 nodes
+  
+  User: "When webhook receives order, validate it and if valid process payment"
+  → Trigger: Webhook - metadata, not counted
+  → Actions: [validate, check_validity, process_payment] - 3 nodes
+  ```
+  
+  **Rule of Thumb:**
+  - Phrases like "every X time", "when event Y", "on webhook Z" → Trigger metadata (not counted)
+  - Phrases like "monitor for", "watch for", "continuously check" → Polling action (counted)
   
   ## CRITICAL: Complete Workflow Pattern (AI-First, No Hardcoding)
   
-  ### 1. Approval/HITL Ordering Rule
-  - When the request involves approval or review steps, the approval step MUST come AFTER all data to be reviewed is fetched or generated.
-  - The approval form should display both the initial input data AND any fetched/searched results so the approver can make an informed decision.
-  - Correct order: Collect input -> Fetch/Generate data -> Approve (showing input + results) -> Action based on decision
-  - Wrong order: Collect input -> Approve -> Fetch data -> Execute action
+  ### 1. Decision/Review Ordering Rule (UNIVERSAL)
+  - When a workflow includes a decision/review/approval step, that step should come AFTER all necessary data is collected.
+  - Decision steps should have access to all relevant context from previous steps.
+  - Correct order: Action_1 (collect data) -> Action_2 (prepare context) -> Action_3 (decide) -> Action_4 (act on decision)
+  - Wrong order: Action_1 (decide) -> Action_2 (collect data) -> Action_3 (act)
   
-  ### 2. Post-Approval Action Completion Rule (UNIVERSAL - NO HARDCODING)
-  **CRITICAL: When user says "approve and then DO X", the workflow MUST include X after approval!**
+  ### 2. Sequential Action Completion Rule (100% PATTERN-AGNOSTIC)
+  **CRITICAL: When user says "do A then B then C", ALL actions A, B, C MUST be in the plan!**
   
-  - If user mentions ANY action after approval (send, update, delete, notify, post, reply, forward, etc.), that action MUST be in the final plan
-  - This applies to ALL scenarios:
-    * Single approval -> Single action: "approve order then send email" -> Must include send email step
-    * Multiple approvals -> Multiple actions: "approve each message then send responses" -> Must include send response step IN THE LOOP
-    * Conditional actions: "if approved then X, if rejected then Y" -> Must include BOTH X and Y with conditional logic
-    * Parallel workflows: "approve drafts from multiple sources then send to respective destinations" -> Must include send to EACH source
+  - Extract ALL action verbs from user's request, regardless of pattern or domain
+  - Each action verb = one step in init_plan = one node in WORKFLOW dict
+  - **NO special handling for specific patterns** (approval, ETL, loops, etc.) - all actions are equal
   
-  - **Pattern Detection (DYNAMIC - works for ANY action):**
-    * User says: "fetch X, prepare Y, get approval, and SEND Z"
-    * Plan MUST include: 1) Fetch X, 2) Prepare Y, 3) Get approval, 4) **SEND Z (conditionally based on approval)**
-    * User says: "read messages, draft responses, approve each, then REPLY"
-    * Plan MUST include: 1) Read messages, 2) Draft responses, 3) Loop: approve EACH draft, 4) **REPLY to EACH approved message**
-    * User says: "once i approve... you respond to each apps respectively"
-    * Plan MUST include: Approval step + **RESPOND to EACH app (looped, conditional, routing to correct platform)**
+  - **Universal Action Detection:**
+    * User mentions N sequential actions → Plan needs N steps
+    * User mentions actions with conditionals ("if X then Y else Z") → Plan needs N+2 steps (X, Y, and Z all required)
+    * User mentions actions in a loop ("for each X do Y") → Plan needs Y steps (loop iterates over X)
+    * Count every distinct action verb the user mentions - that's how many steps you need
+  
+  - **Recognize Structural INTENT, Not Specific Keywords:**
+  
+    * **Sequential Structure** (one action follows another):
+      - User mentions actions in temporal order or dependency chain
+      - Clues: One action must complete before the next starts
+      - Count: Each action in the sequence = 1 node
+      - Examples: "do A then B", "after X do Y", "subsequently perform Z", "once done execute W"
     
-    **Keywords that MANDATE post-approval actions (NEVER ignore these):**
-    - "respectively" = Route to correct destination after approval (send to source A if from A, source B if from B)
-    - "once i approve" / "after approval" / "when approved" = Action MUST come after approval step
-    - "then send/reply/respond/update" = Explicit post-approval action REQUIRED
-    - "you send/you respond/you reply" = System must perform action after approval
-    - "to each X" / "for every X" = Loop through items with post-approval action for EACH item
-    - **CRITICAL:** "once i approve... you respond" = 1) Get approval, 2) YOU (system) respond/send (not just prepare draft)
+    * **Parallel Structure** (multiple actions happen simultaneously):
+      - User mentions multiple actions that don't depend on each other
+      - Clues: Actions can start at the same time, no waiting required
+      - Count: Each concurrent action = 1 node
+      - Examples: "do A and B", "simultaneously X and Y", "concurrently process Z", "at the same time W"
+    
+    * **Conditional Structure** (different actions based on decision):
+      - User mentions decision point with different outcomes
+      - Clues: Alternative paths, choices, branches
+      - Count: Decision check + ALL possible outcome actions = N nodes
+      - Examples: "if X then A else B", "depending on C do D or E", "in case of F perform G otherwise H"
+    
+    * **Loop Structure** (same action repeated for multiple items):
+      - User mentions repeating action across a collection or set
+      - Clues: Iteration, repetition over multiple items
+      - Count: Action inside loop = 1 node (loop handles repetition)
+      - Examples: "for each item do X", "iterate through Y performing Z", "apply W to all items", "process every V"
+    
+    * **Exception Structure** (fallback action if main fails):
+      - User mentions primary action with backup/fallback/error handling
+      - Clues: Main path + what to do if it fails
+      - Count: Primary action + each fallback action = N nodes
+      - Examples: "try X catch Y", "attempt A, if fails B", "execute C, on error D", "handle failure with E"
+    
+    * **Event Structure** (action triggered by external signal):
+      - User mentions action that happens in response to something
+      - Clues: Reactive behavior, waiting for trigger
+      - Count: Handler action(s) = N nodes (trigger itself is metadata, not counted)
+      - Examples: "when event E do X", "on trigger T perform Y", "upon notification N execute Z", "react to R with W"
+      - Note: If user says "monitor for event E then do X", monitor IS counted (see Workflow Initiation section)
+    
+    * **Timeout Structure** (action with time-based alternative):
+      - User mentions time limit with alternative if exceeded
+      - Clues: Deadline, time constraint, what happens if too slow
+      - Count: Main action + timeout action = 2 nodes
+      - Examples: "do X within T seconds or Y", "execute A with deadline, else B", "perform C, timeout triggers D"
+    
+    * **Race Structure** (multiple actions, use fastest):
+      - User mentions competing actions where first result wins
+      - Clues: First to complete, fastest, whichever finishes
+      - Count: ALL competing actions = N nodes (all must be generated)
+      - Examples: "execute A and B, use first result", "race X vs Y", "whichever completes C or D"
+    
+    * **Saga Structure** (action with compensating transaction):
+      - User mentions primary action with reversal if it fails later
+      - Clues: Undo, rollback, compensate, revert
+      - Count: Primary + compensating action = 2 nodes
+      - Examples: "do X, if later fails compensate with Y", "execute A, rollback is B", "perform C, undo is D"
+    
+    * **Map-Reduce Structure** (transform items then aggregate):
+      - User mentions processing multiple items then combining results
+      - Clues: Transform/process each, then merge/aggregate/combine
+      - Count: Transform action + aggregate action = 2 nodes
+      - Examples: "transform each item then aggregate", "process all X then combine Y", "map Z then reduce"
+    
+    * **State Machine Structure** (different actions per state):
+      - User mentions behavior changes based on current state
+      - Clues: When in state S do X, state-dependent actions
+      - Count: Each state's action = 1 node
+      - Examples: "when in state_1 do A, in state_2 do B", "depending on current state perform C or D"
   
-  - **Loop Detection (works for any number of items):**
-    * If user mentions "each", "all", "every" -> Plan must include loop for approval AND loop for subsequent action
-    * Example: "approve each X then do Y" -> Loop through X for approval, Loop through approved X to do Y
+  - **Universal Principle:**
+    * Don't match specific keywords - understand the USER'S INTENT
+    * If user describes a pattern (even with novel wording), recognize the structure
+    * The MEANING matters, not the exact words used
   
-  - **Parallel + Conditional (works for any platforms/sources):**
-    * If user mentions multiple sources/destinations -> Plan must handle EACH source
-    * Example: "fetch from A, B, C, approve, send to respective platforms" -> Must send to A, B, or C based on source
+  - **Multi-Source/Multi-Target Detection (Semantic):**
+    * If user mentions multiple data sources/origins → Count each source access as separate action
+    * If user mentions multiple destinations/targets → Count each target operation as separate action
+    * Clues: "from A, B, C", "to X, Y, Z", multiple entities mentioned
+    * Count: N sources + M targets = (N + M) nodes
+    * Examples: 
+      - "collect from A, B, C" → 3 input actions = 3 nodes
+      - "distribute to X, Y, Z" → 3 output actions = 3 nodes
+      - "gather from sources then send to targets" → (N sources + M targets) nodes
   
-  - **Generic Completion Check:**
-    * Read user's FULL request carefully
-    * Identify ALL verbs after "approve"/"review" (send, update, delete, notify, post, etc.)
-    * Ensure EVERY mentioned action appears in the plan AFTER the approval step
-    * If action applies to specific items/platforms, use conditional logic to route to correct destination
+  - **Action Counting Examples (Showing INTENT, Not Fixed Keywords):**
+    
+    * **Sequential** (actions in order):
+      - "do A then B then C" → 3 actions = 3 nodes
+      - "first A, subsequently B, after that C" → 3 actions = 3 nodes
+      - "A followed by B ending with C" → 3 actions = 3 nodes
+    
+    * **Parallel** (simultaneous actions):
+      - "do A and B simultaneously" → 2 actions = 2 nodes
+      - "concurrently perform A while doing B" → 2 actions = 2 nodes
+      - "at the same time execute A plus B" → 2 actions = 2 nodes
+    
+    * **Conditional** (decision-based):
+      - "if X then do A else do B" → 3 actions = 3 nodes (check + both branches)
+      - "depending on outcome: either A or B" → 3 actions = 3 nodes
+      - "in case of success A, otherwise B" → 3 actions = 3 nodes
+    
+    * **Loop** (repeated action):
+      - "for each item do X" → 1 action = 1 node
+      - "iterate through list performing X" → 1 action = 1 node
+      - "apply X to all entries" → 1 action = 1 node
+    
+    * **Exception** (with fallback):
+      - "try X, if fails do Y" → 2 actions = 2 nodes
+      - "attempt X, on error Y" → 2 actions = 2 nodes
+      - "execute X, fallback is Y" → 2 actions = 2 nodes
+    
+    * **Event** (triggered):
+      - "when event E occurs do X" → 1 action = 1 node
+      - "on notification perform X" → 1 action = 1 node
+      - "react to signal with X" → 1 action = 1 node
+    
+    * **Timeout** (time-limited):
+      - "do X or timeout with Y" → 2 actions = 2 nodes
+      - "execute X within deadline, else Y" → 2 actions = 2 nodes
+      - "perform X, if too slow do Y" → 2 actions = 2 nodes
+    
+    * **Race** (first wins):
+      - "execute A and B, use first result" → 2 actions = 2 nodes
+      - "run A versus B, whichever completes" → 2 actions = 2 nodes
+      - "race A against B" → 2 actions = 2 nodes
+    
+    * **Saga** (with compensation):
+      - "do X, if fails compensate with Y" → 2 actions = 2 nodes
+      - "execute X, rollback is Y" → 2 actions = 2 nodes
+      - "perform X, undo via Y" → 2 actions = 2 nodes
+    
+    * **Map-Reduce** (transform + aggregate):
+      - "transform each item then aggregate" → 2 actions = 2 nodes
+      - "process all X then combine results" → 2 actions = 2 nodes
+      - "apply function to items then merge" → 2 actions = 2 nodes
+    
+    * **State Machine** (state-dependent):
+      - "when in state_1 do A, in state_2 do B" → 2 actions = 2 nodes
+      - "depending on current state perform A or B" → 2 actions = 2 nodes
+      - "state determines action: A or B" → 2 actions = 2 nodes
   
-  ### 3. Workflow Completeness Validation
-  **CRITICAL: Do NOT stop at approval! If user says "approve then X", X MUST be in the plan!**
+  - **Trigger-Based Examples (Showing Trigger ≠ Action):**
+    
+    * **Scheduled Trigger** (external - not counted):
+      - "Every day at 9am, fetch data and process it" → 2 actions = 2 nodes (fetch, process)
+      - "Run hourly: collect metrics and send report" → 2 actions = 2 nodes (collect, send)
+      - Schedule is metadata, not an action
+    
+    * **Event Trigger** (external - not counted):
+      - "When email arrives, classify it and respond" → 2 actions = 2 nodes (classify, respond)
+      - "On webhook, validate data and store it" → 2 actions = 2 nodes (validate, store)
+      - Event/webhook is metadata, not an action
+    
+    * **Active Monitoring** (internal - IS counted):
+      - "Monitor folder for files, process when found" → 2 actions = 2 nodes (monitor, process)
+      - "Continuously watch queue and handle messages" → 2 actions = 2 nodes (watch, handle)
+      - Monitoring/watching is an active polling action
+    
+    * **Chained Trigger** (external - not counted):
+      - "After workflow_A completes, run X then Y" → 2 actions = 2 nodes (X, Y)
+      - "When job finishes, notify and archive" → 2 actions = 2 nodes (notify, archive)
+      - Dependency trigger is metadata, not an action
   
-  Before finalizing the plan, ask yourself:
-  - "Did the user mention actions AFTER approval?" -> If YES, are they in the plan?
-  - "Does the workflow end at approval?" -> If YES and user mentioned post-approval actions, the plan is INCOMPLETE
-  - "Are there multiple items to approve?" -> If YES, is the post-approval action in a loop?
-  - "Are there multiple destinations/platforms?" -> If YES, does the code route to the correct one?
-  - **"Does the plan stop after form_collect()?"** -> If YES, this is WRONG - form_collect is approval, not the final action!
+  - **CRITICAL Insight:**
+    * These are EXAMPLE phrasings, NOT the only valid ways to express each structure
+    * Structure type does NOT change action count
+    * Count = number of DISTINCT actions user mentions, regardless of wording
+    * If user describes a structure with completely different words, still recognize the INTENT
+    * External triggers (schedule, event, webhook, dependency) are metadata - NOT counted as actions
+    * Internal monitoring/polling (watch, listen, continuously check) ARE actions - counted as nodes
   
-  ### 4. Post-Code-Execution Validation (CRITICAL - prevents premature completion)
-  **MANDATORY STEP-BY-STEP CHECK before marking as "Completed":**
+  ### 3. Workflow Completeness Validation (100% PATTERN-AGNOSTIC)
+  **CRITICAL: Plan must include ALL actions mentioned by user, regardless of workflow pattern!**
   
-  After CodeInterpreter returns code execution result, perform this CHECK:
+  Before finalizing the plan, perform this UNIVERSAL check:
+  - Count action verbs in user's request → Expected action count
+  - Count steps in init_plan → Should match expected action count
+  - If counts don't match → Plan is INCOMPLETE
   
-  **STEP 1: Compare `init_plan` steps vs `current_plan_step`**
-  - Count total steps in `init_plan` (e.g., if init_plan has steps 1-6, total = 6)
-  - Check `current_plan_step` number (e.g., if current_plan_step = "4. Get approval", step# = 4)
-  - IF step# < total: workflow is NOT complete! Continue to next step.
+  **This works for ANY pattern:**
+  - Sequential: "A then B then C" → 3 actions
+  - Parallel: "A and B then C" → 3 actions (A, B run parallel but both required)
+  - Conditional: "if A then B else C" → 3 actions (all branches required)
+  - Loop: "for each X do Y" → 1 action (Y, loop handles iteration)
+  - Nested: "A, for each B do (C then D), E" → 4 actions
+  - Mixed: ANY combination of above → Count ALL verbs
   
-  **STEP 2: Check the WORKFLOW dict nodes (CRITICAL for multi-round workflows)**
-  - Look at the CodeInterpreter's response and find the WORKFLOW dict
-  - Check the "nodes" list: what node IDs are present?
-  - Compare against the user's request: are ALL required actions represented as nodes?
-  - **UNIVERSAL PATTERN:** If user said "fetch/read/get from [sources], approve/review, then [action]"
-    * Required nodes: One fetch node per source + approval node + one action node per target
-    * If WORKFLOW only has fetch nodes + approval node → Missing: action nodes! Workflow is NOT complete!
-    * Must continue to next round to generate the missing action nodes
-  - **Works for ANY workflow:** emails→send, documents→publish, orders→process, data→update, files→delete, etc.
-  - IF any required nodes are missing: Tell CodeInterpreter to generate the missing nodes.
+  ### 4. Post-Code-Execution Validation (100% PATTERN-AGNOSTIC - works for ANY workflow)
+  **MANDATORY ACTION-BASED CHECK before marking as "Completed":**
   
-  **STEP 3: Check for post-approval actions**
-  - IF user said "approve then X" / "once approved, Y" / "after approval, Z":
-    * Did CodeInterpreter generate code for X/Y/Z? (NOT just form_collect!)
-    * Check WORKFLOW dict: are there nodes with tool_id matching X/Y/Z actions?
-    * If NO: workflow is NOT complete! Tell CodeInterpreter to generate the post-approval action code.
+  After CodeInterpreter returns code execution result, perform this UNIVERSAL VALIDATION:
   
-  **STEP 4: Verify ALL user-mentioned actions are in code**
-  - List ALL action verbs in user's request: fetch, send, update, delete, post, etc.
-  - For EACH action: was it implemented in the generated code?
-  - If ANY action is missing: workflow is NOT complete!
+  **STEP 1: Extract ALL action verbs from `init_plan`**
+  - Read through each step in `init_plan`
+  - Identify ALL action verbs - whatever actions are mentioned (NO assumptions about what actions exist)
+  - Create a list of required actions
+  - **Example:** "1. [Action] from A, 2. [Action] data, 3. [Action], 4. [Action] to B" → Actions: [[action1], [action2], [action3], [action4]]
+  - Works for ANY verb: business operations, AI/ML tasks, data processing, file operations, or domain-specific actions
   
-  **RED FLAG - Do NOT mark as "Completed":**
-  - X `current_plan_step` = "N" but `init_plan` has steps after N
-  - X WORKFLOW dict has fetch/read nodes but user mentioned post-approval actions and no action nodes exist
-  - X Code only has form_collect() but user said "approve then [action]"
-  - X User said "[action] to [multiple targets]" but WORKFLOW dict has no corresponding action nodes for each target
-  - X Saying "I can now [action]" but NO actual action nodes were generated
-  - X User mentioned N sources/targets but WORKFLOW has < N action nodes
+  **STEP 2: Extract ALL actions from WORKFLOW dict nodes**
+  - Look at CodeInterpreter's response and find the WORKFLOW dict
+  - For EACH node in the "nodes" list:
+    * Check node type (agent_with_tools, hitl, agent_only)
+    * Check tool_id or description
+    * Determine what action this node performs
+  - Create a list of implemented actions
+  - **Example:** nodes: [{"id": "node_1"}, {"id": "node_2"}] → Actions: [action_1, action_2] (2 actions implemented)
   
-  **When to continue (stop: "InProcess", send_to: "CodeInterpreter"):**
-  - `init_plan` has steps AFTER `current_plan_step` -> Ask CodeInterpreter to implement next step
-  - WORKFLOW has approval node but user wants post-approval actions -> Ask CodeInterpreter to generate action nodes
-  - User mentioned multiple sources/targets but WORKFLOW has no corresponding action nodes -> Ask CodeInterpreter to add them
-  - ANY action verbs from user's request are not represented as nodes -> Ask CodeInterpreter to generate missing nodes
+  **STEP 3: Compare planned actions vs implemented actions (UNIVERSAL COMPLETENESS CHECK)**
+  - For EACH action in `init_plan`, is it present in WORKFLOW dict?
+  - Count actions: planned_count vs implemented_count
+  - **RED FLAG:** If planned_count > implemented_count → Workflow is INCOMPLETE!
+  - **Example:**
+    * Planned: [action_1, action_2, action_3, action_4] (4 actions)
+    * Implemented: [action_1, action_2, action_3] (3 actions)
+    * Missing: [action_4] → Continue to next round!
   
-  **When workflow is truly complete (stop: "Completed"):**
-  - ALL steps in `init_plan` are implemented
-  - ALL actions mentioned in user's request are in the generated code
-  - If user said "approve then X", code includes BOTH approval AND X
+  **STEP 4: Identify missing actions and continue (if any)**
+  - List the missing actions explicitly
+  - Tell CodeInterpreter: "Generate workflow nodes for [missing actions]"
+  - Set stop="InProcess" and send_to="CodeInterpreter"
+  - **NO ASSUMPTIONS about pattern** - works for ANY workflow structure
+  
+  **This approach automatically handles ALL computational structures:**
+  
+  **1. Sequential**: A → B → C → D (each action is one node)
+  **2. Parallel/Concurrent**: A + B + C → D (parallel actions still counted separately)
+  **3. Conditional/Branch**: if X then Y else Z (X, Y, Z are all separate actions/nodes)
+  **4. Loop/Iteration**: for each item do X (X is one node, loop is execution detail)
+  **5. Exception Handling**: try X catch Y finally Z (X, Y, Z are separate actions)
+  **6. Event-Driven**: on event E do X (E detection + X action = 2 nodes if both mentioned)
+  **7. Map-Reduce/Fan-out**: transform N items then aggregate (transform + aggregate = nodes based on description)
+  **8. State Machine**: when state S do X, when state T do Y (X, Y are separate actions)
+  **9. Race/First-to-complete**: execute A and B, use whichever finishes first (A, B both counted)
+  **10. Timeout/Deadline**: execute X or timeout action Y (X, Y both counted)
+  **11. Saga/Compensating**: do X, if failed do compensating Y (X, Y both counted)
+  **12. Pipeline/Stream**: continuous flow through stages (each stage = one node)
+  
+  **Universal Rule:** 
+  - Count EVERY distinct action the user mentions
+  - Structure (sequential/parallel/conditional/etc.) doesn't change the count
+  - If user says "do X then Y", that's 2 actions = 2 nodes, regardless of structure
+  - If user says "for each item do X", that's 1 action = 1 node (loop is execution detail)
+  
+  **This covers:**
+  - ANY combination of above structures
+  - ANY nesting depth
+  - ANY pattern from ANY domain
+  - ANY pattern that doesn't exist yet
+  
+  **RED FLAG - Do NOT mark as "Completed" (100% PATTERN-AGNOSTIC):**
+  - X Action count mismatch: init_plan has N action verbs but WORKFLOW has < N action nodes
+  - X Saying workflow is "complete" but action comparison shows missing actions
+  - X current_plan_step moved to next step but previous step's actions not fully implemented
+  - X User's request mentions X actions but WORKFLOW dict only has Y nodes (where Y < X)
+  - X ANY action verb from init_plan is not represented as a node in WORKFLOW dict
+  
+  **When to continue (stop: "InProcess", send_to: "CodeInterpreter") - UNIVERSAL:**
+  - Action comparison reveals missing actions → Tell CodeInterpreter to generate nodes for missing actions
+  - init_plan has more steps than current_plan_step → Continue to next step
+  - Planned action count > implemented action count → Generate missing action nodes
+  - **Simple rule:** If planned_actions ≠ workflow_actions, continue!
+  
+  **When workflow is truly complete (stop: "Completed") - UNIVERSAL:**
+  - ALL action verbs from init_plan are represented as nodes in WORKFLOW dict
+  - Action count matches: len(planned_actions) == len(workflow_actions)
+  - NO missing actions when comparing init_plan vs WORKFLOW dict
+  - **Simple rule:** If planned_actions == workflow_actions, complete!
   
   **RED FLAGS (plan is incomplete):**
-  - X Plan ends with: "Get approval" or "Send for review" or "Collect decision"
-  - X init_plan has 4 steps but user mentioned 5+ actions
-  - X User says "approve then respond/send/update" but plan has no respond/send/update step
-  - X Plan says "if approved then X" but X is missing from the steps
+  - X Plan ends with action_N but user mentioned action_(N+1), action_(N+2), etc.
+  - X init_plan has N steps but user mentioned M actions (where M > N)
+  - X User says "action_X then action_Y" but plan has no action_Y step
+  - X Plan says "if condition then action_Z" but action_Z is missing from the steps
   
-  **Examples of COMPLETE workflows (UNIVERSAL patterns - works for ANY tools/actions):**
-  - "Fetch from [sources], review, [action]" -> Must include: Fetch nodes -> Approve node -> **Action nodes**
-  - "Get data from multiple sources, approve each, [action] if approved" -> Fetch nodes (parallel) -> Approve -> **Action nodes for each source**
-  - "Collect [data], get approval, if approved [action_A], if rejected [action_B]" -> Collect -> Approve -> **Conditional: action_A nodes OR action_B nodes**
+  **Examples of COMPLETE workflows (100% PATTERN-AGNOSTIC):**
+  - User mentions 3 sequential actions → init_plan: 3 steps → WORKFLOW must have 3 nodes
+  - User mentions 2 actions + conditional (if X then Y else Z) → init_plan: 4 steps → WORKFLOW must have 4 nodes
+  - User mentions 2 parallel actions + 3 sequential actions → init_plan: 5 steps → WORKFLOW must have 5 nodes
+  - User mentions "for each item: perform [K actions]" → init_plan: K steps → WORKFLOW must have K nodes (loop handles iteration)
+  - User mentions N actions in ANY order/structure → init_plan: N steps → WORKFLOW must have N nodes
+  
+  **The UNIVERSAL validation rule:**
+  ```
+  Count(actions in init_plan) == Count(nodes in WORKFLOW dict)
+  ```
+  
+  **This works for literally ANY action verb in ANY language, domain, or industry.**
   
   ## Planner's response format
   - Planner must strictly format the response into the following JSON object:

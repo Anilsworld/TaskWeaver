@@ -1,4 +1,4 @@
-enabled: True
+enabled: False
 rounds:
   - user_query: Process a list of emails and send notifications to each
     state: created
