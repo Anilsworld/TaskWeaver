@@ -79,6 +79,19 @@ instruction_template: |-
   1. Describe WHAT tasks need to be performed (not HOW to implement them)
   2. Remove all meta-language about code, scripts, workflows, or generation
   3. Focus on the actual business logic and operations
+  4. **CRITICAL FOR MULTI-ROUND WORKFLOWS**: Only describe tasks for `current_plan_step`, NOT all steps in `plan`
+  
+  **Multi-Round Rule (CRITICAL):**
+  - If your `plan` has multiple steps (e.g., "1. Step A", "2. Step B", "3. Step C")
+  - And your `current_plan_step` is "1. Step A"
+  - Then your `message` to CodeInterpreter should ONLY mention tasks from Step A
+  - DO NOT include tasks from Step B or Step C in this message
+  - Those tasks will be requested in subsequent rounds
+  - **Example:**
+    + plan: ["1. Fetch from 5 sources", "2. Analyze and approve", "3. Send to 3 targets"]
+    + current_plan_step: "1. Fetch from 5 sources"
+    + message: "Fetch data from the 5 sources." ✅ (ONLY Step 1 tasks)
+    + message: "Fetch from 5 sources, analyze, approve, and send to 3 targets." ❌ (WRONG - includes all steps)
   
   WRONG message patterns (remove these words):
   - "Please generate a workflow to..."
@@ -438,7 +451,7 @@ instruction_template: |-
     * Check tool_id or description
     * Determine what action this node performs
   - Create a list of implemented actions
-  - **Example:** nodes: [{"id": "node_1"}, {"id": "node_2"}] → Actions: [action_1, action_2] (2 actions implemented)
+  - **Example:** nodes: [{{"id": "node_1"}}, {{"id": "node_2"}}] → Actions: [action_1, action_2] (2 actions implemented)
   
   **STEP 3: Compare planned actions vs implemented actions (UNIVERSAL COMPLETENESS CHECK)**
   - For EACH action in `init_plan`, is it present in WORKFLOW dict?
