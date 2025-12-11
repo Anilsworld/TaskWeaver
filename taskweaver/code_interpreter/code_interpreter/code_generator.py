@@ -400,11 +400,16 @@ class CodeGenerator(Role):
                 # ✅ COMPLETE WORKFLOW INJECTION:
                 # For multi-platform workflows (3+ apps), the action selector will set intent="both"
                 # This ensures BOTH read (fetch/list) AND write (send/reply) actions are available
+                # Get session ID from environment (set by eclipse_adapter.py)
+                import os
+                session_id = os.environ.get('TASKWEAVER_SESSION_ID', None)
+                
                 composio_actions = select_composio_actions(
                     user_query=query,  # Step query - action selector detects multi-platform and sets intent="both"
                     context=original_user_query,  # Full query for domain/app discovery
                     top_k=10,  # Balanced - enough for both read and write actions
-                    adaptive_top_k=True  # Enable automatic scaling based on detected apps
+                    adaptive_top_k=True,  # Enable automatic scaling based on detected apps
+                    session_id=session_id  # ✅ Enable batch API caching per session
                 )
                 if composio_actions:
                     enrichment_contents.append(composio_actions)

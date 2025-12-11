@@ -19,6 +19,50 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ===================================================================
+# BATCH CALL CACHE
+# ===================================================================
+# Cache structure: {session_id: {step_query: [action_dicts]}}
+# Stores Composio batch API results for the entire workflow session
+_BATCH_CACHE = {}
+
+def _fuzzy_match_step(query: str, cached_steps: list, threshold: float = 0.60) -> Optional[str]:
+    """
+    Find best matching cached step using simple word overlap.
+    
+    Args:
+        query: Current step query
+        cached_steps: List of cached step queries
+        threshold: Minimum similarity score (0-1)
+    
+    Returns:
+        Best matching cached step or None
+    """
+    import re
+    
+    # Normalize query
+    query_words = set(re.findall(r'\w+', query.lower()))
+    
+    best_match = None
+    best_score = 0
+    
+    for cached_step in cached_steps:
+        cached_words = set(re.findall(r'\w+', cached_step.lower()))
+        
+        # Calculate Jaccard similarity (word overlap)
+        if not query_words or not cached_words:
+            continue
+        
+        intersection = len(query_words & cached_words)
+        union = len(query_words | cached_words)
+        score = intersection / union if union > 0 else 0
+        
+        if score > best_score and score >= threshold:
+            best_score = score
+            best_match = cached_step
+    
+    return best_match
+
 # ✅ LIVE DEBUGGING: File path for embedding query logs
 DEBUG_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'embedding_debug.log')
 
@@ -561,7 +605,8 @@ def select_composio_actions(
     app_hints: Optional[List[str]] = None,
     top_k: int = 5,
     context: Optional[str] = None,
-    adaptive_top_k: bool = True
+    adaptive_top_k: bool = True,
+    session_id: Optional[str] = None
 ) -> str:
     """
     ⚡ Main entry point - Get relevant Composio actions for a query.
@@ -589,8 +634,140 @@ def select_composio_actions(
     if context:
         _log_to_debug_file(f"[FULL CONTEXT] {context[:150]}")
     
-    # ✅ INTENT DETECTION: Detect if query is asking to read or write
-    # Use step-specific query (user_query), NOT full context (context may have multiple intents)
+    # ===================================================================
+    # 🆕 BATCH CALL: Check cache first, make batch call if needed
+    # ===================================================================
+    # Use passed session_id if available, otherwise use context[:50] as implicit session ID
+    if not session_id:
+        session_id = context[:50] if context else None
+    
+    # Check if we have cached results from batch call
+    if session_id and session_id in _BATCH_CACHE:
+        # Try fuzzy matching to find this step in cache
+        cached_steps = list(_BATCH_CACHE[session_id].keys())
+        matched_step = _fuzzy_match_step(user_query, cached_steps)
+        
+        if matched_step:
+            logger.info(f"✅ [BATCH_CACHE] Found cached tools (matched: '{matched_step[:60]}...')")
+            _log_to_debug_file(f"[BATCH_CACHE] Hit! Returning cached results for step")
+            action_dicts = _BATCH_CACHE[session_id][matched_step]
+            return format_actions_for_prompt(action_dicts, top_k)
+    
+    # If no cache and we have full context, make ONE batch call for entire workflow
+    if context and session_id and session_id not in _BATCH_CACHE:
+        try:
+            # Add plugins directory to path for import
+            import sys
+            import os
+            plugin_dir = os.path.dirname(os.path.abspath(__file__))
+            if plugin_dir not in sys.path:
+                sys.path.insert(0, plugin_dir)
+            
+            from composio_batch_search import AIBatchSearch
+            import asyncio
+            
+            logger.info("[BATCH_API] 🚀 Making ONE batch call for entire workflow...")
+            _log_to_debug_file("[BATCH_API] First call - fetching tools for all steps")
+            
+            # Get or create event loop
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Make batch API call with full context
+            composio_api = AIBatchSearch()
+            search_result = loop.run_until_complete(
+                composio_api.search_batch(
+                    user_prompt=context,  # Full workflow prompt
+                    entity_id="taskweaver_batch",
+                    timeout=10  # 10 seconds for batch
+                )
+            )
+            
+            # Cache results per sub-task
+            if search_result and search_result.sub_task_results:
+                logger.info(f"✅ [BATCH_API] Got tools for {len(search_result.sub_task_results)} sub-tasks")
+                _log_to_debug_file(f"[BATCH_API] Caching results for {len(search_result.sub_task_results)} steps")
+                
+                _BATCH_CACHE[session_id] = {}
+                
+                for sub_task_result in search_result.sub_task_results:
+                    step_query = sub_task_result.use_case
+                    tools = sub_task_result.tools
+                    
+                    # Convert to action_dicts format
+                    # ✅ Preserve execution_order from Composio's validated plan
+                    action_dicts = []
+                    for tool in tools[:top_k]:
+                        action_dicts.append({
+                            'action_id': tool.get('tool_id', tool.get('action_id', 'UNKNOWN')),
+                            'action_name': tool.get('name', tool.get('action_name', '')),
+                            'app_name': tool.get('app_name', ''),
+                            'app_display_name': tool.get('app_display_name', tool.get('app_name', '')),
+                            'description': tool.get('description', ''),
+                            'parameters': tool.get('parameters', {}),
+                            'response': tool.get('response', {}),
+                            'execution_order': tool.get('execution_order', 0),  # ✅ Preserve Composio's sequence
+                        })
+                    
+                    _BATCH_CACHE[session_id][step_query] = action_dicts
+                    logger.info(f"[BATCH_API] Cached {len(action_dicts)} tools for: {step_query[:60]}...")
+                
+                # Find matching step for current query
+                cached_steps = list(_BATCH_CACHE[session_id].keys())
+                matched_step = _fuzzy_match_step(user_query, cached_steps)
+                
+                if matched_step:
+                    logger.info(f"✅ [BATCH_API] Returning tools for current step")
+                    action_dicts = _BATCH_CACHE[session_id][matched_step]
+                    return format_actions_for_prompt(action_dicts, top_k)
+                else:
+                    # ✅ FALLBACK: Use best partial match or first cached result
+                    logger.warning(f"⚠️  [BATCH_API] No fuzzy match found for '{user_query[:60]}...'")
+                    
+                    # Try to find the best partial match (even below threshold)
+                    query_words = set(user_query.lower().split())
+                    best_match = None
+                    best_score = 0
+                    
+                    for cached_step in cached_steps:
+                        cached_words = set(cached_step.lower().split())
+                        overlap = len(query_words & cached_words)
+                        total = len(query_words | cached_words)
+                        score = overlap / total if total > 0 else 0
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_match = cached_step
+                    
+                    # ✅ CRITICAL FIX: Always prefer Composio's validated tools!
+                    # Lower threshold to 15% to ensure we use Composio's batch results
+                    # Composio's AI already validated these tools - trust it!
+                    if best_match and best_score > 0.15:
+                        logger.info(f"✅ [BATCH_API] Using best partial match (score={best_score:.2f}): '{best_match[:60]}...'")
+                        logger.info(f"   ✅ Preferring Composio's validated tools over pgvector to avoid hallucinations")
+                        action_dicts = _BATCH_CACHE[session_id][best_match]
+                        return format_actions_for_prompt(action_dicts, top_k)
+                    
+                    logger.warning(f"⚠️  [BATCH_API] Match score very low ({best_score:.2f}), falling back to pgvector")
+                    logger.warning(f"   ⚠️  Risk of tool hallucination! Consider improving fuzzy matching.")
+                    _log_to_debug_file("[BATCH_API] All matches too weak, using pgvector fallback")
+            else:
+                logger.info("⚠️  [BATCH_API] No sub-task results, using pgvector fallback")
+                _log_to_debug_file("[BATCH_API] No results from batch call")
+        
+        except Exception as e:
+            logger.warning(f"⚠️  [BATCH_API] Batch call failed: {e}, using pgvector fallback")
+            _log_to_debug_file(f"[BATCH_API] Error: {e}, falling back to pgvector")
+    
+    # ===================================================================
+    # INTENT DETECTION (for pgvector fallback)
+    # ===================================================================
     query_intent = detect_query_intent(user_query)
     _log_to_debug_file(f"[INTENT_DETECT] Query intent: {query_intent} (from step: {user_query[:80]}...)")
     logger.info(f"[INTENT_DETECT] Step intent: {query_intent} | Step: {user_query[:60]}...")

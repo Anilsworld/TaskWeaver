@@ -46,6 +46,22 @@ content: |-
     - form_collect() is the INTERNAL, PREFERRED way to collect structured data from users
     - Basic pattern: data, desc = form_collect("form_id", {{"title": "...", "fields": [...]}})
     
+    ## On form fields matching tool parameters (CRITICAL):
+    - **CRITICAL RULE - READ CAREFULLY**: When a form feeds data to a composio_action:
+      * Form field "name" MUST be IDENTICAL to tool parameter name (copy-paste it exactly!)
+      * Use "label" for human-friendly text - "name" must match the technical parameter name
+      * If tool needs "param_x", form MUST have field with name="param_x" (NOT "param_x_input" or "user_param_x")
+    - **WORKFLOW VALIDATION WILL FAIL** if field names don't match parameter names exactly!
+    - **WRONG** - using friendly names instead of exact parameter names:
+      # Tool requires: my_param
+      form: {{"name": "my_parameter_input"}}  ❌ WRONG
+      tool: {{"my_param": "${{...my_param}}"}}  ❌ FAILS - "my_param" doesn't exist in form!
+    - **CORRECT** - copy exact parameter name to field name, use label for friendly text:
+      # Tool requires: my_param  
+      form: {{"name": "my_param", "label": "Enter Your Parameter"}}  ✅ CORRECT - "name" matches exactly
+      tool: {{"my_param": "${{...my_param}}"}}  ✅ SUCCESS - names match perfectly!
+    - **STEP-BY-STEP**: 1) Find tool in "Available Actions" below, 2) Copy its required parameter names, 3) Use those EXACT names in form field "name" attributes, 4) Add friendly descriptions in "label"
+    
     ## On HITL/Approval forms (CRITICAL PATTERN):
     - For approval/HITL forms, you ONLY provide DECISION-MAKING fields (NOT context/display fields)
     - CRITICAL: The system will AUTOMATICALLY inject ALL context fields (upstream data + downstream actions)
