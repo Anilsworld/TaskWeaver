@@ -219,26 +219,41 @@ instruction_template: |-
   - Check `current_plan_step` number (e.g., if current_plan_step = "4. Get approval", step# = 4)
   - IF step# < total: workflow is NOT complete! Continue to next step.
   
-  **STEP 2: Check for post-approval actions**
+  **STEP 2: Check the WORKFLOW dict nodes (CRITICAL for multi-round workflows)**
+  - Look at the CodeInterpreter's response and find the WORKFLOW dict
+  - Check the "nodes" list: what node IDs are present?
+  - Compare against the user's request: are ALL required actions represented as nodes?
+  - **UNIVERSAL PATTERN:** If user said "fetch/read/get from [sources], approve/review, then [action]"
+    * Required nodes: One fetch node per source + approval node + one action node per target
+    * If WORKFLOW only has fetch nodes + approval node → Missing: action nodes! Workflow is NOT complete!
+    * Must continue to next round to generate the missing action nodes
+  - **Works for ANY workflow:** emails→send, documents→publish, orders→process, data→update, files→delete, etc.
+  - IF any required nodes are missing: Tell CodeInterpreter to generate the missing nodes.
+  
+  **STEP 3: Check for post-approval actions**
   - IF user said "approve then X" / "once approved, Y" / "after approval, Z":
     * Did CodeInterpreter generate code for X/Y/Z? (NOT just form_collect!)
+    * Check WORKFLOW dict: are there nodes with tool_id matching X/Y/Z actions?
     * If NO: workflow is NOT complete! Tell CodeInterpreter to generate the post-approval action code.
   
-  **STEP 3: Verify ALL user-mentioned actions are in code**
+  **STEP 4: Verify ALL user-mentioned actions are in code**
   - List ALL action verbs in user's request: fetch, send, update, delete, post, etc.
   - For EACH action: was it implemented in the generated code?
   - If ANY action is missing: workflow is NOT complete!
   
   **RED FLAG - Do NOT mark as "Completed":**
   - X `current_plan_step` = "N" but `init_plan` has steps after N
-  - X Code only has form_collect() but user said "approve then send/respond/update"
-  - X User said "send to Gmail, Outlook, Facebook, Instagram" but code has no send actions
-  - X Saying "I can now respond" but NO actual send/respond code was generated
+  - X WORKFLOW dict has fetch/read nodes but user mentioned post-approval actions and no action nodes exist
+  - X Code only has form_collect() but user said "approve then [action]"
+  - X User said "[action] to [multiple targets]" but WORKFLOW dict has no corresponding action nodes for each target
+  - X Saying "I can now [action]" but NO actual action nodes were generated
+  - X User mentioned N sources/targets but WORKFLOW has < N action nodes
   
   **When to continue (stop: "InProcess", send_to: "CodeInterpreter"):**
   - `init_plan` has steps AFTER `current_plan_step` -> Ask CodeInterpreter to implement next step
-  - Code collected approval but user wants post-approval actions -> Ask CodeInterpreter to generate send/respond/update code
-  - User mentioned specific platforms/destinations but code has no routing -> Ask CodeInterpreter to add routing
+  - WORKFLOW has approval node but user wants post-approval actions -> Ask CodeInterpreter to generate action nodes
+  - User mentioned multiple sources/targets but WORKFLOW has no corresponding action nodes -> Ask CodeInterpreter to add them
+  - ANY action verbs from user's request are not represented as nodes -> Ask CodeInterpreter to generate missing nodes
   
   **When workflow is truly complete (stop: "Completed"):**
   - ALL steps in `init_plan` are implemented
@@ -251,10 +266,10 @@ instruction_template: |-
   - X User says "approve then respond/send/update" but plan has no respond/send/update step
   - X Plan says "if approved then X" but X is missing from the steps
   
-  **Examples of COMPLETE workflows (GENERIC patterns, not hardcoded):**
-  - "Read X, draft Y, approve, send to Z" -> Must include: Fetch X -> Draft Y -> Approve -> **Send to Z**
-  - "Get data from multiple sources, review each, update if approved" -> Fetch parallel -> Loop approve each -> **Loop update approved items**
-  - "Prepare documents, get approval, if approved publish, if rejected archive" -> Prepare -> Approve -> **Conditional: publish OR archive**
+  **Examples of COMPLETE workflows (UNIVERSAL patterns - works for ANY tools/actions):**
+  - "Fetch from [sources], review, [action]" -> Must include: Fetch nodes -> Approve node -> **Action nodes**
+  - "Get data from multiple sources, approve each, [action] if approved" -> Fetch nodes (parallel) -> Approve -> **Action nodes for each source**
+  - "Collect [data], get approval, if approved [action_A], if rejected [action_B]" -> Collect -> Approve -> **Conditional: action_A nodes OR action_B nodes**
   
   ## Planner's response format
   - Planner must strictly format the response into the following JSON object:

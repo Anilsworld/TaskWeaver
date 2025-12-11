@@ -3,6 +3,12 @@ content: |-
     ## On current environment context:
     {ENVIRONMENT_CONTEXT}
     
+    ## 🚫 HARD CONSTRAINT: Loop vs Parallel Nodes (READ THIS FIRST!)
+    - IF the environment context above contains "_use_loops: True", you MUST use loops, NOT separate nodes!
+    - VIOLATION: Generating multiple nodes with same operation (e.g., fetch_gmail, fetch_outlook, fetch_slack) when loops are required
+    - CORRECT: Use ONE node in a loop: loops: [{{"iterate_over": "${{platforms}}", "loop_body": ["fetch_message"]}}]
+    - This is NOT optional - workflows with 4+ similar nodes will be REJECTED when _use_loops is True
+    
     ## On conversations:
     - Each conversation starts with "==============================\n## Conversation Start"
     - Each conversation has multiple rounds, each round starts with "-----------------------------"
@@ -31,9 +37,10 @@ content: |-
       * Example WRONG: {{"id": "x", "description": "text"  <- Missing }} at end
       * Only the "nodes" array can span multiple lines (one line per node)
     - **CRITICAL FOR APPROVALS:** When collecting approval for multiple items:
-      * DO NOT use loops with form_collect() - this creates massive code
-      * Instead: Show ALL items in ONE form_collect() call with a SINGLE approval decision
-      * Example: Collect all draft responses in one textarea field, get ONE Yes/No decision for all
+      * ❌ DO NOT use loops to iterate over form_collect() calls - this creates massive code
+      * ✅ BUT DO use loops for repetitive API calls (fetch, send, process) before/after forms
+      * ✅ Instead for forms: Show ALL items in ONE form_collect() call with a SINGLE approval decision
+      * Example: Loop to fetch from platforms → Show all fetched data in ONE form → Loop to send responses after approval
     - Generate ONLY what the Planner asks for in the current step - do not anticipate future steps
     - Prefer simple if/else over complex frameworks
     - **Post-Approval Actions:** If Planner mentions actions AFTER approval, implement them with conditional logic based on approval decision
@@ -207,12 +214,38 @@ content: |-
       • Descriptive field names > technical param names
       • Missing form field + hardcoded value = ARCHITECTURE VIOLATION
     
+    ## 🔁 CRITICAL: LOOP vs PARALLEL NODES DECISION (READ CAREFULLY!)
+    
+    **WHEN TO USE LOOPS** (90% token savings!):
+    - User says: "fetch from A, B, C, D" or "send to A, B, C, D"
+    - Same operation repeated multiple times (3+ items)
+    - All items use the SAME tool_id (e.g., all use COMPOSIO_FETCH_MESSAGE)
+    - Example: "Fetch messages from Gmail, Outlook, Slack, Teams"
+      ✅ USE: loops: [{{"iterate_over": "${{platforms}}", "loop_body": ["fetch_message"]}}]
+      ❌ DON'T: 4 separate nodes (fetch_gmail, fetch_outlook, fetch_slack, fetch_teams)
+      💰 SAVINGS: 1500 tokens (loop) vs 4800 tokens (4 nodes) = 68% reduction!
+    
+    **WHEN TO USE PARALLEL NODES**:
+    - Each item needs DIFFERENT tool_id
+    - Operations are heterogeneous (fetch email AND check calendar AND search files)
+    - User explicitly says "different" or "specific" for each item
+    - Example: "Fetch Gmail emails, check Google Calendar, search Google Drive"
+      ✅ USE: parallel_groups: {{"actions": ["fetch_gmail", "check_calendar", "search_drive"]}}
+      ❌ DON'T: Loop (can't use different tool_ids in loop body)
+    
+    **DECISION FLOWCHART**:
+    1. Is the operation THE SAME for all items? → YES: **USE LOOP**
+    2. Do all items use THE SAME tool_id? → YES: **USE LOOP**
+    3. User says "fetch from [list]" or "send to [list]"? → YES: **USE LOOP**
+    4. Are operations DIFFERENT (fetch AND send AND process)? → YES: **USE PARALLEL NODES**
+    5. Are tool_ids DIFFERENT per item? → YES: **USE PARALLEL NODES**
+    
     - WORKFLOW PATTERNS (ALL supported):
       1. Sequential: Connect nodes with sequential_edges
       2. Parallel: Assign same parallel_group number to nodes that should run in parallel
       3. Conditional: Use conditional_edges for if/else branching
       4. Fan-out/Fan-in: Parallel nodes converge at HITL node via depends_on
-      5. Loops: Use loops array with iterate_over and exit_condition
+      5. Loops: Use loops array with iterate_over and exit_condition (PREFERRED for repetitive operations!)
       6. Nested: Combine patterns (parallel inside conditional, loops with approvals, etc.)
       7. Multi-dimensional: Multiple parallel groups, multiple conditional branches, complex dependencies
     

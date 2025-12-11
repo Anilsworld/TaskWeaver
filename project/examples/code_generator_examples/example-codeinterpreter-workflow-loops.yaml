@@ -1,0 +1,81 @@
+enabled: True
+description: >-
+  LOOP pattern for repetitive operations (90% token reduction).
+  
+  🔁 USE LOOPS when user says "fetch from A, B, C" or "send to X, Y, Z"
+  - Same operation repeated across multiple items
+  - All items use THE SAME tool_id
+  - Example: "Read messages from Gmail, Outlook, Slack, Teams"
+    ✅ USE: loops (1500 tokens) vs ❌ 4 separate nodes (6000 tokens)
+  
+  ⚡ LOOP BENEFITS:
+  - 70-90% token reduction (scales infinitely)
+  - No LLM token limits (loop definition is tiny)
+  - Runtime expands to N parallel executions via LangGraph Send pattern
+  
+  🚨 ONLY use loops when SAME tool_id for all items!
+  - Different operations? Use parallel_groups instead
+
+rounds:
+  - user_query: Create a workflow to fetch messages from Gmail, Outlook, Slack, and Teams, prepare draft responses, review them, and send the approved responses back to each platform.
+    state: finished
+    post_list:
+      - message: Fetch messages from Gmail, Outlook, Slack, and Teams, prepare drafts, review, and send approved responses.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list: []
+      
+      - message: I've created an optimized workflow using LOOP pattern to handle 4 platforms with minimal tokens.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: |-
+              🔍 COMPLEXITY ANALYSIS DETECTED:
+              - Operation: "fetch messages" (same action repeated)
+              - Platforms: Gmail, Outlook, Slack, Teams (4 items)
+              - Tool: FETCH_MESSAGES (same tool_id for all platforms)
+              
+              ✅ DECISION: USE LOOP PATTERN
+              - WITHOUT loop: 4 fetch nodes + 4 send nodes = 8 nodes × 800 tokens = 6400 tokens
+              - WITH loop: 2 loop definitions + 2 other nodes = 4 items × 400 tokens = 1600 tokens
+              - SAVINGS: 4800 tokens (75% reduction!)
+              
+              📋 WORKFLOW STRUCTURE:
+              1. collect_platforms: Form to get list of platforms from user
+              2. fetch_messages_loop: Loop over platforms, fetch from each
+              3. prepare_drafts: Process all fetched messages
+              4. review_drafts: HITL approval
+              5. send_responses_loop: Loop to send responses after approval
+              
+              🔁 LOOP SYNTAX:
+              loops: [{
+                "id": "loop_id",
+                "iterate_over": "${from_step:step_id.field_name}",
+                "loop_body": ["node_id_to_repeat"],
+                "parallel": True,
+                "exit_condition": "optional condition"
+              }]
+          
+          - type: reply_type
+            content: python
+          
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                "nodes": [
+                  {"id": "collect_platforms", "type": "form", "form_id": "platform_form", "title": "Select Platforms", "fields": [{"name": "platforms", "label": "Platforms to fetch from", "type": "multiselect", "options": ["Gmail", "Outlook", "Slack", "Teams"], "required": True}], "description": "Collect list of platforms"},
+                  {"id": "fetch_message", "type": "agent_with_tools", "tool_id": "COMPOSIO_FETCH_MESSAGES", "app_name": "${loop_item.platform}", "params": {"limit": 10, "newer_than": "1d"}, "description": "Fetch messages from current platform (executed per loop iteration)"},
+                  {"id": "prepare_drafts", "type": "agent_only", "description": "Prepare draft responses for all fetched messages", "params": {"all_messages": "${from_loop:fetch_messages.results}"}, "depends_on": ["fetch_messages_loop"]},
+                  {"id": "review_drafts", "type": "hitl", "form_id": "review_form", "title": "Review Draft Responses", "fields": [{"name": "decision", "type": "select", "options": ["Approve All", "Reject All"], "required": True}, {"name": "comments", "type": "textarea"}], "depends_on": ["prepare_drafts"], "description": "Review and approve all draft responses"},
+                  {"id": "send_response", "type": "agent_with_tools", "tool_id": "COMPOSIO_SEND_MESSAGE", "app_name": "${loop_item.platform}", "params": {"message": "${from_step:prepare_drafts.draft_for_platform}"}, "description": "Send response to current platform (executed per loop iteration)"}
+                ],
+                "loops": [
+                  {"id": "fetch_messages_loop", "iterate_over": "${from_step:collect_platforms.platforms}", "loop_body": ["fetch_message"], "parallel": True, "description": "Fetch messages from each platform in parallel"},
+                  {"id": "send_responses_loop", "iterate_over": "${from_step:collect_platforms.platforms}", "loop_body": ["send_response"], "parallel": True, "depends_on": ["review_drafts"], "exit_condition": "${review_drafts.decision} == 'Approve All'", "description": "Send responses to each platform in parallel"}
+                ],
+                "conditional_edges": [{"source": "review_drafts", "condition": "${review_drafts.decision} == 'Approve All'", "if_true": "send_responses_loop", "if_false": "END"}],
+                "sequential_edges": [("collect_platforms", "fetch_messages_loop"), ("fetch_messages_loop", "prepare_drafts"), ("prepare_drafts", "review_drafts")]
+              }
+              result = WORKFLOW
+

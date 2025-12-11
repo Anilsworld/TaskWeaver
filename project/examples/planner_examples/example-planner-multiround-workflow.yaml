@@ -1,0 +1,194 @@
+enabled: True
+rounds:
+  - user_query: Create a workflow to fetch data from multiple sources, get approval, then perform actions on approved items
+    state: created
+    post_list:
+      - message: Create a workflow to fetch data from multiple sources, get approval, then perform actions on approved items
+        send_from: User
+        send_to: Planner
+        attachment_list:
+      - message: Fetch data from all sources, collect approval decision, and execute post-approval actions.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              **UNIVERSAL MULTI-ROUND PATTERN:**
+              User pattern: "fetch from [sources], approve, then [action]"
+              
+              This requires 2 rounds (APPLIES TO ANY WORKFLOW):
+              - Round 1: Data collection + Approval
+              - Round 2: Post-approval actions
+              
+              Following complete workflow rules:
+              1. Fetch ALL data BEFORE approval
+              2. User said "[action]" AFTER approval → MUST include action step
+              3. Actions apply to specific items/sources → Use conditional routing
+          - type: init_plan
+            content: |-
+              1. Fetch data from source A <no dependency>
+              2. Fetch data from source B <no dependency>
+              3. Get approval for actions <sequentially depends on 1,2>
+              4. Perform action on source A if approved <sequentially depends on 3>
+              5. Perform action on source B if approved <sequentially depends on 3>
+              6. Report completion <interactively depends on 4,5>
+          - type: plan
+            content: |-
+              1. Instruct CodeInterpreter to generate workflow code for data fetching and approval collection
+              2. Instruct CodeInterpreter to generate workflow code for post-approval actions
+              3. Report result to user
+          - type: current_plan_step
+            content: 1. Instruct CodeInterpreter to generate workflow code for data fetching and approval collection
+          - type: stop
+            content: InProcess
+      - message: Workflow code executed successfully with data fetching and approval collection.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: |-
+              Generating Round 1: Fetch + Approve
+              
+              WORKFLOW dict will contain:
+              - fetch_source_a node
+              - fetch_source_b node
+              - review_data node (HITL approval)
+              
+              NOTE: Action nodes are NOT in this round - they'll be in Round 2.
+          - type: reply_type
+            content: python
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                "nodes": [
+                  {"id": "fetch_source_a", "type": "agent_with_tools", "tool_id": "ACTION_FETCH_A", "app_name": "source_a", "params": {}, "description": "Fetch data from source A"},
+                  {"id": "fetch_source_b", "type": "agent_with_tools", "tool_id": "ACTION_FETCH_B", "app_name": "source_b", "params": {}, "description": "Fetch data from source B"},
+                  {"id": "review_data", "type": "hitl", "form_id": "approval_form", "title": "Review Data", "fields": [{"name": "decision", "type": "select", "options": ["Approve", "Reject"], "required": True}], "depends_on": ["fetch_source_a", "fetch_source_b"], "description": "Get approval"}
+                ],
+                "parallel_groups": {"fetch": ["fetch_source_a", "fetch_source_b"]},
+                "conditional_edges": [{"source": "review_data", "condition": "${review_data.decision} == 'Approve'", "if_true": "perform_actions", "if_false": "END"}],
+                "sequential_edges": [("fetch_source_a", "review_data"), ("fetch_source_b", "review_data")]
+              }
+              result = WORKFLOW
+          - type: verification
+            content: CORRECT
+          - type: code_error
+            content: No code error.
+          - type: execution_status
+            content: SUCCESS
+          - type: execution_result
+            content: Round 1 workflow generated with 3 nodes
+      - message: Generate the post-approval action nodes.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              **CRITICAL VALIDATION PERFORMED (UNIVERSAL PATTERN):**
+              
+              Checking Round 1 WORKFLOW dict nodes:
+              - ✓ Has fetch_source_a node
+              - ✓ Has fetch_source_b node
+              - ✓ Has review_data node (approval)
+              - ✗ Missing: action_source_a node
+              - ✗ Missing: action_source_b node
+              
+              User said: "perform actions on approved items"
+              init_plan step 4-5: "Perform action if approved"
+              
+              → Workflow is NOT complete! Need Round 2 to generate action nodes.
+              
+              Setting stop="InProcess" to continue with next step.
+          - type: init_plan
+            content: |-
+              1. Fetch data from source A <no dependency>
+              2. Fetch data from source B <no dependency>
+              3. Get approval for actions <sequentially depends on 1,2>
+              4. Perform action on source A if approved <sequentially depends on 3>
+              5. Perform action on source B if approved <sequentially depends on 3>
+              6. Report completion <interactively depends on 4,5>
+          - type: plan
+            content: |-
+              1. Instruct CodeInterpreter to generate workflow code for data fetching and approval collection
+              2. Instruct CodeInterpreter to generate workflow code for post-approval actions
+              3. Report result to user
+          - type: current_plan_step
+            content: 2. Instruct CodeInterpreter to generate workflow code for post-approval actions
+          - type: stop
+            content: InProcess
+      - message: Workflow code executed successfully with post-approval action nodes added.
+        send_from: CodeInterpreter
+        send_to: Planner
+        attachment_list:
+          - type: thought
+            content: |-
+              Generating Round 2: Post-Approval Actions
+              
+              WORKFLOW dict will now contain:
+              - action_source_a node
+              - action_source_b node
+              
+              These will be merged with Round 1 nodes by the converter.
+          - type: reply_type
+            content: python
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                "nodes": [
+                  {"id": "action_source_a", "type": "agent_with_tools", "tool_id": "ACTION_PERFORM_A", "app_name": "source_a", "params": {}, "depends_on": ["review_data"], "description": "Perform action on source A"},
+                  {"id": "action_source_b", "type": "agent_with_tools", "tool_id": "ACTION_PERFORM_B", "app_name": "source_b", "params": {}, "depends_on": ["review_data"], "description": "Perform action on source B"}
+                ],
+                "conditional_edges": [{"source": "review_data", "condition": "${review_data.decision} == 'Approve'", "if_true": ["action_source_a", "action_source_b"], "if_false": "END"}],
+                "sequential_edges": [("review_data", "action_source_a"), ("review_data", "action_source_b")]
+              }
+              result = WORKFLOW
+          - type: verification
+            content: CORRECT
+          - type: code_error
+            content: No code error.
+          - type: execution_status
+            content: SUCCESS
+          - type: execution_result
+            content: Round 2 workflow generated with 2 action nodes
+      - message: The workflow is complete! It fetches data from multiple sources, requires approval, and performs actions on each source based on the approval decision.
+        send_from: Planner
+        send_to: User
+        attachment_list:
+          - type: plan_reasoning
+            content: |-
+              **VALIDATION COMPLETE (UNIVERSAL CHECK):**
+              
+              Round 1 nodes: fetch_source_a, fetch_source_b, review_data
+              Round 2 nodes: action_source_a, action_source_b
+              
+              Checking against user request pattern "fetch, approve, perform actions":
+              - ✓ Fetch: fetch_source_a, fetch_source_b
+              - ✓ Approve: review_data
+              - ✓ Actions: action_source_a, action_source_b
+              
+              All required nodes are present! Workflow is COMPLETE.
+              Setting stop="Completed".
+              
+              **THIS PATTERN WORKS FOR ANY:**
+              - Sources: email/database/API/files/etc.
+              - Actions: send/update/delete/notify/post/etc.
+              - Tools: Composio/custom/internal/external/etc.
+          - type: init_plan
+            content: |-
+              1. Fetch data from source A <no dependency>
+              2. Fetch data from source B <no dependency>
+              3. Get approval for actions <sequentially depends on 1,2>
+              4. Perform action on source A if approved <sequentially depends on 3>
+              5. Perform action on source B if approved <sequentially depends on 3>
+              6. Report completion <interactively depends on 4,5>
+          - type: plan
+            content: |-
+              1. Instruct CodeInterpreter to generate workflow code for data fetching and approval collection
+              2. Instruct CodeInterpreter to generate workflow code for post-approval actions
+              3. Report result to user
+          - type: current_plan_step
+            content: 3. Report result to user
+          - type: stop
+            content: Completed
+
+
