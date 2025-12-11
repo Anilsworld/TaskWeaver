@@ -23,9 +23,12 @@ content: |-
     - Use print() to show intermediate outputs and debugging information
     - **CODE LENGTH LIMIT:** WORKFLOW dict MUST be under 80 lines - use COMPACT formatting:
       * MANDATORY: Each node MUST be on a SINGLE line (no line breaks inside node dicts)
+      * CRITICAL: Every opening brace {{ MUST have a matching closing brace }} on the SAME line
+      * CRITICAL: Each node dict MUST end with }} before the comma, NOT just "
       * Remove ALL comments from the WORKFLOW dict
       * Use minimal spacing: space after colons and commas only
-      * Example: {{"id": "x", "type": "form", "fields": [{{"name": "a"}}]}}  <- ALL on one line
+      * Example CORRECT: {{"id": "x", "type": "form", "fields": [{{"name": "a"}}]}},  <- Ends with }}
+      * Example WRONG: {{"id": "x", "description": "text"  <- Missing }} at end
       * Only the "nodes" array can span multiple lines (one line per node)
     - **CRITICAL FOR APPROVALS:** When collecting approval for multiple items:
       * DO NOT use loops with form_collect() - this creates massive code
@@ -88,6 +91,11 @@ content: |-
     - Or use f-strings with implicit concatenation: text = f"part1" f"part2"
     - NEVER use explicit + operators for string concatenation across lines
     - NEVER break strings like: text = "part1" + \n             "part2"
+    - **CRITICAL: F-strings MUST be on a SINGLE line** - use escape sequences for newlines:
+      * CORRECT: body = f"Line 1\nLine 2\n{{variable}}"  (all on one line, use \n for newlines)
+      * WRONG: body = f"Line 1
+                       Line 2
+                       {{variable}}"  (never break f-strings across actual lines)
     - Example CORRECT: body = ("Hello " "World")
     - Example WRONG: body = "Hello " + \n          "World"
     

@@ -361,30 +361,54 @@ class CodeGenerator(Role):
         # =====================================================================
         enrichment_contents = [pe.content for pe in planning_enrichments]
         try:
-            # Dynamic import - same pattern as code_verification.py
-            from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions
-            
-            # ✅ SCALABLE: action_matcher.py now handles ALL app detection semantically
-            # No more keyword matching or hardcoded app lists
-            # The select_composio_actions() function will auto-detect apps using pgvector embeddings
-            
-            # ✅ ADAPTIVE APPROACH:
-            # - query: Step-specific intent from Planner ("Fetch emails from Outlook")
-            # - context: Full user request for domain/app discovery ("read emails... send responses")
-            # - adaptive_top_k=True: Auto-scales based on detected apps
-            #
-            # ✅ COMPLETE WORKFLOW INJECTION:
-            # For multi-platform workflows (3+ apps), the action selector will set intent="both"
-            # This ensures BOTH read (fetch/list) AND write (send/reply) actions are available
-            composio_actions = select_composio_actions(
-                user_query=query,  # Step query - action selector detects multi-platform and sets intent="both"
-                context=original_user_query,  # Full query for domain/app discovery
-                top_k=10,  # Balanced - enough for both read and write actions
-                adaptive_top_k=True  # Enable automatic scaling based on detected apps
+            # ✅ SCALABLE FIX: Skip expensive action selection on retry rounds
+            # When code execution fails, CodeInterpreter sends the error message back for retry
+            # We don't need to re-search for actions - reuse the ones from first attempt
+            is_retry_round = any(
+                indicator in query for indicator in [
+                    "execution failed",
+                    "The following python code has been executed:",
+                    "SyntaxError:",
+                    "IndentationError:",
+                    "NameError:",
+                    "TypeError:",
+                    "ValueError:",
+                    "KeyError:",
+                    "AttributeError:",
+                    "Cell In[",  # Jupyter error traceback
+                ]
             )
-            if composio_actions:
-                enrichment_contents.append(composio_actions)
-                self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")
+            
+            if is_retry_round:
+                self.logger.info(
+                    "⏭️ [CODE_GENERATOR] Retry round detected - skipping action selection "
+                    "(reusing tools from first attempt)"
+                )
+            else:
+                # Dynamic import - same pattern as code_verification.py
+                from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions
+                
+                # ✅ SCALABLE: action_matcher.py now handles ALL app detection semantically
+                # No more keyword matching or hardcoded app lists
+                # The select_composio_actions() function will auto-detect apps using pgvector embeddings
+                
+                # ✅ ADAPTIVE APPROACH:
+                # - query: Step-specific intent from Planner ("Fetch emails from Outlook")
+                # - context: Full user request for domain/app discovery ("read emails... send responses")
+                # - adaptive_top_k=True: Auto-scales based on detected apps
+                #
+                # ✅ COMPLETE WORKFLOW INJECTION:
+                # For multi-platform workflows (3+ apps), the action selector will set intent="both"
+                # This ensures BOTH read (fetch/list) AND write (send/reply) actions are available
+                composio_actions = select_composio_actions(
+                    user_query=query,  # Step query - action selector detects multi-platform and sets intent="both"
+                    context=original_user_query,  # Full query for domain/app discovery
+                    top_k=10,  # Balanced - enough for both read and write actions
+                    adaptive_top_k=True  # Enable automatic scaling based on detected apps
+                )
+                if composio_actions:
+                    enrichment_contents.append(composio_actions)
+                    self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")
         except ImportError:
             # Composio selector not available, skip silently
             pass
