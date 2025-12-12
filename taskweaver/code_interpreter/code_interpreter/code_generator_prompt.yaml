@@ -192,27 +192,63 @@ content: |-
          - USER INPUT: Values only the user can provide (locations, names, dates, amounts)
          - SYSTEM/TECHNICAL: Auto-generated values (API keys, format specs, pagination)
       
-      3️⃣ **GENERATE FORM FIELDS**
-         - For each USER INPUT parameter → create a form field
-         - Field name should be human-readable (e.g., param "dest_id" → field "destination")
-         - Field type from schema (string → text, date → date, number → number)
+    3️⃣ **GENERATE FORM FIELDS**
+       - For each USER INPUT parameter → create a form field
+       - Field "name" MUST be exact parameter name (e.g., param "departure_id" → field name="departure_id")
+       - Use "label" for human-readable text (e.g., label="Departure Airport")
+       - Field type from schema (string → text, date → date, number → number)
       
       4️⃣ **MAP FORM TO TOOL**
          - In tool params, reference form fields: "${{from_step:form_id.field_name}}"
          - NEVER use hardcoded values if parameter needs user input
       
-      **Decision Tree:**
-      For each tool parameter:
-      ├─ Is this something user provides? (location, date, name, quantity, etc.)
-      │  └─ YES → Create form field with descriptive name
-      └─ Is this technical/system? (api_key, format, page_token, etc.)
-         └─ YES → Skip form field (or use default if available)
+    **Decision Tree:**
+    For each tool parameter:
+    ├─ Is this something user provides? (location, date, name, quantity, email, etc.)
+    │  └─ YES → MUST create form field with name=exact_param_name, label=human_description
+    │           Example: Tool needs "recipient_id" → form field with name="recipient_id", label="Recipient ID"
+    └─ Is this technical/system? (api_key, format, page_token, etc.)
+       └─ YES → Skip form field (or use default if available)
+    
+    **VALIDATION CHECK:**
+    Before using tool parameters, ensure EVERY user-input parameter has a corresponding form field.
+    If ANY required user-input parameter lacks a form field → ADD IT to the form!
       
-      **Critical Rules:**
-      • If user request mentions something ("search X", "send to Y") → collect X, Y via form
-      • If tool param has examples → analyze what user would provide
-      • Descriptive field names > technical param names
-      • Missing form field + hardcoded value = ARCHITECTURE VIOLATION
+    **Critical Rules:**
+    • If user request mentions something ("search X", "send to Y") → collect X, Y via form
+    • If tool param has examples → analyze what user would provide
+    • Field "name" MUST match param name EXACTLY, use "label" for descriptions
+    • MANDATORY: Create form field for EVERY user-input parameter (locations, dates, names, etc.)
+    • NEVER hardcode values that users should provide - ALWAYS collect via form
+    • Missing form field + hardcoded value = ARCHITECTURE VIOLATION
+    
+    **EXAMPLE - Tool with Required User-Input Parameters:**
+    
+    ```python
+    # Tool schema shows: TOOL_ACTION_NAME
+    # Required params: user_id*, email_address*, date_field*
+    
+    # ❌ WRONG - Hardcoding user-input values:
+    # Tool node with hardcoded values that should come from user
+    nodes: [{{"id": "execute_action", "tool_id": "TOOL_ACTION_NAME", 
+     "params": {{"user_id": "12345", "email_address": "user@example.com"}}}}]  # VIOLATION!
+    
+    # ✅ CORRECT - Collect via form:
+    # Form node collects user input, then tool references it
+    nodes: [
+      {{"id": "collect_info", "type": "form", "fields": [
+        {{"name": "user_id", "label": "User ID", "type": "text", "required": True}},
+        {{"name": "email_address", "label": "Email Address", "type": "email", "required": True}},
+        {{"name": "date_field", "label": "Date", "type": "date", "required": True}}
+      ]}},
+      {{"id": "execute_action", "tool_id": "TOOL_ACTION_NAME", "depends_on": ["collect_info"],
+       "params": {{
+         "user_id": "${{from_step:collect_info.user_id}}",
+         "email_address": "${{from_step:collect_info.email_address}}",
+         "date_field": "${{from_step:collect_info.date_field}}"
+       }}}}
+    ]
+    ```
     
     ## 🔁 CRITICAL: LOOP vs PARALLEL NODES DECISION (READ CAREFULLY!)
     

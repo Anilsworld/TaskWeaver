@@ -71,7 +71,8 @@ EMBEDDING_CACHE_TTL = 3600  # 1 hour
 FALLBACK_ACTIONS_LIMIT = 500  # Top N actions for fallback scan
 DEFAULT_TOP_K = 5  # Default number of actions to return
 MAX_DESCRIPTION_LENGTH = 120  # Max chars for action description
-MAX_PARAM_FIELDS = 3  # Max parameter fields to show
+MAX_REQUIRED_PARAMS = 999  # Show ALL required params (critical for form generation!)
+MAX_OPTIONAL_PARAMS = 6  # Max optional params to show (adaptive based on total)
 MAX_RESPONSE_FIELDS = 3  # Max response fields to show
 
 # Cached OpenAI client and config
@@ -436,6 +437,13 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
         "4. If you use an action NOT in this list, your code will FAIL at runtime",
         "5. Copy the EXACT action_id shown below - character-for-character",
         "",
+        "🔴 FORM GENERATION REQUIREMENTS (100% MANDATORY):",
+        "- Parameters marked with * (req) are REQUIRED - you MUST create form fields for them!",
+        "- Field 'name' MUST exactly match parameter name (e.g., 'departure_id' NOT 'departure' or 'from')",
+        "- Use 'label' for human-readable text (e.g., label='Departure Airport ID')",
+        "- Examples shown in (e.g., ...) indicate expected format - use as placeholder",
+        "- NEVER hardcode values that users should provide - ALWAYS collect via form!",
+        "",
         "📋 Available Actions:",
         ""
     ]
@@ -446,21 +454,117 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
         desc = (action.get('description') or '')[:MAX_DESCRIPTION_LENGTH]
         
         # ✅ Parameter schema with types AND descriptions
+        # ⚠️ ROOT CAUSE FIX: Show BOTH required AND important optional params
+        # Previously only showed required params, causing LLM to miss optional params like return_date
         params = action.get('parameters', {})
         required = params.get('required', [])
         param_details = []
         properties = params.get('properties', {})
         
-        for param_name in required[:MAX_PARAM_FIELDS]:
+        # ✅ CRITICAL: Show ALL required params (not just 3!)
+        # Required params MUST be in forms, so LLM needs to see them all
+        for param_name in required[:MAX_REQUIRED_PARAMS]:
             param_schema = properties.get(param_name, {})
             param_type = param_schema.get('type', 'any')
             param_desc = param_schema.get('description', '')
+            param_examples = param_schema.get('examples', [])
             
-            # Include description if available and short
-            if param_desc and len(param_desc) < 40:
-                param_details.append(f"{param_name}: {param_type} ({param_desc})")
+            # Build rich param description
+            param_info = f"{param_name}* (req): {param_type}"
+            
+            # Add description if available
+            if param_desc and len(param_desc) < 80:
+                param_info += f" - {param_desc[:75]}"
+            
+            # Add example hint if available (helps LLM understand format)
+            if param_examples and len(param_examples) > 0:
+                example = str(param_examples[0])
+                if len(example) < 30:
+                    param_info += f" (e.g., {example})"
+            
+            param_details.append(param_info)
+        
+        # ✅ NEW: Show important optional params too (prioritized + adaptive count)
+        optional_params = [k for k in properties.keys() if k not in required]
+        
+        if optional_params:
+            # ✅ 100% SCHEMA-DRIVEN PRIORITIZATION: No hardcoded keywords!
+            # Uses only JSON Schema metadata and statistical signals
+            scored = []
+            for param_name in optional_params:
+                score = 0
+                param_schema = properties.get(param_name, {})
+                
+                # Signal 1: Has examples → API provider documented it, likely important
+                if param_schema.get('examples'):
+                    score += 10
+                
+                # Signal 2: Has default value → Important enough to have a default
+                if 'default' in param_schema and param_schema['default'] is not None:
+                    score += 5
+                
+                # Signal 3: Not nullable → More constrained = more important
+                if param_schema.get('nullable') is False:
+                    score += 3
+                
+                # Signal 4: Has validation constraints → Important enough to validate
+                if param_schema.get('enum'):  # Enum values
+                    score += 6
+                if param_schema.get('pattern'):  # Regex pattern
+                    score += 4
+                if param_schema.get('minLength') or param_schema.get('maxLength'):
+                    score += 3
+                if param_schema.get('minimum') or param_schema.get('maximum'):
+                    score += 3
+                
+                # Signal 5: Description length → Well-documented = important
+                desc_length = len(param_schema.get('description') or '')
+                if desc_length > 100:
+                    score += 4
+                elif desc_length > 50:
+                    score += 2
+                
+                # Signal 6: Cross-referenced in tool description → Mentioned in overview
+                tool_desc = (action.get('description') or '').lower()
+                if param_name.lower() in tool_desc:
+                    score += 6
+                
+                # Signal 7: Complex type → Structured data is usually important
+                param_type = param_schema.get('type', '')
+                if param_type in ('object', 'array'):
+                    score += 3
+                
+                scored.append((param_name, score))
+            
+            # Sort by score descending, then alphabetically for determinism
+            scored.sort(key=lambda x: (-x[1], x[0]))
+            prioritized_optional = [p[0] for p in scored]
+            
+            # ✅ ADAPTIVE COUNT: Show more for tools with many params
+            if len(optional_params) <= 3:
+                show_count = len(optional_params)
+            elif len(optional_params) <= 6:
+                show_count = 4
+            elif len(optional_params) <= 10:
+                show_count = 5
             else:
-                param_details.append(f"{param_name}: {param_type}")
+                show_count = MAX_OPTIONAL_PARAMS
+            
+            # Show prioritized optional params
+            for param_name in prioritized_optional[:show_count]:
+                param_schema = properties.get(param_name, {})
+                param_type = param_schema.get('type', 'any')
+                param_desc = param_schema.get('description', '')
+                
+                if param_desc and len(param_desc) < 60:
+                    param_details.append(f"{param_name} (opt): {param_type} - {param_desc[:50]}")
+                else:
+                    param_details.append(f"{param_name} (opt): {param_type}")
+            
+            # ✅ HINT: If more params exist, tell LLM
+            if len(optional_params) > show_count:
+                remaining = len(optional_params) - show_count
+                param_details.append(f"... +{remaining} more optional")
         
         params_str = f" | Params: {', '.join(param_details)}" if param_details else ""
         
