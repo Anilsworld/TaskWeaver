@@ -15,47 +15,58 @@ description: >-
   
   🚨 ONLY use loops when SAME tool_id for all items!
   - Different operations? Use parallel_groups instead
+  
+  📝 ALTERNATIVE SIMPLE EXAMPLES:
+  1. "Get my last 3 Slack messages and reply to each" → Loop over messages, reply to each
+  2. "Search for flights to Paris, London, Tokyo and save to spreadsheet" → Loop searches, aggregate results
+  3. "Invite users alice@email.com, bob@email.com, carol@email.com to meeting" → Loop over emails, send invites
 
 rounds:
-  - user_query: Create a workflow to fetch messages from Gmail, Outlook, Slack, and Teams, prepare draft responses, review them, and send the approved responses back to each platform.
+  - user_query: Create a workflow to search for flights to Paris, London, and Tokyo, then create a spreadsheet with all the results.
     state: finished
     post_list:
-      - message: Fetch messages from Gmail, Outlook, Slack, and Teams, prepare drafts, review, and send approved responses.
+      - message: Search for flights to Paris, London, and Tokyo, then create a spreadsheet with all the results.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list: []
       
-      - message: I've created an optimized workflow using LOOP pattern to handle 4 platforms with minimal tokens.
+      - message: I've created an optimized workflow using LOOP pattern to handle 3 destinations with minimal tokens.
         send_from: CodeInterpreter
         send_to: Planner
         attachment_list:
           - type: thought
             content: |-
               🔍 COMPLEXITY ANALYSIS DETECTED:
-              - Operation: "fetch messages" (same action repeated)
-              - Platforms: Gmail, Outlook, Slack, Teams (4 items)
-              - Tool: FETCH_MESSAGES (same tool_id for all platforms)
+              - Operation: "search flights" (same action repeated)
+              - Destinations: Paris, London, Tokyo (3 items)
+              - Tool: FLIGHT_SEARCH (same tool_id for all destinations)
               
               ✅ DECISION: USE LOOP PATTERN
-              - WITHOUT loop: 4 fetch nodes + 4 send nodes = 8 nodes × 800 tokens = 6400 tokens
-              - WITH loop: 2 loop definitions + 2 other nodes = 4 items × 400 tokens = 1600 tokens
-              - SAVINGS: 4800 tokens (75% reduction!)
+              - WITHOUT loop: 3 search nodes = 3 nodes × 800 tokens = 2400 tokens
+              - WITH loop: 1 loop definition + 2 other nodes = 3 items × 400 tokens = 1200 tokens
+              - SAVINGS: 1200 tokens (50% reduction!)
               
               📋 WORKFLOW STRUCTURE:
-              1. collect_platforms: Form to get list of platforms from user
-              2. fetch_messages_loop: Loop over platforms, fetch from each
-              3. prepare_drafts: Process all fetched messages
-              4. review_drafts: HITL approval
-              5. send_responses_loop: Loop to send responses after approval
+              1. collect_destinations: Form to get list of destinations from user
+              2. search_flights_loop: Loop over destinations, search for each
+              3. create_spreadsheet: Create spreadsheet with results
+              4. update_spreadsheet: Add all flight results to spreadsheet
               
               🔁 LOOP SYNTAX:
               loops: [{
                 "id": "loop_id",
-                "iterate_over": "${from_step:step_id.field_name}",
-                "loop_body": ["node_id_to_repeat"],
+                "loop_over": "${{from_step:step_id.field_name}}",
+                "nodes": [{"id": "nested_node", "type": "agent_with_tools", ...}],
                 "parallel": True,
-                "exit_condition": "optional condition"
+                "max_iterations": 10
               }]
+              
+              📦 LOOP OUTPUT AGGREGATION:
+              - Loop results are automatically collected in loop_aggregated_outputs
+              - Reference aggregated results: ${{from_loop:loop_id.field_name}}
+              - Example: ${{from_loop:search_flights_loop.results}} gets ALL results from loop
+              - This is different from ${{from_step:...}} which references individual node outputs
+              - Use loop aggregation to collect data from ALL iterations for downstream processing
           
           - type: reply_type
             content: python
@@ -64,18 +75,14 @@ rounds:
             content: |-
               WORKFLOW = {
                 "nodes": [
-                  {"id": "collect_platforms", "type": "form", "form_id": "platform_form", "title": "Select Platforms", "fields": [{"name": "platforms", "label": "Platforms to fetch from", "type": "multiselect", "options": ["Gmail", "Outlook", "Slack", "Teams"], "required": True}], "description": "Collect list of platforms"},
-                  {"id": "fetch_message", "type": "agent_with_tools", "tool_id": "COMPOSIO_FETCH_MESSAGES", "app_name": "${loop_item.platform}", "params": {"limit": 10, "newer_than": "1d"}, "description": "Fetch messages from current platform (executed per loop iteration)"},
-                  {"id": "prepare_drafts", "type": "agent_only", "description": "Prepare draft responses for all fetched messages", "params": {"all_messages": "${from_loop:fetch_messages.results}"}, "depends_on": ["fetch_messages_loop"]},
-                  {"id": "review_drafts", "type": "hitl", "form_id": "review_form", "title": "Review Draft Responses", "fields": [{"name": "decision", "type": "select", "options": ["Approve All", "Reject All"], "required": True}, {"name": "comments", "type": "textarea"}], "depends_on": ["prepare_drafts"], "description": "Review and approve all draft responses"},
-                  {"id": "send_response", "type": "agent_with_tools", "tool_id": "COMPOSIO_SEND_MESSAGE", "app_name": "${loop_item.platform}", "params": {"message": "${from_step:prepare_drafts.draft_for_platform}"}, "description": "Send response to current platform (executed per loop iteration)"}
+                  {"id": "collect_destinations", "type": "form", "form_id": "destination_form", "title": "Select Destinations", "fields": [{"name": "destinations", "label": "Cities to search flights for", "type": "multiselect", "options": ["Paris", "London", "Tokyo"], "required": True}], "description": "Collect list of destinations"},
+                  {"id": "search_flights_loop", "type": "loop", "loop_over": "${{from_step:collect_destinations.destinations}}", "nodes": [
+                    {"id": "search_flight", "type": "agent_with_tools", "tool_id": "FLIGHT_SEARCH", "app_name": "skyscanner", "params": {"destination": "${{loop_item}}", "departure_date": "2024-06-01", "return_date": "2024-06-08"}, "description": "Search flights to destination"}
+                  ], "max_iterations": 3, "description": "Search flights for each destination"},
+                  {"id": "create_spreadsheet", "type": "agent_with_tools", "tool_id": "GOOGLESHEETS_CREATE_GOOGLE_SHEET1", "app_name": "googlesheets", "params": {"title": "Flight Search Results"}, "depends_on": ["search_flights_loop"], "description": "Create spreadsheet for results"},
+                  {"id": "update_spreadsheet", "type": "agent_with_tools", "tool_id": "GOOGLESHEETS_BATCH_UPDATE", "app_name": "googlesheets", "params": {"spreadsheet_id": "${{from_step:create_spreadsheet.spreadsheetId}}", "sheet_name": "Sheet1", "values": [["Destination", "Price", "Airline"], "${{from_loop:search_flights_loop.results}}"]}, "depends_on": ["create_spreadsheet"], "description": "Add all flight results to spreadsheet"}
                 ],
-                "loops": [
-                  {"id": "fetch_messages_loop", "iterate_over": "${from_step:collect_platforms.platforms}", "loop_body": ["fetch_message"], "parallel": True, "description": "Fetch messages from each platform in parallel"},
-                  {"id": "send_responses_loop", "iterate_over": "${from_step:collect_platforms.platforms}", "loop_body": ["send_response"], "parallel": True, "depends_on": ["review_drafts"], "exit_condition": "${review_drafts.decision} == 'Approve All'", "description": "Send responses to each platform in parallel"}
-                ],
-                "conditional_edges": [{"source": "review_drafts", "condition": "${review_drafts.decision} == 'Approve All'", "if_true": "send_responses_loop", "if_false": "END"}],
-                "sequential_edges": [("collect_platforms", "fetch_messages_loop"), ("fetch_messages_loop", "prepare_drafts"), ("prepare_drafts", "review_drafts")]
+                "sequential_edges": [("collect_destinations", "search_flights_loop"), ("search_flights_loop", "create_spreadsheet"), ("create_spreadsheet", "update_spreadsheet")]
               }
               result = WORKFLOW
 
