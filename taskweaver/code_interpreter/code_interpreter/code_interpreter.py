@@ -216,16 +216,36 @@ class CodeInterpreter(Role, Interpreter):
 
             code_error = "\n".join(code_verify_errors)
             update_verification(post_proxy, "INCORRECT", code_error)
-            post_proxy.update_message(code_error)
 
             self.tracing.set_span_status("ERROR", "Code verification failed.")
             self.tracing.set_span_attribute("verification_error", code_error)
 
             if self.retry_count < self.config.max_retry_count:
-                # ✅ AutoGen-style: Include code context for better LLM self-correction
-                error_context = self._extract_error_context(code.content, code_error)
+                # Track error history to detect repeated mistakes
+                error_summary = code_error[:150]  # First 150 chars as fingerprint
+                
+                # Check if LLM is repeating the same error
+                if hasattr(self, '_last_error') and self._last_error == error_summary:
+                    # LLM is stuck! Add explicit guidance
+                    repetition_warning = (
+                        f"\n\n**ALERT: RETRY {self.retry_count + 1}/{self.config.max_retry_count}** - "
+                        "You're generating the SAME error again!\n\n"
+                        "**What's happening:** Your last code had the exact same syntax error.\n"
+                        "**What to try:** Change your approach completely:\n"
+                        "- Format dict fields on separate lines (better readability)\n"
+                        "- Double-check ALL brackets before 'depends_on' field\n"
+                        "- Count opening { and closing } braces carefully\n\n"
+                        "**Original error:**\n"
+                    )
+                    code_error = repetition_warning + code_error
+                
+                # Store error fingerprint for next iteration
+                self._last_error = error_summary
+                
+                # ✅ Parso/Black already provides detailed error context
+                post_proxy.update_message(code_error)
                 post_proxy.update_attachment(
-                    format_code_correction_message(code.content, error_context),
+                    format_code_correction_message(code.content, code_error),
                     AttachmentType.revise_message,
                 )
                 post_proxy.update_send_to("CodeInterpreter")
@@ -235,6 +255,7 @@ class CodeInterpreter(Role, Interpreter):
                 # 🚨 MAX RETRIES REACHED - Send to User
                 self.logger.error(f"🚨 [MAX_RETRY] Reached max retry limit ({self.config.max_retry_count})")
                 self.retry_count = 0
+                self._last_error = None  # Clear error history
                 post_proxy.update_send_to("User")
                 post_proxy.update_message(
                     f"❌ Code verification failed after {self.config.max_retry_count} attempts. "
@@ -253,6 +274,7 @@ class CodeInterpreter(Role, Interpreter):
             return post_proxy.end()
         elif len(code_verify_errors) == 0:
             update_verification(post_proxy, "CORRECT", "No error is found.")
+            self._last_error = None  # Clear error history on success
 
         executable_code = f"{code.content}"
         full_code_prefix = None
@@ -358,35 +380,6 @@ class CodeInterpreter(Role, Interpreter):
 
         return reply_post
 
-    def _extract_error_context(self, code: str, error_msg: str) -> str:
-        """
-        Extract relevant code lines around syntax error for LLM context.
-        
-        AutoGen's approach: Show the failing line + context for better fixes.
-        """
-        try:
-            # Extract line number from error message
-            import re
-            line_match = re.search(r'line (\d+)', error_msg)
-            if not line_match:
-                return code[:500]  # First 500 chars if no line number
-            
-            error_line = int(line_match.group(1))
-            lines = code.split('\n')
-            
-            # Show 3 lines before, error line, 3 lines after
-            start = max(0, error_line - 4)
-            end = min(len(lines), error_line + 3)
-            
-            context_lines = []
-            for i in range(start, end):
-                prefix = ">>> " if i == error_line - 1 else "    "
-                context_lines.append(f"{prefix}{lines[i]}")
-            
-            return '\n'.join(context_lines)
-        except Exception:
-            return code[:500]  # Fallback: first 500 chars
-    
     def close(self) -> None:
         self.generator.close()
         self.executor.stop()

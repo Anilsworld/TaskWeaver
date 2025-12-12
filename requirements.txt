@@ -20,6 +20,10 @@ docker>=7.0.0
 # Code Execution related
 ipykernel==6.26.0
 
+# Enhanced Syntax Validation
+parso>=0.8.5
+black>=24.0.0
+
 pre-commit>=2.19.0
 tenacity>=8.2.2
 plotly>=5.14.1

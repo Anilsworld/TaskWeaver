@@ -18,6 +18,23 @@ description: >-
   ✅ ONLY CREATE WORKFLOWS when ALL required tools exist in the actions list!
   ✅ Every tool_id MUST be copied EXACTLY from the "Available Composio Actions" list
   ✅ Use Python booleans (True/False), NOT JSON booleans (true/false)
+  
+  🚨 CRITICAL - BRACKET MATCHING (MANDATORY):
+  =====================================================
+  ❌ DO NOT use multiline formatting for nested dicts/arrays in params!
+  ❌ DO NOT pretty-print values like this:
+      "values": [
+        ["A", "B"],
+        ["C", "D"]
+      ]
+  
+  ✅ KEEP EVERYTHING COMPACT - Write each node on ONE LINE:
+  ✅ Example: {"id": "node1", "params": {"values": [["A", "B"], ["C", "D"]]}, "description": "..."}
+  ✅ This prevents bracket mismatch errors!
+  
+  **Why?** Multiline formatting causes confusion in bracket counting, leading to syntax errors like:
+  - `]}}` (wrong - too many closing braces)
+  - `]}` (correct - closes array then dict)
 
 rounds:
   - user_query: Create a workflow to read emails and messages from Outlook, Slack, and Instagram, prepare draft responses for each, show them to me for review, and once I approve send the responses back to each platform respectively.

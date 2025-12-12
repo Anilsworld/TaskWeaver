@@ -130,12 +130,11 @@ class FunctionCallValidator(ast.NodeVisitor):
         super().generic_visit(node)
 
 
-def format_code_correction_message(code: str = "", error_lines: str = "") -> str:
+def format_code_correction_message(code: str = "", error_details: str = "") -> str:
     """
-    Format error message with CODE CONTEXT for better LLM self-correction.
+    Format error message for LLM self-correction.
     
-    AutoGen's approach: Include the failing code + error context.
-    This helps LLM understand WHAT to fix, not just THAT there's an error.
+    Parso/Black already provides detailed context, so we just wrap it nicely.
     """
     base_message = (
         "The generated code has been verified and some errors are found. "
@@ -144,15 +143,8 @@ def format_code_correction_message(code: str = "", error_lines: str = "") -> str
         "Otherwise, please explain the problem to me."
     )
     
-    # If code provided, add context (like AutoGen does)
-    if code and error_lines:
-        return (
-            f"{base_message}\n\n"
-            f"**ERROR CONTEXT:**\n"
-            f"```python\n{error_lines}\n```\n\n"
-            f"**HINT:** Check bracket matching, especially in deeply nested dicts.\n"
-            f"Common issue: `]}}` should be `],` or missing `}}` at dict end."
-        )
+    if error_details:
+        return f"{base_message}\n\n{error_details}"
     
     return base_message
 
@@ -236,7 +228,142 @@ def code_snippet_verification(
         
         return errors
     except SyntaxError as e:
-        return [f"Syntax error: {e}"]
+        # ✅ ENHANCED SYNTAX CHECKING: Parso + Black + Pydantic
+        return enhanced_syntax_validation(python_code, e)
+
+
+def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) -> List[str]:
+    """
+    Enhanced syntax checking with fault-tolerant parsing.
+    
+    Uses proven open-source tools:
+    1. Black - Auto-fix formatting issues
+    2. Parso - Fault-tolerant parsing with exact error positions
+    3. Pydantic - Structure validation (if syntax is valid)
+    
+    Args:
+        python_code: The code to validate
+        original_error: The original SyntaxError from ast.parse
+    
+    Returns:
+        List of error messages
+    """
+    errors = []
+    
+    # ============================================
+    # STEP 1: Try Black for Auto-Fixing
+    # ============================================
+    try:
+        import black
+        from black import FileMode
+        
+        # Try to auto-fix with Black
+        fixed_code = black.format_str(python_code, mode=FileMode())
+        
+        # Black succeeded! Try parsing the fixed code
+        try:
+            ast.parse(fixed_code)
+            # Success! But don't modify original code, just note it could be fixed
+            errors.append(
+                "[!] Code has formatting issues but can be auto-fixed.\n"
+                "**Hint:** Use consistent bracket placement and avoid deep nesting."
+            )
+        except SyntaxError:
+            pass  # Black fixed formatting but syntax still broken, continue to Parso
+    except Exception:
+        pass  # Black not available or failed, continue
+    
+    # ============================================
+    # STEP 2: Parso for Detailed Error Messages
+    # ============================================
+    try:
+        import parso
+        
+        # Load grammar for current Python version (3.x)
+        grammar = parso.load_grammar(version="3.10")
+        module = grammar.parse(python_code)
+        
+        # Use grammar.iter_errors() to get errors (correct Parso API)
+        parso_errors = list(grammar.iter_errors(module))
+        
+        if parso_errors:
+            for err in parso_errors:
+                line = err.start_pos[0]
+                col = err.start_pos[1]
+                lines = python_code.split('\n')
+                
+                if line <= len(lines):
+                    code_line = lines[line - 1]
+                    
+                    # Show context with exact column position
+                    start = max(0, col - 20)
+                    end = min(len(code_line), col + 20)
+                    
+                    before = code_line[start:col]
+                    after = code_line[col:end]
+                    context = f"...{before} >>HERE<< {after}..."
+                    
+                    errors.append(
+                        f"[!] Syntax Error at Line {line}, Column {col}:\n"
+                        f"   {err.message}\n"
+                        f"   {context}\n"
+                    )
+            
+            return errors
+    
+    except ImportError:
+        # Parso not installed, fall through to basic error
+        pass
+    except Exception as parso_ex:
+        # Parso failed, fall through to basic error
+        import logging
+        logging.getLogger(__name__).debug(f"Parso parsing failed: {parso_ex}")
+        pass
+    
+    # ============================================
+    # STEP 3: Pydantic Structure Validation
+    # ============================================
+    # Only try Pydantic if we have a WORKFLOW dict that might be structurally wrong
+    if "WORKFLOW" in python_code and not errors:
+        try:
+            import re
+            workflow_match = re.search(r'WORKFLOW\s*=\s*(\{.*\})\s*(?:result\s*=|$)', python_code, re.DOTALL)
+            
+            if workflow_match:
+                from taskweaver.code_interpreter.workflow_schema import (
+                    validate_workflow_dict,
+                    format_workflow_validation_error
+                )
+                
+                workflow_str = workflow_match.group(1)
+                try:
+                    # Try to extract dict even if Python can't parse it
+                    workflow_dict = ast.literal_eval(workflow_str)
+                    
+                    # Validate structure with Pydantic
+                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_dict)
+                    
+                    if not is_valid:
+                        return [format_workflow_validation_error(pydantic_errors, python_code)]
+                
+                except (SyntaxError, ValueError):
+                    pass  # Can't extract dict, fall through to basic error
+        except Exception:
+            pass  # Pydantic validation failed
+    
+    # ============================================
+    # STEP 4: Fallback to Basic Error Message
+    # ============================================
+    if not errors:
+        error_msg = f"Syntax error: {original_error}"
+        if hasattr(original_error, 'lineno') and original_error.lineno:
+            lines = python_code.split('\n')
+            if 0 < original_error.lineno <= len(lines):
+                error_line = lines[original_error.lineno - 1]
+                error_msg += f"\n  -> Line {original_error.lineno}: {error_line.strip()}"
+        errors.append(error_msg)
+    
+    return errors
 
 
 def validate_composio_actions(code: str) -> List[str]:

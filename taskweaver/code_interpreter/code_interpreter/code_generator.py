@@ -369,6 +369,7 @@ class CodeGenerator(Role):
                     "execution failed",
                     "The following python code has been executed:",
                     "SyntaxError:",
+                    "Syntax error:",  # TaskWeaver format (lowercase)
                     "IndentationError:",
                     "NameError:",
                     "TypeError:",
