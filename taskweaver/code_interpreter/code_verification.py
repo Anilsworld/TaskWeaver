@@ -130,13 +130,31 @@ class FunctionCallValidator(ast.NodeVisitor):
         super().generic_visit(node)
 
 
-def format_code_correction_message() -> str:
-    return (
+def format_code_correction_message(code: str = "", error_lines: str = "") -> str:
+    """
+    Format error message with CODE CONTEXT for better LLM self-correction.
+    
+    AutoGen's approach: Include the failing code + error context.
+    This helps LLM understand WHAT to fix, not just THAT there's an error.
+    """
+    base_message = (
         "The generated code has been verified and some errors are found. "
         "If you think you can fix the problem by rewriting the code, "
         "please do it and try again.\n"
         "Otherwise, please explain the problem to me."
     )
+    
+    # If code provided, add context (like AutoGen does)
+    if code and error_lines:
+        return (
+            f"{base_message}\n\n"
+            f"**ERROR CONTEXT:**\n"
+            f"```python\n{error_lines}\n```\n\n"
+            f"**HINT:** Check bracket matching, especially in deeply nested dicts.\n"
+            f"Common issue: `]}}` should be `],` or missing `}}` at dict end."
+        )
+    
+    return base_message
 
 
 def separate_magics_and_code(input_code: str) -> Tuple[List[str], str, List[str]]:
