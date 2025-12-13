@@ -196,11 +196,14 @@ class CodeInterpreter(Role, Interpreter):
         self.logger.info(f"Code to be verified: {code.content}")
         with get_tracer().start_as_current_span("CodeInterpreter.verify_code") as span:
             span.set_attribute("code", code.content)
+            # ✅ ARCHITECTURAL FIX: Pass session variables for constraint enforcement
+            # Following battle-tested plugin pattern (composio_action, form_collect)
             code_verify_errors = code_snippet_verification(
                 code.content,
                 self.config.code_verification_on,
                 allowed_modules=self.config.allowed_modules,
                 blocked_functions=self.config.blocked_functions,
+                session_variables=self.executor.session_variables,  # ✅ NEW: Enable hard constraints
             )
 
         if code_verify_errors is None:

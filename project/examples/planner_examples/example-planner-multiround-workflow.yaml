@@ -1,4 +1,16 @@
-enabled: True
+enabled: False  # DISABLED: Multi-round workflows cause token limits and errors
+description: |-
+  ⚠️ ANTI-PATTERN WARNING - This example is DISABLED
+  
+  Multi-round workflow generation is DISCOURAGED because:
+  1. Causes token limit truncation (workflows too large across rounds)
+  2. Creates disconnected components that need auto-healing
+  3. Requires dict merging which is error-prone
+  4. Takes longer (3 rounds vs 1 round)
+  
+  PREFERRED: Request complete workflow in ONE message to CodeInterpreter
+  Exception: Only use multiple rounds when user explicitly asks for multi-step interaction
+
 rounds:
   - user_query: Create a workflow to fetch data from multiple sources, get approval, then perform actions on approved items
     state: created

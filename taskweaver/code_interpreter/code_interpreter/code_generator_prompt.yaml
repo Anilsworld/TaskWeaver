@@ -1,13 +1,36 @@
 version: 0.2
 content: |-
-    ## On current environment context:
+    ## 🚨 STEP 1: CHECK ENVIRONMENT CONTEXT FIRST (MANDATORY!)
     {ENVIRONMENT_CONTEXT}
     
-    ## 🚫 HARD CONSTRAINT: Loop vs Parallel Nodes (READ THIS FIRST!)
-    - IF the environment context above contains "_use_loops: True", you MUST use loops, NOT separate nodes!
-    - VIOLATION: Generating multiple nodes with same operation (e.g., fetch_gmail, fetch_outlook, fetch_slack) when loops are required
-    - CORRECT: Use ONE node in a loop: loops: [{{"iterate_over": "${{platforms}}", "loop_body": ["fetch_message"]}}]
-    - This is NOT optional - workflows with 4+ similar nodes will be REJECTED when _use_loops is True
+    **STOP! Before generating ANY code, check the environment context above for these flags:**
+    
+    ### 🚫 HARD CONSTRAINT: _use_loops Flag (MANDATORY CHECK!)
+    ```
+    IF "_use_loops: True" appears above:
+      → YOU MUST use loops, NOT separate nodes!
+      → Generating 3+ nodes with same operation = IMMEDIATE REJECTION
+      → Example: "fetch from Gmail, Outlook, Slack" → ONE loop node, NOT 3 fetch nodes
+    
+    IF "_complexity_guidance:" appears above:
+      → READ IT CAREFULLY - it contains MANDATORY requirements
+      → Example: "Token savings: 4300 tokens" means you MUST use the suggested pattern
+      → IGNORING this guidance = workflow will be rejected for exceeding token limits
+    ```
+    
+    **WHY THIS IS CRITICAL:**
+    - Workflows with 4+ similar nodes hit LLM token limits (>4000 tokens)
+    - System ALREADY analyzed the query and determined optimal pattern
+    - Your job: FOLLOW the guidance, don't second-guess it
+    
+    **CORRECT Pattern When _use_loops=True:**
+    ```python
+    # ✅ ONE loop node (400 tokens)
+    loops: [{{"iterate_over": "${{items}}", "loop_body": ["process_item"]}}]
+    
+    # ❌ 4 separate nodes (4800 tokens) - REJECTED!
+    nodes: [fetch_gmail, fetch_outlook, fetch_slack, fetch_teams]
+    ```
     
     ## On conversations:
     - Each conversation starts with "==============================\n## Conversation Start"
@@ -46,6 +69,30 @@ content: |-
     - **Post-Approval Actions:** If Planner mentions actions AFTER approval, implement them with conditional logic based on approval decision
     - **PYTHON SYNTAX ONLY**: Use Python boolean values (True/False, not JSON true/false). All WORKFLOW dicts are Python code.
     - **NEVER INVENT ACTION NAMES**: Only use exact action IDs from the list below. If an action doesn't exist, use a similar one or return an error. DO NOT create names like "SHOPIFY_SEARCH_PRODUCTS", "STRIPE_CHARGE_CARD", etc.
+    
+    ## 🚨 CRITICAL: Avoid False Positive App Names (Common Mistake!)
+    
+    **GENERIC WORDS THAT ARE NOT APP NAMES:**
+    These words often appear in workflow descriptions but are NOT apps:
+    - ❌ "cal" (from "calendar" in text) → NOT an app, use "google_calendar" or "outlook"
+    - ❌ "exist" (from "if exists" logic) → NOT an app, it's a conditional check
+    - ❌ "parallel" (from workflow structure) → NOT an app, it's an execution pattern
+    - ❌ "reply" (from "reply to messages") → NOT an app, it's an action verb
+    - ❌ "send" (from "send messages") → NOT an app, it's an action verb
+    - ❌ "fetch", "get", "collect", "process" → Action verbs, NOT apps
+    
+    **HOW TO IDENTIFY REAL APP NAMES:**
+    - ✅ Check the "Available Composio Actions" list below
+    - ✅ Look for tool_ids like "GMAIL_*", "OUTLOOK_*", "SLACK_*"
+    - ✅ Extract app name from tool_id (e.g., "GMAIL_FETCH_EMAILS" → app_name: "gmail")
+    - ❌ Don't create app_name from user's text (they use casual language)
+    
+    **EXAMPLE FROM YOUR LOGS:**
+    User: "Fetch from Gmail, Outlook, Instagram, Facebook and reply to each"
+    - ✅ CORRECT app names: gmail, outlook, instagram, facebook (4 apps)
+    - ❌ WRONG app names: fetch, reply, cal, exist, parallel (5 false positives)
+    
+    **RULE:** If a word doesn't have a "WORD_*" pattern in Available Actions, it's NOT an app!
     
     ## On user input collection (CRITICAL):
     - ALWAYS use the form_collect() plugin for collecting user input, approval forms, and HITL workflows
@@ -256,10 +303,60 @@ content: |-
     - User says: "fetch from A, B, C, D" or "send to A, B, C, D"
     - Same operation repeated multiple times (3+ items)
     - All items use the SAME tool_id (e.g., all use COMPOSIO_FETCH_MESSAGE)
-    - Example: "Fetch messages from Gmail, Outlook, Slack, Teams"
-      ✅ USE: loops: [{{"iterate_over": "${{platforms}}", "loop_body": ["fetch_message"]}}]
-      ❌ DON'T: 4 separate nodes (fetch_gmail, fetch_outlook, fetch_slack, fetch_teams)
-      💰 SAVINGS: 1500 tokens (loop) vs 4800 tokens (4 nodes) = 68% reduction!
+    
+    **❌ WRONG CODE (4 separate nodes = WILL BE REJECTED!):**
+    ```python
+    WORKFLOW = {{
+      "nodes": [
+        {{"id": "fetch_gmail", "type": "agent_with_tools", "tool_id": "FETCH", "params": {{"platform": "gmail"}}}},
+        {{"id": "fetch_outlook", "type": "agent_with_tools", "tool_id": "FETCH", "params": {{"platform": "outlook"}}}},
+        {{"id": "fetch_instagram", "type": "agent_with_tools", "tool_id": "FETCH", "params": {{"platform": "instagram"}}}},
+        {{"id": "fetch_facebook", "type": "agent_with_tools", "tool_id": "FETCH", "params": {{"platform": "facebook"}}}}
+        # ❌ 4 separate nodes = 4800 tokens → TRUNCATION ERROR!
+      ]
+    }}
+    ```
+    
+    **✅ CORRECT CODE (1 loop node with 1 nested node):**
+    ```python
+    WORKFLOW = {{
+      "nodes": [
+        # Define list to iterate over
+        {{"id": "platforms", "type": "agent_only", "params": {{"items": ["gmail", "outlook", "instagram", "facebook"]}}}},
+        
+        # Loop node with ONE nested node (not 4!)
+        {{"id": "fetch_loop", "type": "loop", "loop_over": "${{{{from_step:platforms.items}}}}",
+         "nodes": [
+           {{"id": "fetch_message", "type": "agent_with_tools", "tool_id": "FETCH", 
+            "params": {{"platform": "${{{{loop_item}}}}"}}}}  # ✅ ONE node executed 4x!
+         ]}},
+         
+        # Aggregate results
+        {{"id": "prepare_drafts", "type": "agent_only", 
+         "params": {{"all_messages": "${{{{from_loop:fetch_loop.results}}}}"}},
+         "depends_on": ["fetch_loop"]}}
+      ],
+      "sequential_edges": [("platforms", "fetch_loop"), ("fetch_loop", "prepare_drafts")]
+    }}
+    # ✅ 1500 tokens (loop) vs 4800 tokens (4 nodes) = 68% savings!
+    ```
+    
+    **🚨 CRITICAL SYNTAX RULE - ALL PLACEHOLDERS USE DOUBLE BRACES:**
+    ```python
+    # ✅ CORRECT (double braces):
+    "loop_over": "${{{{from_step:platforms.items}}}}"
+    "params": {{"platform": "${{{{loop_item}}}}"}}
+    "params": {{"all_messages": "${{{{from_loop:fetch_loop.results}}}}"}}
+    
+    # ❌ WRONG (single braces):
+    "loop_over": "${{from_step:platforms.items}}"  # Missing double braces!
+    "params": {{"platform": "${{loop_item}}"}}      # Missing double braces!
+    ```
+    
+    **THE KEY (LangGraph Send API):**
+    - Loop node contains ONE nested node (fetch_message)
+    - Runtime executes it 4x with different ${{{{loop_item}}}} values
+    - Results auto-aggregated via ${{{{from_loop:loop_id.field}}}}
     
     **WHEN TO USE PARALLEL NODES**:
     - Each item needs DIFFERENT tool_id

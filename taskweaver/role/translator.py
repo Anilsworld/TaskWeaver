@@ -164,7 +164,24 @@ class PostTranslator:
 
     def parse_llm_output(self, llm_output: str) -> Iterator[Tuple[str, str, bool]]:
         try:
-            structured_llm_output: Any = json.loads(llm_output)["response"]
+            parsed_json = json.loads(llm_output)
+            
+            # CRITICAL FIX: Azure OpenAI API 2025-01-01-preview with json_schema wraps responses
+            # Check if response is wrapped in schema structure: {"type":"object","properties":{"response":{...}}}
+            if isinstance(parsed_json, dict) and "type" in parsed_json and "properties" in parsed_json:
+                # Unwrap: extract actual data from properties.response
+                if "response" in parsed_json.get("properties", {}):
+                    structured_llm_output: Any = parsed_json["properties"]["response"]
+                else:
+                    # Fallback: if no "response" key, use properties directly
+                    structured_llm_output: Any = parsed_json["properties"]
+            elif "response" in parsed_json:
+                # Standard format: {"response": {...}}
+                structured_llm_output: Any = parsed_json["response"]
+            else:
+                # No wrapping at all - use as-is
+                structured_llm_output: Any = parsed_json
+            
             kv_pairs = []
             assert isinstance(
                 structured_llm_output,
@@ -233,10 +250,32 @@ class PostTranslator:
         cur_content: Optional[str] = None
         try:
             for prefix, event, value in parser:
-                if prefix == "response" and event == "map_key":
-                    cur_type = value
-                if prefix == "response.{}".format(cur_type) and event == "string":
-                    cur_content = value
+                # CRITICAL FIX: Handle ALL Azure wrapping variants
+                # 1. Normal: {"response": {...}}
+                # 2. Azure with response: {"type":"object","properties":{"response":{...}}}
+                # 3. Azure without response: {"type":"object","properties":{...}}  ← NEW!
+                
+                # Check for map keys in all 3 formats
+                if event == "map_key":
+                    if prefix == "response":
+                        # Format 1: response.key
+                        cur_type = value
+                    elif prefix == "properties.response":
+                        # Format 2: properties.response.key
+                        cur_type = value
+                    elif prefix == "properties":
+                        # Format 3: properties.key (NEW!)
+                        cur_type = value
+                
+                # Check for string values in all 3 formats
+                if cur_type and event == "string":
+                    value_prefixes = [
+                        f"response.{cur_type}",              # Format 1
+                        f"properties.response.{cur_type}",   # Format 2
+                        f"properties.{cur_type}",            # Format 3 (NEW!)
+                    ]
+                    if prefix in value_prefixes:
+                        cur_content = value
 
                 if cur_type is not None and cur_content is not None:
                     yield cur_type, cur_content, True
@@ -262,29 +301,43 @@ class PostTranslator:
             include_all_values=True,
             skip_ws=True,
         )
-        root_element_prefix = ".response"
+        # CRITICAL FIX: Support ALL 3 Azure wrapping variants
+        # 1. Normal: {"response": {...}} → prefix ".response"
+        # 2. Azure with response: {"type":"object","properties":{"response":{...}}} → prefix ".properties.response"
+        # 3. Azure without response: {"type":"object","properties":{...}} → prefix ".properties" (NEW!)
+        root_element_prefixes = [".response", ".properties.response", ".properties"]
 
         cur_type: Optional[str] = None
         try:
             for ev in parser:
-                if ev.prefix == root_element_prefix and ev.event == "map_key" and ev.is_end:
+                # Check if prefix matches any of the supported formats
+                matched_prefix = None
+                for prefix in root_element_prefixes:
+                    if ev.prefix == prefix or ev.prefix.startswith(prefix + "."):
+                        matched_prefix = prefix
+                        break
+                
+                if not matched_prefix:
+                    continue
+                
+                if ev.prefix == matched_prefix and ev.event == "map_key" and ev.is_end:
                     cur_type = ev.value
                     yield cur_type, "", False
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "string":
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "string":
                     yield cur_type, ev.value_str, ev.is_end
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "number":
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "number":
                     yield cur_type, ev.value_str, ev.is_end
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "boolean":
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "boolean":
                     yield cur_type, ev.value_str, ev.is_end
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "null":
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "null":
                     yield cur_type, "", True
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "start_map":
-                    self.logger.warning(f"Start map in property: {root_element_prefix}.{cur_type}")
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "end_map":
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "start_map":
+                    self.logger.warning(f"Start map in property: {matched_prefix}.{cur_type}")
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "end_map":
                     yield cur_type, json.dumps(ev.value), True
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "start_array":
-                    self.logger.warning(f"Start array in property: {root_element_prefix}.{cur_type}")
-                elif ev.prefix == f"{root_element_prefix}.{cur_type}" and ev.event == "end_array":
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "start_array":
+                    self.logger.warning(f"Start array in property: {matched_prefix}.{cur_type}")
+                elif ev.prefix == f"{matched_prefix}.{cur_type}" and ev.event == "end_array":
                     yield cur_type, json.dumps(ev.value), True
 
         except json_parser.StreamJsonParserError as e:

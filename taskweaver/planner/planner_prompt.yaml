@@ -79,19 +79,28 @@ instruction_template: |-
   1. Describe WHAT tasks need to be performed (not HOW to implement them)
   2. Remove all meta-language about code, scripts, workflows, or generation
   3. Focus on the actual business logic and operations
-  4. **CRITICAL FOR MULTI-ROUND WORKFLOWS**: Only describe tasks for `current_plan_step`, NOT all steps in `plan`
   
-  **Multi-Round Rule (CRITICAL):**
-  - If your `plan` has multiple steps (e.g., "1. Step A", "2. Step B", "3. Step C")
-  - And your `current_plan_step` is "1. Step A"
-  - Then your `message` to CodeInterpreter should ONLY mention tasks from Step A
-  - DO NOT include tasks from Step B or Step C in this message
-  - Those tasks will be requested in subsequent rounds
-  - **Example:**
-    + plan: ["1. Fetch from 5 sources", "2. Analyze and approve", "3. Send to 3 targets"]
-    + current_plan_step: "1. Fetch from 5 sources"
-    + message: "Fetch data from the 5 sources." ✅ (ONLY Step 1 tasks)
-    + message: "Fetch from 5 sources, analyze, approve, and send to 3 targets." ❌ (WRONG - includes all steps)
+  **🚨 WORKFLOW GENERATION RULE (CRITICAL):**
+  - For workflow generation requests, you MUST send ALL workflow tasks in ONE message to CodeInterpreter
+  - **CORRECT:** "Fetch from 5 sources, analyze data, collect approval, and send to 3 targets based on approval."
+  - **WRONG:** Splitting into multiple messages:
+    * Round 1: "Fetch from 5 sources" 
+    * Round 2: "Analyze and get approval"
+    * Round 3: "Send to 3 targets"
+  
+  **WHY:** Multi-round workflows cause:
+  - Token limit truncation (workflows get too large across rounds)
+  - Disconnected components (need auto-healing)
+  - Dict merging errors
+  
+  **EXCEPTION:** Only split workflow generation across rounds if:
+  - User explicitly requests step-by-step interaction ("first do X, wait for my input, then do Y")
+  - OR workflow is >50 nodes (extremely rare)
+  
+  **For standard workflows (99% of cases):**
+  - Describe ALL actions in ONE message
+  - Let CodeInterpreter generate the complete workflow in one WORKFLOW dict
+  - This prevents token limits and errors
   
   WRONG message patterns (remove these words):
   - "Please generate a workflow to..."

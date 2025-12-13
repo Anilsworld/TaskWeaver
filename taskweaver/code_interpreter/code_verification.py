@@ -1,4 +1,5 @@
 import ast
+import json
 import re
 from typing import List, Optional, Tuple
 
@@ -193,6 +194,7 @@ def code_snippet_verification(
     allowed_functions: Optional[List[str]] = None,
     blocked_functions: Optional[List[str]] = None,
     allowed_variables: Optional[List[str]] = None,
+    session_variables: Optional[dict] = None,  # ✅ NEW: Follow plugin pattern for constraint enforcement
 ) -> Optional[List[str]]:
     if not code_verification_on:
         print("[CODE_VERIFICATION] ⚠️ Code verification is DISABLED")
@@ -204,6 +206,22 @@ def code_snippet_verification(
         magics, python_code, _ = separate_magics_and_code(code_snippet)
         if len(magics) > 0:
             errors.append(f"Magic commands except package install are not allowed. Details: {magics}")
+        
+        # ========================================================================
+        # CRITICAL FIX: Run constraint check BEFORE ast.parse()
+        # ========================================================================
+        # ast.parse() throws SyntaxError on truncated JSON, which skips WORKFLOW validation.
+        # We MUST check constraints BEFORE parsing to catch anti-patterns even in truncated code.
+        # ========================================================================
+        if "WORKFLOW" in python_code:
+            print("[CODE_VERIFICATION] 🔍 PRE-PARSE: Detected WORKFLOW, running constraint check...")
+            workflow_errors = validate_workflow_structure(python_code, session_variables=session_variables)
+            if workflow_errors:
+                print(f"[CODE_VERIFICATION] ❌ PRE-PARSE: WORKFLOW validation failed with {len(workflow_errors)} errors")
+                return workflow_errors  # Return immediately - don't continue parsing
+            else:
+                print("[CODE_VERIFICATION] ✅ PRE-PARSE: WORKFLOW constraint check passed!")
+        
         tree = ast.parse(python_code)
 
         processed_lines = []
@@ -229,16 +247,8 @@ def code_snippet_verification(
         if composio_errors:
             errors.extend(composio_errors)
         
-        # ✅ WORKFLOW VALIDATION (Pydantic + WorkflowIR)
-        # Validate WORKFLOW dicts even if syntax is correct
-        if "WORKFLOW" in python_code:
-            print("[CODE_VERIFICATION] 🔍 Detected WORKFLOW in code, running validation...")
-            workflow_errors = validate_workflow_structure(python_code)
-            if workflow_errors:
-                print(f"[CODE_VERIFICATION] ❌ WORKFLOW validation failed with {len(workflow_errors)} errors")
-                errors.extend(workflow_errors)
-            else:
-                print("[CODE_VERIFICATION] ✅ WORKFLOW validation passed!")
+        # Note: WORKFLOW validation moved to pre-parse check (before ast.parse())
+        # This ensures constraint enforcement even on truncated/syntax-error code
         
         return errors
     except SyntaxError as e:
@@ -354,8 +364,16 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
                 
                 workflow_str = workflow_match.group(1)
                 try:
-                    # Try to extract dict even if Python can't parse it
-                    workflow_dict = ast.literal_eval(workflow_str)
+                    # CRITICAL FIX: Clean the extracted string before JSON parsing
+                    # Remove any trailing "result = WORKFLOW" if present
+                    import re
+                    workflow_str_clean = re.sub(r'\s*\nresult\s*=.*$', '', workflow_str, flags=re.DOTALL)
+                    
+                    # Convert Python syntax to JSON
+                    json_str = workflow_str_clean.replace('True', 'true').replace('False', 'false').replace('None', 'null')
+                    # Convert Python tuples to JSON arrays: ("a", "b") → ["a", "b"]
+                    json_str = re.sub(r'\(([^)]+)\)', r'[\1]', json_str)
+                    workflow_dict = json.loads(json_str)
                     
                     # Validate structure with Pydantic + WorkflowIR
                     print(f"[CODE_VERIFICATION] 🔍 Calling validate_workflow_dict() with {len(workflow_dict.get('nodes', []))} nodes...")
@@ -368,7 +386,7 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
                     else:
                         print(f"[CODE_VERIFICATION] ✅ Validation PASSED!")
                 
-                except (SyntaxError, ValueError):
+                except (json.JSONDecodeError, ValueError):
                     pass  # Can't extract dict, fall through to basic error
         except Exception:
             pass  # Pydantic validation failed
@@ -388,16 +406,30 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
     return errors
 
 
-def validate_workflow_structure(python_code: str) -> List[str]:
+def validate_workflow_structure(python_code: str, session_variables: Optional[dict] = None) -> List[str]:
     """
     Validate WORKFLOW dict structure using Pydantic + WorkflowIR.
     
     This runs for ALL WORKFLOW dicts, not just syntax errors.
+    
+    ARCHITECTURAL FIX (following battle-tested plugin pattern):
+    - Checks session variables for constraint enforcement (like composio_action, form_collect)
+    - BLOCKS generation if constraints violated (hard stop, not advice)
+    - Scalable: Can add more constraint checks (_max_nodes, _force_compact, etc.)
     """
     errors = []
+    session_vars = session_variables or {}
+    
     try:
         import re
-        workflow_match = re.search(r'WORKFLOW\s*=\s*(\{.*\})\s*(?:result\s*=|$)', python_code, re.DOTALL)
+        # CRITICAL FIX: Extract ONLY the WORKFLOW dict, stop before "result ="
+        # Match: WORKFLOW = {...everything...} but STOP at line starting with "result ="
+        # This prevents json.loads() from choking on "result = WORKFLOW" line
+        # Use lazy match with lookahead to stop before \nresult
+        workflow_match = re.search(r'WORKFLOW\s*=\s*(\{(?:[^{}]|\{[^{}]*\})*\})', python_code, re.DOTALL)
+        if not workflow_match:
+            # Fallback: try simpler pattern for truncated JSON
+            workflow_match = re.search(r'WORKFLOW\s*=\s*(\{.*)', python_code, re.DOTALL)
         
         print(f"[CODE_VERIFICATION] WORKFLOW pattern match: {bool(workflow_match)}")
         
@@ -409,12 +441,154 @@ def validate_workflow_structure(python_code: str) -> List[str]:
             )
             
             workflow_str = workflow_match.group(1)
-            try:
-                # Extract dict
-                workflow_dict = ast.literal_eval(workflow_str)
+            
+            # ========================================================================
+            # ARCHITECTURAL FIX: PRE-PARSE CONSTRAINT CHECK (SCALABLE FIX)
+            # ========================================================================
+            # Check constraints BEFORE parsing dict, so truncation doesn't block enforcement.
+            # Count nodes in raw string using regex (works even on truncated JSON).
+            # ========================================================================
+            use_loops = session_vars.get('_use_loops', 'false')
+            if use_loops == 'true' or use_loops is True:
+                print(f"[CODE_VERIFICATION] 🚫 PRE-PARSE CHECK: _use_loops=True, counting nodes in raw string...")
                 
-                # Validate structure with Pydantic + WorkflowIR
-                print(f"[CODE_VERIFICATION] 🔍 Calling validate_workflow_dict() with {len(workflow_dict.get('nodes', []))} nodes...")
+                # Count node IDs in raw string (works on truncated JSON!)
+                node_id_pattern = r'"id"\s*:\s*"([^"]+)"'
+                node_ids = re.findall(node_id_pattern, workflow_str)
+                node_count_estimate = len(node_ids)
+                
+                print(f"[CODE_VERIFICATION] 📊 Detected {node_count_estimate} node IDs: {node_ids[:10]}...")
+                
+                # Check if pattern looks like parallel nodes (fetch_X, send_X patterns)
+                parallel_patterns = {}
+                for node_id in node_ids:
+                    # Extract base pattern (e.g., "fetch_gmail" → "fetch", "send_outlook" → "send")
+                    if '_' in node_id:
+                        base_pattern = node_id.split('_')[0]
+                        parallel_patterns[base_pattern] = parallel_patterns.get(base_pattern, 0) + 1
+                
+                max_repetition = max(parallel_patterns.values()) if parallel_patterns else 0
+                print(f"[CODE_VERIFICATION] 📊 Pattern analysis: {parallel_patterns} (max repetition: {max_repetition})")
+                
+                # Check if workflow explicitly declares parallel_groups (the smoking gun!)
+                has_parallel_groups = '"parallel_groups"' in workflow_str or "'parallel_groups'" in workflow_str
+                if has_parallel_groups:
+                    print(f"[CODE_VERIFICATION] 🚨 Detected explicit parallel_groups declaration!")
+                
+                # ENFORCEMENT: REJECT if clear loop anti-pattern detected
+                # Scenario 1: 4+ nodes with same prefix (fetch_X, send_X) = should be a loop!
+                # Scenario 2: Explicit parallel_groups with 3+ parallel nodes
+                # Scenario 3: Large workflow (8+ nodes) with repetition
+                should_reject = (
+                    (max_repetition >= 4) or  # 4+ parallel nodes with same pattern
+                    (has_parallel_groups and max_repetition >= 3) or  # Explicit parallel declaration
+                    (max_repetition >= 3 and node_count_estimate >= 8)  # Original threshold
+                )
+                
+                if should_reject:
+                    complexity_guidance = session_vars.get('_complexity_guidance', '')
+                    detected_pattern = session_vars.get('_detected_pattern', 'unknown')
+                    
+                    print(f"[CODE_VERIFICATION] ❌ CONSTRAINT VIOLATION!")
+                    print(f"   - Node count: {node_count_estimate}")
+                    print(f"   - Max repetition: {max_repetition}")
+                    print(f"   - Has parallel_groups: {has_parallel_groups}")
+                    print(f"   - Pattern: {parallel_patterns}")
+                    
+                    # Identify the specific anti-pattern for clear feedback
+                    violation_reason = ""
+                    if max_repetition >= 4:
+                        violation_reason = f"4+ parallel nodes with same pattern ('{list(parallel_patterns.keys())}': {max_repetition}x)"
+                    elif has_parallel_groups and max_repetition >= 3:
+                        violation_reason = f"Explicit parallel_groups declaration with {max_repetition}x repetition"
+                    else:
+                        violation_reason = f"{node_count_estimate} nodes with {max_repetition}x repetition"
+                    
+                    # ========================================================================
+                    # LANGCHAIN/LANGGRAPH PATTERN: Show concrete BEFORE/AFTER code example
+                    # ========================================================================
+                    # LangGraph Send API: ONE node executed N times, not N separate nodes
+                    # ========================================================================
+                    error_msg = (
+                        f"🚫 WORKFLOW REJECTED: Loop constraint violated!\n\n"
+                        f"**ANTI-PATTERN DETECTED:**\n"
+                        f"  - {violation_reason}\n"
+                        f"  - Node IDs: {', '.join(node_ids[:8])}{'...' if len(node_ids) > 8 else ''}\n"
+                        f"  - Pattern analysis: {parallel_patterns}\n"
+                        f"  - Complexity guidance: {detected_pattern}\n\n"
+                        f"**SYSTEM ANALYSIS:**{complexity_guidance}\n\n"
+                        f"**WHY THIS FAILED:**\n"
+                        f"  - Token limit: {node_count_estimate} nodes × ~300 tokens = ~{node_count_estimate * 300} tokens → TRUNCATION ❌\n\n"
+                        f"**❌ YOUR CODE (WRONG):**\n"
+                        f"```python\n"
+                        f"WORKFLOW = {{\n"
+                        f"  \"nodes\": [\n"
+                        f"    {{\"id\": \"fetch_gmail\", \"type\": \"agent_with_tools\", ...}},    # Node 1\n"
+                        f"    {{\"id\": \"fetch_outlook\", \"type\": \"agent_with_tools\", ...}},  # Node 2\n"
+                        f"    {{\"id\": \"fetch_instagram\", \"type\": \"agent_with_tools\", ...}}, # Node 3\n"
+                        f"    {{\"id\": \"fetch_facebook\", \"type\": \"agent_with_tools\", ...}},  # Node 4\n"
+                        f"    # ❌ 4 separate node definitions = TOO MANY TOKENS!\n"
+                        f"  ]\n"
+                        f"}}\n"
+                        f"```\n\n"
+                        f"**✅ CORRECT CODE (LANGGRAPH Send PATTERN):**\n"
+                        f"```python\n"
+                        f"WORKFLOW = {{\n"
+                        f"  \"nodes\": [\n"
+                        f"    # Step 1: Define list to iterate over\n"
+                        f"    {{\"id\": \"platforms\", \"type\": \"agent_only\",\n"
+                        f"     \"params\": {{\"items\": [\"gmail\", \"outlook\", \"instagram\", \"facebook\"]}}}},\n\n"
+                        f"    # Step 2: Loop node with ONE nested node (not 4!)\n"
+                        f"    {{\"id\": \"fetch_loop\", \"type\": \"loop\",\n"
+                        f"     \"loop_over\": \"${{from_step:platforms.items}}\",\n"
+                        f"     \"nodes\": [\n"
+                        f"       {{\"id\": \"fetch_message\", \"type\": \"agent_with_tools\",  # ✅ ONE node!\n"
+                        f"        \"tool_id\": \"FETCH\", \"params\": {{\"platform\": \"${{loop_item}}\"}}}}\n"
+                        f"     ]}},\n\n"
+                        f"    # Step 3: Aggregate results\n"
+                        f"    {{\"id\": \"prepare_drafts\", \"type\": \"agent_only\",\n"
+                        f"     \"params\": {{\"all_messages\": \"${{from_loop:fetch_loop.results}}\"}},\n"
+                        f"     \"depends_on\": [\"fetch_loop\"]}}\n"
+                        f"  ],\n"
+                        f"  \"sequential_edges\": [(\"platforms\", \"fetch_loop\"), (\"fetch_loop\", \"prepare_drafts\")]\n"
+                        f"}}\n"
+                        f"```\n\n"
+                        f"**THE KEY DIFFERENCE (LangGraph Send API):**\n"
+                        f"  - ❌ WRONG: 4 separate nodes (fetch_gmail, fetch_outlook...)\n"
+                        f"  - ✅ CORRECT: 1 node inside loop (fetch_message)\n"
+                        f"  - Runtime: Loop executes fetch_message 4x with different platform states\n"
+                        f"  - Token count: ~500 tokens (loop) vs ~{node_count_estimate * 300} tokens (parallel)\n\n"
+                        f"**This is a HARD CONSTRAINT. Follow the CORRECT CODE example above.**"
+                    )
+                    return [error_msg]
+                else:
+                    print(f"[CODE_VERIFICATION] ✅ PRE-PARSE CHECK PASSED:")
+                    print(f"   - {node_count_estimate} nodes, {max_repetition}x max repetition")
+                    print(f"   - Has parallel_groups: {has_parallel_groups}")
+                    print(f"   - Thresholds: max_rep>=4 OR (parallel_groups AND max_rep>=3) OR (8+ nodes AND max_rep>=3)")
+            
+            try:
+                # CRITICAL FIX: Clean the extracted string before JSON parsing
+                # Remove any trailing "result = WORKFLOW" if present
+                workflow_str_clean = re.sub(r'\s*\nresult\s*=.*$', '', workflow_str, flags=re.DOTALL)
+                
+                # Convert Python syntax to JSON
+                json_str = workflow_str_clean.replace('True', 'true').replace('False', 'false').replace('None', 'null')
+                # Convert Python tuples to JSON arrays: ("a", "b") → ["a", "b"]
+                json_str = re.sub(r'\(([^)]+)\)', r'[\1]', json_str)
+                workflow_dict = json.loads(json_str)
+                node_count = len(workflow_dict.get('nodes', []))
+                
+                # ========================================================================
+                # POST-PARSE VALIDATION: Verify the dict is structurally sound
+                # ========================================================================
+                # Pre-parse check already enforced constraints, this just confirms the parse succeeded
+                print(f"[CODE_VERIFICATION] ✅ Successfully parsed workflow dict with {node_count} nodes")
+                
+                # ========================================================================
+                # STANDARD VALIDATION: Pydantic + WorkflowIR
+                # ========================================================================
+                print(f"[CODE_VERIFICATION] 🔍 Calling validate_workflow_dict() with {node_count} nodes...")
                 is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_dict)
                 print(f"[CODE_VERIFICATION] ✅ validate_workflow_dict() returned: is_valid={is_valid}, errors={len(pydantic_errors)}")
                 
@@ -424,7 +598,7 @@ def validate_workflow_structure(python_code: str) -> List[str]:
                 else:
                     print(f"[CODE_VERIFICATION] ✅ Validation PASSED!")
             
-            except (SyntaxError, ValueError) as e:
+            except (json.JSONDecodeError, ValueError) as e:
                 print(f"[CODE_VERIFICATION] ⚠️ Could not parse WORKFLOW dict: {e}")
                 errors.append(f"WORKFLOW dict parse error: {e}")
     except Exception as e:

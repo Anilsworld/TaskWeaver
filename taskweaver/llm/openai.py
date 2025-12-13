@@ -249,6 +249,14 @@ class OpenAIService(CompletionService, EmbeddingService):
             )
             if stream:
                 role: Any = None
+                # ========================================================================
+                # STREAMING WITH json_schema: Collect full response for SDK parsing
+                # ========================================================================
+                # Note: Streaming deltas don't have 'parsed' field, only final response does.
+                # For json_schema mode, we need to wait for SDK to parse the full response.
+                # For now, we stream raw content and let translator.py handle unwrapping.
+                # TODO: Consider buffering for json_schema mode to leverage SDK's parsed field.
+                # ========================================================================
                 for stream_res in res:
                     if not stream_res.choices:
                         continue
@@ -265,9 +273,30 @@ class OpenAIService(CompletionService, EmbeddingService):
                 oai_response = res.choices[0].message
                 if oai_response is None:
                     raise Exception("OpenAI API returned an empty response")
+                
+                # ========================================================================
+                # ARCHITECTURAL FIX: Use OpenAI SDK's 'parsed' field (LangChain pattern)
+                # ========================================================================
+                # When using response_format json_schema, the OpenAI SDK automatically
+                # unwraps Azure's {"type":"object","properties":{...}} format and stores
+                # the unwrapped data in oai_response.parsed.
+                #
+                # This is how LangChain/LangGraph/AutoGen avoid manual unwrapping!
+                # ========================================================================
+                content_to_use = None
+                if hasattr(oai_response, 'parsed') and oai_response.parsed is not None:
+                    # ✅ SDK already unwrapped - use parsed field
+                    import json
+                    content_to_use = json.dumps({"response": oai_response.parsed})
+                    print(f"[OPENAI_SERVICE] ✅ Using SDK's parsed field (unwrapped by SDK)")
+                else:
+                    # Fallback to raw content (for non-json_schema modes)
+                    content_to_use = oai_response.content if oai_response.content is not None else ""
+                    print(f"[OPENAI_SERVICE] ⚠️ Using raw content (no parsed field)")
+                
                 response: ChatMessageType = format_chat_message(
                     role=(oai_response.role if oai_response.role is not None else "assistant"),
-                    message=(oai_response.content if oai_response.content is not None else ""),
+                    message=content_to_use,
                 )
                 if oai_response.tool_calls is not None and len(oai_response.tool_calls) > 0:
                     import json
