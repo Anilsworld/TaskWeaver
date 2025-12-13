@@ -168,101 +168,8 @@ class CodeGenerator(Role):
         self.logger.info(f"[FUNCTION_CALLING] Extracted {len(tool_ids)} tool IDs for enum")
         return tool_ids
 
-    def _build_workflow_function_schema(self, tool_ids: List[str]) -> dict:
-        """
-        Build OpenAI function schema for workflow IR generation.
-        
-        ✅ NOW USING: workflow_schema_builder.py (Pydantic-based, dynamic tool params)
-        
-        🔑 DESIGN PRINCIPLES:
-        - Intermediate Representation (IR) - compiler-grade structure
-        - Mutually exclusive node types (oneOf prevents ambiguity)
-        - Typed edges (explicit control flow)
-        - Filtered tool_id enum (5-50 tools, not 17k)
-        - Triggers for scheduled/event workflows
-        - Composability via sub_workflow
-        - 🆕 Dynamic tool parameter schemas from Composio cache
-        
-        Args:
-            tool_ids: Filtered list of valid Composio action IDs (5-50 tools)
-        
-        Returns:
-            OpenAI function schema dict (IR spec) with tool-specific parameter schemas
-        """
-        # ✅ NEW: Use schema builder with dynamic tool param injection
-        from taskweaver.code_interpreter.code_interpreter.workflow_schema_builder import get_schema_builder
-        
-        schema_builder = get_schema_builder()
-        schema = schema_builder.build_function_schema(tool_ids)
-        
-        self.logger.info(f"[FUNCTION_CALLING] Built workflow schema with {len(tool_ids)} tools using dynamic param injection")
-        return schema
-
-    def _normalize_workflow_json(self, workflow_json: dict, available_tool_ids: List[str] = None) -> dict:
-        """
-        MINIMAL normalization for truly ambiguous cases ONLY.
-        
-        Philosophy:
-        - Pydantic does 99% of validation (scalable!)
-        - This only handles cases where LLM intent is clear but format varies
-        - NO schema violations (Pydantic will reject those)
-        
-        Handles ONLY:
-        1. Tool ID case variations (GMAIL_SEND_EMAIL vs gmail_send_email)
-        2. Node type synonyms when tool_id is present (clear intent)
-        
-        Args:
-            workflow_json: Raw workflow from LLM
-            available_tool_ids: Valid tool IDs (for case-insensitive matching)
-        
-        Returns:
-            Normalized workflow dict (Pydantic will validate)
-        """
-        available_tools_set = set(available_tool_ids) if available_tool_ids else set()
-        available_tools_lower = {tid.lower(): tid for tid in available_tools_set}
-        
-        # Normalize nodes
-        VALID_NODE_TYPES = {"agent_with_tools", "agent_only", "hitl", "form", "code_execution", "loop", "sub_workflow"}
-        
-        for node in workflow_json.get("nodes", []):
-            node_type = node.get("type")
-            tool_id = node.get("tool_id")
-            
-            # ✅ Fix node type if it's invalid (regardless of whether tool_id exists)
-            if node_type not in VALID_NODE_TYPES:
-                # CASE 1: Tool ID in type field (scalable: checks against available tools)
-                if node_type and node_type in available_tools_set:
-                    self.logger.info(f"[NORMALIZE] Node '{node.get('id')}': tool ID '{node_type}' in type field → moving to tool_id")
-                    if not tool_id:  # Only set tool_id if not already present
-                        node["tool_id"] = node_type
-                    node["type"] = "agent_with_tools"
-                
-                # CASE 2: Function reference (functions.GMAIL_SEND_EMAIL)
-                elif node_type and node_type.startswith("functions."):
-                    extracted_tool = node_type.split(".", 1)[1]
-                    if extracted_tool in available_tools_set:
-                        self.logger.info(f"[NORMALIZE] Node '{node.get('id')}': function reference '{node_type}' → tool_id '{extracted_tool}'")
-                        if not tool_id:
-                            node["tool_id"] = extracted_tool
-                        node["type"] = "agent_with_tools"
-                
-                # CASE 3: Python/code synonyms (python, Python, code, script)
-                elif node_type and node_type.lower() in ["python", "code", "script"]:
-                    if "code" in node:
-                        self.logger.info(f"[NORMALIZE] Node '{node.get('id')}': type '{node_type}' → 'code_execution'")
-                        node["type"] = "code_execution"
-                    else:
-                        self.logger.info(f"[NORMALIZE] Node '{node.get('id')}': type '{node_type}' → 'agent_only'")
-                        node["type"] = "agent_only"
-            
-            # ✅ CASE 4: Tool ID case mismatch (gmail_send vs GMAIL_SEND)
-            if tool_id and tool_id not in available_tools_set:
-                correct_case = available_tools_lower.get(tool_id.lower())
-                if correct_case:
-                    self.logger.info(f"[NORMALIZE] Node '{node.get('id')}': tool_id case corrected {tool_id} → {correct_case}")
-                    node["tool_id"] = correct_case
-        
-        return workflow_json
+    # NOTE: _build_workflow_function_schema and _normalize_workflow_json removed
+    # These are no longer needed with Instructor - it handles schema generation and validation automatically
     
     def _convert_workflow_json_to_python(self, workflow_json: dict) -> str:
         """
@@ -283,9 +190,18 @@ class CodeGenerator(Role):
         # Build final Python code
         python_code = f"WORKFLOW = {workflow_repr}\n\nresult = WORKFLOW"
         
+        # Calculate total edges (handle both old 'edges' format and new 'sequential_edges'/'parallel_edges' format)
+        total_edges = 0
+        if 'edges' in workflow_json:
+            total_edges = len(workflow_json['edges'])
+        else:
+            total_edges += len(workflow_json.get('sequential_edges', []))
+            total_edges += len(workflow_json.get('parallel_edges', []))
+            total_edges += len(workflow_json.get('conditional_edges', []))
+        
         self.logger.info(
             f"[FUNCTION_CALLING] Generated {len(python_code)} chars of Python code "
-            f"({len(workflow_json['nodes'])} nodes, {len(workflow_json['edges'])} edges)"
+            f"({len(workflow_json['nodes'])} nodes, {total_edges} edges)"
         )
         
         return python_code
@@ -589,10 +505,10 @@ class CodeGenerator(Role):
         self.logger.info(f"[CODE_GENERATOR] Workflow generation mode: {is_workflow_generation}")
         
         # =====================================================================
-        # 🚀 FUNCTION CALLING PATH (Workflow IR Generation)
+        # 🚀 INSTRUCTOR-BASED WORKFLOW GENERATION (Replaces custom function calling)
         # =====================================================================
         if is_workflow_generation and self.config.use_function_calling:
-            self.logger.info("[CODE_GENERATOR] 🚀 Using function calling for workflow generation")
+            self.logger.info("[CODE_GENERATOR] 🚀 Using Instructor for workflow generation")
             
             # Get filtered Composio actions
             composio_actions = next(
@@ -607,105 +523,75 @@ class CodeGenerator(Role):
                 )
                 # Fall through to regular path below
             else:
-                # Build function schema with filtered enum
-                function_schema = self._build_workflow_function_schema(tool_ids)
-                
-                # ✅ FIX 6: MINIMAL prompt (let schema do enforcement)
-                # Don't reuse compose_prompt() - it's too heavy with JSON schema examples
+                # Extract plan from enrichments
                 plan = next(
                     (e for e in enrichment_contents if "Plan" in e or "plan" in e.lower()),
-                    "No plan provided"
+                    None
                 )
                 
-                minimal_prompt = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a workflow compiler. Generate workflows via function calls ONLY. "
-                            "Rules:\n"
-                            "- Use ONLY tool_id values from the Available Composio Actions list\n"
-                            "- All placeholders MUST use ${{...}} syntax\n"
-                            "- Node types are mutually exclusive\n"
-                            "- agent_with_tools REQUIRES tool_id\n"
-                            "- agent_only, form, hitl do NOT have tool_id"
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Plan:\n{plan}\n\n"
-                            f"{composio_actions}\n\n"
-                            f"Generate complete workflow for: {original_user_query}"
-                        )
-                    }
-                ]
-                
-                # Call function calling API
                 try:
-                    result = self.llm_api.chat_completion_with_function_calling(
-                        messages=minimal_prompt,
-                        functions=[function_schema],
-                        function_call={"name": "create_workflow_ir"},
-                        temperature=0.0
+                    # Create Instructor workflow generator
+                    from taskweaver.code_interpreter.code_interpreter.instructor_workflow_generator import (
+                        create_instructor_client
                     )
                     
-                    # Extract workflow JSON
-                    workflow_json = result["arguments"]["workflow"]
-                    self.logger.info(
-                        f"[FUNCTION_CALLING] Got workflow: "
-                        f"{len(workflow_json.get('nodes', []))} nodes, "
-                        f"{len(workflow_json.get('edges', []))} edges"
+                    # Get the underlying OpenAI client from LLMApi
+                    # LLMApi -> completion_service (OpenAIService) -> client (OpenAI)
+                    openai_client = None
+                    if hasattr(self.llm_api, 'completion_service') and hasattr(self.llm_api.completion_service, 'client'):
+                        openai_client = self.llm_api.completion_service.client
+                    elif hasattr(self.llm_api, 'client'):
+                        openai_client = self.llm_api.client
+                    
+                    if openai_client is None:
+                        raise ValueError("Could not extract OpenAI client from LLMApi")
+                    
+                    instructor_gen = create_instructor_client(
+                        openai_client=openai_client,
+                        max_retries=3  # Instructor will auto-retry with validation errors
                     )
                     
-                    # ✅ ULTIMATE SCALABLE VALIDATION: Dynamic Pydantic models from tool schemas
-                    # NO manual auto-healing needed - Pydantic does everything!
+                    # Generate workflow using Instructor
+                    # This replaces:
+                    # - Manual function calling
+                    # - Manual schema building (workflow_schema_builder.py)
+                    # - Manual validation (dynamic_model_validator.py)
+                    # - Custom retry logic
                     
-                    # Step 1: Minimal normalization (only truly ambiguous cases)
-                    workflow_json = self._normalize_workflow_json(workflow_json, tool_ids)
+                    # Get the correct model/deployment name for Azure OpenAI
+                    # For Azure, this must be the deployment name, not the model name
+                    model_name = None
+                    if hasattr(self.llm_api, 'config') and hasattr(self.llm_api.config, 'model'):
+                        model_name = self.llm_api.config.model
+                    elif hasattr(self.llm_api, 'completion_service') and hasattr(self.llm_api.completion_service, 'config'):
+                        model_name = self.llm_api.completion_service.config.model
                     
-                    # Step 2: Dynamic Pydantic validation (auto-generates models from tool schemas)
-                    from taskweaver.code_interpreter.code_interpreter.dynamic_model_validator import validate_workflow_with_dynamic_models
-                    workflow_json, param_warnings = validate_workflow_with_dynamic_models(workflow_json)
+                    self.logger.info(f"[INSTRUCTOR] Using model/deployment: {model_name}")
                     
-                    if param_warnings:
-                        # Check if any are errors (not just warnings)
-                        errors = [w for w in param_warnings if '[ERROR]' in w]
-                        if errors:
-                            self.logger.error(f"[DYNAMIC_VAL] {len(errors)} param validation errors")
-                            for error in errors[:5]:  # Show first 5
-                                self.logger.error(f"  {error}")
-                            
-                            # ⚠️ VALIDATION ERRORS: Send back to Planner for retry with hints
-                            error_summary = "\n".join(errors[:10])  # Top 10 errors
-                            error_message = (
-                                f"⚠️ Workflow validation failed with {len(errors)} parameter errors:\n\n"
-                                f"{error_summary}\n\n"
-                                f"💡 HINTS:\n"
-                                f"1. READ the user's request carefully and extract ALL mentioned values\n"
-                                f"2. For agent_with_tools nodes, populate the 'params' field with extracted values\n"
-                                f"3. Required parameters MUST have values (never null/empty)\n"
-                                f"4. Use parameter examples from tool schemas for correct formatting\n"
-                                f"5. For dates without year, use current year (e.g., 'Dec 25' → '2025-12-25')\n\n"
-                                f"Please regenerate the workflow with ALL required parameters extracted."
-                            )
-                            post_proxy.update_attachment(error_message, AttachmentType.revise_message)
-                            post_proxy.update_send_to("Planner")
-                            return post_proxy.end()
-                        else:
-                            self.logger.warning(f"[DYNAMIC_VAL] {len(param_warnings)} param warnings")
+                    workflow_def, error_message = instructor_gen.generate_workflow(
+                        user_request=original_user_query,
+                        available_tools=tool_ids,
+                        plan=plan,
+                        model=model_name,  # Pass the actual deployment name
+                        temperature=0.0,
+                        composio_actions_text=composio_actions
+                    )
                     
-                    # Step 3: Pydantic structural validation (node types, edges, DAG)
-                    from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
-                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_json)
-                    
-                    if not is_valid:
-                        self.logger.error(f"[FUNCTION_CALLING] Pydantic validation failed: {pydantic_errors}")
-                        post_proxy.update_attachment(
-                            "Generated workflow has structural errors. Please simplify your request.",
-                            AttachmentType.revise_message
-                        )
-                        post_proxy.update_send_to("User")
+                    if workflow_def is None:
+                        # Generation failed after all retries
+                        self.logger.error(f"[INSTRUCTOR] Workflow generation failed: {error_message}")
+                        post_proxy.update_attachment(error_message, AttachmentType.revise_message)
+                        post_proxy.update_send_to("Planner")
                         return post_proxy.end()
+                    
+                    # Convert Pydantic model to dict for downstream processing
+                    workflow_json = workflow_def.model_dump()
+                    
+                    self.logger.info(
+                        f"[INSTRUCTOR] ✅ Workflow generated and validated: "
+                        f"{len(workflow_json.get('nodes', []))} nodes, "
+                        f"{len(workflow_json.get('sequential_edges', []))} edges"
+                    )
                     
                     # Convert to Python code format
                     generated_code = self._convert_workflow_json_to_python(workflow_json)
@@ -715,14 +601,14 @@ class CodeGenerator(Role):
                     post_proxy.update_attachment(generated_code, AttachmentType.reply_content)
                     post_proxy.update_send_to("Planner")
                     
-                    # ✅ Early return - skip regular path
+                    # Filter unused plugins
                     if self.config.enable_auto_plugin_selection:
                         self.selected_plugin_pool.filter_unused_plugins(code=generated_code)
                     
                     return post_proxy.end()
                     
                 except Exception as e:
-                    self.logger.error(f"[FUNCTION_CALLING] Error: {e}", exc_info=True)
+                    self.logger.error(f"[INSTRUCTOR] Error: {e}", exc_info=True)
                     # Fall through to regular path as fallback
         
         # =====================================================================

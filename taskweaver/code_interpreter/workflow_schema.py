@@ -106,24 +106,66 @@ class WorkflowNode(BaseModel):
     
     @model_validator(mode='after')
     def validate_tool_and_decision(self):
-        """Validate that agent_with_tools nodes have tool_id and HITL nodes have decision."""
+        """
+        ✅ SHIFT-LEFT VALIDATION: Enforce rules DURING generation.
+        
+        Instructor will automatically retry with detailed error feedback if validation fails.
+        This prevents errors instead of patching them later!
+        """
         # Validate tool_id for agent_with_tools
         if self.type == 'agent_with_tools' and not self.tool_id:
-            raise ValueError(f"agent_with_tools nodes must have tool_id")
+            raise ValueError(
+                f"❌ Node '{self.id}': agent_with_tools nodes MUST have tool_id. "
+                f"Select a valid tool from the available tools list."
+            )
         
         # Validate decision for blocking HITL nodes
         if self.type == 'hitl' and self.blocking and not self.decision:
-            raise ValueError(f"Blocking HITL nodes must have 'decision' field for conditional routing")
+            raise ValueError(
+                f"❌ Node '{self.id}': Blocking HITL nodes MUST have 'decision' field for conditional routing"
+            )
+        
+        # ✨ NEW: Validate code_execution nodes have 'result =' in their code
+        if self.type == 'code_execution':
+            if not self.code or not self.code.strip():
+                raise ValueError(
+                    f"❌ Node '{self.id}': code_execution nodes MUST have non-empty 'code' field. "
+                    f"Provide Python code that assigns final output to 'result' variable."
+                )
+            
+            if 'result' not in self.code:
+                raise ValueError(
+                    f"❌ Node '{self.id}': code_execution code MUST assign to 'result' variable. "
+                    f"Example: result = 'output value'\n"
+                    f"Current code does not mention 'result' at all."
+                )
+            
+            if 'result =' not in self.code and 'result=' not in self.code:
+                raise ValueError(
+                    f"❌ Node '{self.id}': code_execution code mentions 'result' but doesn't assign to it. "
+                    f"Use 'result = <value>' to assign the final output.\n"
+                    f"Example: result = formatted_text"
+                )
+        
+        # ✨ NEW: Auto-extract app_name from tool_id if missing
+        if self.type == 'agent_with_tools' and self.tool_id and not self.app_name:
+            if '_' in self.tool_id:
+                parts = self.tool_id.split('_')
+                if parts[0] == 'COMPOSIO' and len(parts) > 1:
+                    self.app_name = f"{parts[0].lower()}_{parts[1].lower()}"
+                else:
+                    self.app_name = parts[0].lower()
+                logger.info(f"[PYDANTIC_HEAL] Auto-extracted app_name='{self.app_name}' from tool_id='{self.tool_id}'")
         
         return self
 
 
 class WorkflowDefinition(BaseModel):
-    """Complete workflow structure."""
+    """Complete workflow structure with comprehensive validation."""
     nodes: List[WorkflowNode] = Field(..., min_items=1, description="Workflow nodes")
     sequential_edges: Optional[List[Union[tuple, dict]]] = Field(
         default_factory=list,
-        description="Sequential edges between nodes"
+        description="Sequential edges between nodes as [(source, target), ...] or [{'source': ..., 'target': ...}, ...]"
     )
     parallel_edges: Optional[List[Union[tuple, dict]]] = Field(
         default_factory=list,
@@ -153,8 +195,19 @@ class WorkflowDefinition(BaseModel):
     
     @model_validator(mode='after')
     def validate_edges_and_dependencies(self):
-        """Validate that all edges and dependencies reference existing nodes."""
+        """
+        ✅ SHIFT-LEFT VALIDATION: Comprehensive validation DURING generation.
+        
+        Validates:
+        1. Edge references point to existing nodes
+        2. Dependencies point to existing nodes  
+        3. Placeholder references are correct
+        4. Code execution nodes are properly referenced
+        
+        Instructor will retry with detailed feedback if validation fails.
+        """
         node_ids = {node.id for node in self.nodes}
+        code_execution_nodes = {node.id for node in self.nodes if node.type == 'code_execution'}
         
         # Validate edges
         for edge_list_name in ['sequential_edges', 'parallel_edges']:
@@ -176,7 +229,115 @@ class WorkflowDefinition(BaseModel):
                         f"Node '{node.id}' depends on non-existent node: '{dep}'. Available nodes: {', '.join(sorted(node_ids))}"
                     )
         
+        # ✨ NEW: Validate placeholder references
+        errors = self._validate_all_placeholders(node_ids, code_execution_nodes)
+        if errors:
+            raise ValueError(
+                f"❌ Placeholder validation failed:\n" + 
+                "\n".join(f"  - {error}" for error in errors)
+            )
+        
         return self
+    
+    def _validate_all_placeholders(
+        self,
+        node_ids: set,
+        code_execution_nodes: set
+    ) -> List[str]:
+        """
+        Helper method to validate all placeholders in the workflow.
+        
+        Returns list of error messages (empty if no errors).
+        """
+        import re
+        errors = []
+        
+        for node in self.nodes:
+            # Check code field
+            if node.code:
+                errors.extend(self._validate_placeholders_in_text(
+                    text=node.code,
+                    node_id=node.id,
+                    field_name='code',
+                    node_ids=node_ids,
+                    code_execution_nodes=code_execution_nodes
+                ))
+            
+            # Check params
+            if isinstance(node.params, dict):
+                for param_key, param_value in node.params.items():
+                    if isinstance(param_value, str):
+                        errors.extend(self._validate_placeholders_in_text(
+                            text=param_value,
+                            node_id=node.id,
+                            field_name=f'params.{param_key}',
+                            node_ids=node_ids,
+                            code_execution_nodes=code_execution_nodes
+                        ))
+        
+        return errors
+    
+    @staticmethod
+    def _validate_placeholders_in_text(
+        text: str,
+        node_id: str,
+        field_name: str,
+        node_ids: set,
+        code_execution_nodes: set
+    ) -> List[str]:
+        """
+        Validate placeholders in a text field.
+        
+        Returns list of error messages (empty if no errors).
+        """
+        import re
+        errors = []
+        
+        # Pattern: ${node_id} or ${node_id.field}
+        placeholder_pattern = r'\$\{([^}]+)\}'
+        placeholders = re.findall(placeholder_pattern, text)
+        
+        for placeholder in placeholders:
+            # Generic .response_field check
+            if '.response_field' in placeholder:
+                errors.append(
+                    f"Node '{node_id}' {field_name}: Uses generic '.response_field' in ${{{placeholder}}}. "
+                    f"Use actual field names from tool schemas (e.g., .data.results, .id, etc.)"
+                )
+                continue
+            
+            # Extract referenced node ID (before first dot)
+            ref_parts = placeholder.split('.', 1)
+            ref_node_id = ref_parts[0]
+            
+            # Skip system placeholders
+            if ref_node_id in {'user_input', 'env', 'from_step', 'from_loop'}:
+                continue
+            
+            # Check if referenced node exists
+            if ref_node_id not in node_ids:
+                errors.append(
+                    f"Node '{node_id}' {field_name}: References non-existent node '{ref_node_id}' in ${{{placeholder}}}. "
+                    f"Available nodes: {', '.join(sorted(node_ids))}"
+                )
+                continue
+            
+            # Check if referencing code_execution node without .execution_result
+            if ref_node_id in code_execution_nodes:
+                if len(ref_parts) == 1:
+                    # ${code_node} with no field access
+                    errors.append(
+                        f"Node '{node_id}' {field_name}: References code_execution node '{ref_node_id}' without '.execution_result'. "
+                        f"Use ${{{ref_node_id}.execution_result}} for primitive results or ${{{ref_node_id}.execution_result.field_name}} for dict results."
+                    )
+                elif not ref_parts[1].startswith('execution_result'):
+                    # ${code_node.something} where something is not execution_result
+                    errors.append(
+                        f"Node '{node_id}' {field_name}: References code_execution node '{ref_node_id}' with invalid field '.{ref_parts[1]}'. "
+                        f"Code execution outputs must be accessed via '.execution_result' or '.execution_result.field_name'."
+                    )
+        
+        return errors
     
     def to_ir(self):
         """
