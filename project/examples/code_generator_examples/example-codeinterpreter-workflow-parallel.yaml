@@ -1,0 +1,70 @@
+enabled: true
+description: >-
+  Example showing PARALLEL node pattern for simultaneous execution.
+  
+  🎯 WHEN TO USE PARALLEL:
+  - Multiple INDEPENDENT tasks that can run at the same time
+  - Fetching from multiple sources simultaneously
+  - Sending to multiple destinations at once
+  
+  📌 PARALLEL NODE STRUCTURE:
+  1. Create a parent node with type: "parallel"
+  2. Set parallel_nodes: ["child1", "child2", "child3"]
+  3. Define each child node separately
+  4. Connect edges to the PARENT parallel node, NOT to individual children
+  
+  ✅ CORRECT:
+  {"id": "fetch_all", "type": "parallel", "parallel_nodes": ["fetch_a", "fetch_b", "fetch_c"]}
+  {"id": "fetch_a", "type": "agent_with_tools", ...}
+  Edge: {"source": "start", "target": "fetch_all"}
+  Edge: {"source": "fetch_all", "target": "process_results"}
+  
+  ❌ WRONG - Don't do this:
+  Edge: {"source": "start", "target": "fetch_a"}  # Don't connect directly to children!
+  Edge: {"source": "start", "target": "fetch_b"}
+  Edge: {"source": "start", "target": "fetch_c"}
+
+rounds:
+  - user_query: >-
+      Search for "Python tutorial" on Google, Bing, and DuckDuckGo at the same time, then compare which search engine gives the best results.
+    state: finished
+    post_list:
+      - message: Search for "Python tutorial" on Google, Bing, and DuckDuckGo at the same time, then compare which search engine gives the best results.
+        send_from: Planner
+        send_to: CodeInterpreter
+        attachment_list: []
+      
+      - send_from: CodeInterpreter
+        send_to: Planner
+        message: I've created a workflow that searches all 3 search engines in parallel, then compares results.
+        attachment_list:
+          - type: thought
+            content: |-
+              User wants to search 3 search engines simultaneously - perfect for parallel execution!
+              
+              ✅ GOOGLE_SEARCH - confirmed in actions list
+              ✅ BING_SEARCH - confirmed in actions list  
+              ✅ DUCKDUCKGO_SEARCH - confirmed in actions list
+              
+              I'll create a parallel node that searches all 3 engines at once, then compare results.
+          
+          - type: reply_type
+            content: python
+          
+          - type: reply_content
+            content: |-
+              WORKFLOW = {
+                "nodes": [
+                  {"id": "start", "type": "agent_only", "description": "Start workflow"},
+                  {"id": "search_all_engines", "type": "parallel", "parallel_nodes": ["search_google", "search_bing", "search_duckduckgo"], "description": "Search all engines simultaneously"},
+                  {"id": "search_google", "type": "agent_with_tools", "tool_id": "GOOGLE_SEARCH", "app_name": "google", "params": {"query": "Python tutorial", "num_results": 10}, "description": "Search Google"},
+                  {"id": "search_bing", "type": "agent_with_tools", "tool_id": "BING_SEARCH", "app_name": "bing", "params": {"query": "Python tutorial", "count": 10}, "description": "Search Bing"},
+                  {"id": "search_duckduckgo", "type": "agent_with_tools", "tool_id": "DUCKDUCKGO_SEARCH", "app_name": "duckduckgo", "params": {"query": "Python tutorial", "max_results": 10}, "description": "Search DuckDuckGo"},
+                  {"id": "compare_results", "type": "code_execution", "code": "google_results = ${search_google.results}\nbing_results = ${search_bing.results}\nddg_results = ${search_duckduckgo.results}\n\ncomparison = {\n    'google_count': len(google_results),\n    'bing_count': len(bing_results),\n    'duckduckgo_count': len(ddg_results),\n    'best_engine': 'Google' if len(google_results) > len(bing_results) else 'Bing'\n}\nresult = comparison", "description": "Compare search results from all engines"}
+                ],
+                "edges": [
+                  {"source": "start", "target": "search_all_engines"},
+                  {"source": "search_all_engines", "target": "compare_results"}
+                ]
+              }
+              result = WORKFLOW

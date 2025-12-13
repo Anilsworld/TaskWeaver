@@ -249,14 +249,40 @@ You have access to the following Composio tool IDs:
    - Each agent_with_tools node MUST have a valid tool_id
    - Match tools to user intent (e.g., "send email" → GMAIL_SEND_EMAIL)
 
-4. **NODE DEPENDENCIES AND EDGES**
+4. **PARALLEL EXECUTION**
+   - Use type="parallel" when multiple tasks can run SIMULTANEOUSLY
+   - Parallel nodes MUST have parallel_nodes field listing child node IDs
+   - Example: Fetching from 3 APIs at once
+   
+   **PARALLEL NODE STRUCTURE:**
+   ```python
+   # Parent parallel node
+   {{"id": "fetch_all", "type": "parallel", "parallel_nodes": ["fetch_a", "fetch_b", "fetch_c"]}}
+   
+   # Child nodes (regular agent_with_tools nodes)
+   {{"id": "fetch_a", "type": "agent_with_tools", "tool_id": "API_A_SEARCH", ...}}
+   {{"id": "fetch_b", "type": "agent_with_tools", "tool_id": "API_B_SEARCH", ...}}
+   {{"id": "fetch_c", "type": "agent_with_tools", "tool_id": "API_C_SEARCH", ...}}
+   
+   # Edges connect to PARENT, not children
+   sequential_edges: [("start", "fetch_all"), ("fetch_all", "process_results")]
+   ```
+   
+   **WHEN TO USE PARALLEL:**
+   - ✅ Fetching from multiple sources (Gmail + Outlook + Slack)
+   - ✅ Sending to multiple destinations simultaneously
+   - ✅ Independent API calls that don't depend on each other
+   - ❌ NOT for sequential steps (use regular nodes)
+   - ❌ NOT when one task needs another's output (use depends_on)
+
+5. **NODE DEPENDENCIES AND EDGES**
    - All nodes (except start/trigger nodes) must have depends_on
    - depends_on lists node IDs that must complete first
    - ALSO populate sequential_edges: [(source_id, target_id), ...]
    - Example: If node B depends_on node A, add edge (A, B) to sequential_edges
    - Edges ensure correct execution order
 
-5. **APP NAME**
+6. **APP NAME**
    - For agent_with_tools nodes, extract app_name from tool schema
    - Example: GMAIL_SEND_EMAIL → app_name: "gmail"
    - Example: COMPOSIO_SEARCH_FLIGHTS → app_name: "composio_search"

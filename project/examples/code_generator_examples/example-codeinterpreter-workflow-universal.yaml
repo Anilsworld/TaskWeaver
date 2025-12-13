@@ -37,15 +37,15 @@ description: >-
   - `]}` (correct - closes array then dict)
 
 rounds:
-  - user_query: Create a workflow to read emails and messages from Outlook, Slack, and Instagram, prepare draft responses for each, show them to me for review, and once I approve send the responses back to each platform respectively.
+  - user_query: Create a workflow to check my GitHub, GitLab, and Bitbucket repositories for new pull requests, generate AI-powered code review summaries for each, show them to me for approval, and once I approve post the reviews as comments.
     state: finished
     post_list:
-      - message: Create a workflow to read emails and messages from Outlook, Slack, and Instagram, prepare draft responses for each, show them to me for review, and once I approve send the responses back to each platform respectively.
+      - message: Create a workflow to check my GitHub, GitLab, and Bitbucket repositories for new pull requests, generate AI-powered code review summaries for each, show them to me for approval, and once I approve post the reviews as comments.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list: []
       
-      - message: I've created a comprehensive workflow with parallel fetching, HITL approval, and conditional responses using ultra-compact format.
+      - message: I've created a comprehensive workflow with parallel fetching, HITL approval, and conditional posting using ultra-compact format.
         send_from: CodeInterpreter
         send_to: Planner
         attachment_list:
@@ -53,20 +53,20 @@ rounds:
             content: |-
               🔍 PRE-CHECK: Reviewing available actions for required tools...
               
-              ✅ OUTLOOK_FETCH_MESSAGE - CONFIRMED in actions list
-              ✅ OUTLOOK_SEND_EMAIL - CONFIRMED in actions list
-              ✅ SLACKBOT_LIST_ALL_DIRECT_MESSAGES - CONFIRMED in actions list
-              ✅ SLACKBOT_SEND_MESSAGE - CONFIRMED in actions list
-              ✅ INSTAGRAM_LIST_ALL_MESSAGES - CONFIRMED in actions list
-              ✅ INSTAGRAM_SEND_MESSAGE - CONFIRMED in actions list
+              ✅ GITHUB_LIST_PULL_REQUESTS - CONFIRMED in actions list
+              ✅ GITHUB_CREATE_COMMENT - CONFIRMED in actions list
+              ✅ GITLAB_LIST_MERGE_REQUESTS - CONFIRMED in actions list
+              ✅ GITLAB_ADD_COMMENT - CONFIRMED in actions list
+              ✅ BITBUCKET_GET_PULL_REQUESTS - CONFIRMED in actions list
+              ✅ BITBUCKET_POST_COMMENT - CONFIRMED in actions list
               
               All required tools exist! Safe to proceed with workflow generation.
               
               I'll use 4 node types:
-              1. agent_with_tools: External API calls (fetch/send via Composio) - uses verified tool_ids
-              2. agent_only: AI processing (draft preparation, no external tools)
+              1. agent_with_tools: External API calls (fetch PRs/post comments via Composio) - uses verified tool_ids
+              2. agent_only: AI processing (code review generation, no external tools)
               3. hitl: Approval/decision step (blocking with decision field)
-              4. form: Data collection from user (if user asked for name/email/date inputs)
+              4. parallel: Simultaneous execution of independent tasks
               
               I'll create an ultra-compact WORKFLOW dict with Python booleans (True/False, not true/false).
           
@@ -77,17 +77,23 @@ rounds:
             content: |-
               WORKFLOW = {
                 "nodes": [
-                  {"id": "fetch_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_LIST_MESSAGES", "app_name": "outlook", "params": {"folder": "inbox"}, "parallel_group": 1, "description": "Fetch Outlook messages"},
-                  {"id": "fetch_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_LIST_ALL_DIRECT_MESSAGES", "app_name": "slack", "params": {"limit": 10}, "parallel_group": 1, "description": "Fetch Slack messages"},
-                  {"id": "fetch_instagram", "type": "agent_with_tools", "tool_id": "INSTAGRAM_LIST_ALL_MESSAGES", "app_name": "instagram", "params": {"limit": 10}, "parallel_group": 1, "description": "Fetch Instagram messages"},
-                  {"id": "prepare_drafts", "type": "agent_only", "description": "Prepare draft responses for each message", "params": {"outlook_messages": "${from_step:fetch_outlook.messages}", "slack_messages": "${from_step:fetch_slack.messages}", "instagram_messages": "${from_step:fetch_instagram.messages}"}, "depends_on": ["fetch_outlook", "fetch_slack", "fetch_instagram"]},
-                  {"id": "review_responses", "type": "hitl", "form_id": "review_form", "title": "Review Draft Responses", "fields": [{"name": "decision", "type": "select", "options": ["Approve All", "Reject All"], "required": True}, {"name": "comments", "type": "textarea"}], "depends_on": ["prepare_drafts"], "description": "Review and approve responses"},
-                  {"id": "send_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_SEND_EMAIL", "app_name": "outlook", "params": {"to": "${from_step:fetch_outlook.from}", "subject": "Re: ${from_step:fetch_outlook.subject}", "body": "${from_step:prepare_drafts.outlook_draft}"}, "parallel_group": 2, "description": "Send Outlook response"},
-                  {"id": "send_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_SEND_MESSAGE", "app_name": "slack", "params": {"channel": "${from_step:fetch_slack.channel}", "text": "${from_step:prepare_drafts.slack_draft}"}, "parallel_group": 2, "description": "Send Slack response"},
-                  {"id": "send_instagram", "type": "agent_with_tools", "tool_id": "INSTAGRAM_SEND_MESSAGE", "app_name": "instagram", "params": {"recipient_id": "${from_step:fetch_instagram.sender_id}", "message": "${from_step:prepare_drafts.instagram_draft}"}, "parallel_group": 2, "description": "Send Instagram response"}
+                  {"id": "start", "type": "agent_only", "description": "Start workflow"},
+                  {"id": "fetch_all_prs", "type": "parallel", "parallel_nodes": ["fetch_github", "fetch_gitlab", "fetch_bitbucket"], "description": "Fetch PRs from all platforms in parallel"},
+                  {"id": "fetch_github", "type": "agent_with_tools", "tool_id": "GITHUB_LIST_PULL_REQUESTS", "app_name": "github", "params": {"state": "open", "per_page": 20}, "description": "Fetch GitHub PRs"},
+                  {"id": "fetch_gitlab", "type": "agent_with_tools", "tool_id": "GITLAB_LIST_MERGE_REQUESTS", "app_name": "gitlab", "params": {"state": "opened", "per_page": 20}, "description": "Fetch GitLab MRs"},
+                  {"id": "fetch_bitbucket", "type": "agent_with_tools", "tool_id": "BITBUCKET_GET_PULL_REQUESTS", "app_name": "bitbucket", "params": {"state": "OPEN"}, "description": "Fetch Bitbucket PRs"},
+                  {"id": "generate_reviews", "type": "agent_only", "description": "Generate AI code reviews", "params": {"github_prs": "${fetch_github.pull_requests}", "gitlab_mrs": "${fetch_gitlab.merge_requests}", "bitbucket_prs": "${fetch_bitbucket.pull_requests}"}},
+                  {"id": "approve_reviews", "type": "hitl", "form_id": "review_approval", "title": "Approve Code Reviews", "fields": [{"name": "decision", "type": "select", "options": ["Approve All", "Reject All"], "required": True}, {"name": "notes", "type": "textarea"}], "description": "Review and approve AI-generated reviews"},
+                  {"id": "post_all_reviews", "type": "parallel", "parallel_nodes": ["post_github", "post_gitlab", "post_bitbucket"], "description": "Post reviews to all platforms in parallel"},
+                  {"id": "post_github", "type": "agent_with_tools", "tool_id": "GITHUB_CREATE_COMMENT", "app_name": "github", "params": {"pr_number": "${fetch_github.pr_number}", "body": "${generate_reviews.github_review}"}, "description": "Post GitHub review"},
+                  {"id": "post_gitlab", "type": "agent_with_tools", "tool_id": "GITLAB_ADD_COMMENT", "app_name": "gitlab", "params": {"mr_id": "${fetch_gitlab.mr_id}", "body": "${generate_reviews.gitlab_review}"}, "description": "Post GitLab review"},
+                  {"id": "post_bitbucket", "type": "agent_with_tools", "tool_id": "BITBUCKET_POST_COMMENT", "app_name": "bitbucket", "params": {"pr_id": "${fetch_bitbucket.pr_id}", "content": "${generate_reviews.bitbucket_review}"}, "description": "Post Bitbucket review"}
                 ],
-                "parallel_groups": {"fetch": ["fetch_outlook", "fetch_slack", "fetch_instagram"], "send": ["send_outlook", "send_slack", "send_instagram"]},
-                "conditional_edges": [{"source": "review_responses", "condition": "${review_responses.decision} == 'Approve All'", "if_true": "send_outlook", "if_false": "END"}],
-                "sequential_edges": [("prepare_drafts", "review_responses"), ("send_outlook", "END"), ("send_slack", "END"), ("send_instagram", "END")]
+                "edges": [
+                  {"source": "start", "target": "fetch_all_prs"},
+                  {"source": "fetch_all_prs", "target": "generate_reviews"},
+                  {"source": "generate_reviews", "target": "approve_reviews"},
+                  {"source": "approve_reviews", "target": "post_all_reviews", "condition": "${approve_reviews.decision} == 'Approve All'"}
+                ]
               }
               result = WORKFLOW

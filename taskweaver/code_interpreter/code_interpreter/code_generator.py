@@ -168,9 +168,78 @@ class CodeGenerator(Role):
         self.logger.info(f"[FUNCTION_CALLING] Extracted {len(tool_ids)} tool IDs for enum")
         return tool_ids
 
-    # NOTE: _build_workflow_function_schema and _normalize_workflow_json removed
-    # These are no longer needed with Instructor - it handles schema generation and validation automatically
-    
+
+    def _build_workflow_function_schema(self, tool_ids: List[str]) -> dict:
+        """
+        Build OpenAI function schema for workflow IR generation.
+        
+        ✅ NOW USING: workflow_schema_builder.py (Pydantic-based, dynamic tool params)
+        
+        🔑 DESIGN PRINCIPLES:
+        - Intermediate Representation (IR) - compiler-grade structure
+        - Mutually exclusive node types (oneOf prevents ambiguity)
+        - Typed edges (explicit control flow)
+        - Filtered tool_id enum (5-50 tools, not 17k)
+        - Triggers for scheduled/event workflows
+        - Composability via sub_workflow
+        - 🆕 Dynamic tool parameter schemas from Composio cache
+        
+        Args:
+            tool_ids: Filtered list of valid Composio action IDs (5-50 tools)
+        
+        Returns:
+            OpenAI function schema dict (IR spec) with tool-specific parameter schemas
+        """
+        # ✅ NEW: Use schema builder with dynamic tool param injection
+        from taskweaver.code_interpreter.code_interpreter.workflow_schema_builder import get_schema_builder
+        
+        schema_builder = get_schema_builder()
+        schema = schema_builder.build_function_schema(tool_ids)
+        
+        self.logger.info(f"[FUNCTION_CALLING] Built workflow schema with {len(tool_ids)} tools using dynamic param injection")
+        return schema
+
+    def _format_examples_for_function_calling(self) -> str:
+        """
+        Format YAML examples for function calling prompt.
+        
+        Extracts key patterns from loaded examples to show form vs hitl distinction.
+        This was working before function calling - now restoring it!
+        
+        Returns:
+            Formatted example string highlighting form vs hitl usage
+        """
+        if not hasattr(self, 'examples') or not self.examples:
+            return ""
+        
+        # Build concise examples showing form vs hitl patterns
+        example_text = (
+            "🎯 CRITICAL EXAMPLES - Study these patterns:\n\n"
+            "EXAMPLE 1 - Form for DATA COLLECTION (user provides info):\n"
+            '{"id": "collect_info", "type": "form", "fields": [{"name": "email", "type": "text"}]}\n'
+            "USE 'form' when: User enters search criteria, contact details, preferences\n\n"
+            
+            "EXAMPLE 2 - HITL for APPROVAL/REVIEW (user makes decision):\n"
+            '{"id": "review_draft", "type": "hitl", "approval_type": "approve_reject"}\n'
+            "USE 'hitl' when: Approving results, reviewing drafts, authorizing actions\n\n"
+            
+            "EXAMPLE 3 - PARALLEL for SIMULTANEOUS EXECUTION:\n"
+            '{"id": "fetch_all", "type": "parallel", "parallel_nodes": ["fetch_a", "fetch_b", "fetch_c"]}\n'
+            '{"id": "fetch_a", "type": "agent_with_tools", "tool_id": "API_A", "params": {...}}\n'
+            '{"id": "fetch_b", "type": "agent_with_tools", "tool_id": "API_B", "params": {...}}\n'
+            '{"id": "fetch_c", "type": "agent_with_tools", "tool_id": "API_C", "params": {...}}\n'
+            "USE 'parallel' when: Multiple independent tasks can run simultaneously\n\n"
+            
+            "EXAMPLE 4 - Complete approval workflow:\n"
+            '1. {"id": "search_data", "type": "agent_with_tools", "tool_id": "...", "params": {...}}\n'
+            '2. {"id": "approve_results", "type": "hitl", "approval_type": "approve_reject"}\n'
+            '3. {"id": "send_email", "type": "agent_with_tools", "tool_id": "..."}\n\n'
+            
+            "⚠️ REMEMBER: 'approve', 'review', 'authorize' → USE 'hitl' (NOT 'form')!\n"
+        )
+        
+        return example_text
+
     def _convert_workflow_json_to_python(self, workflow_json: dict) -> str:
         """
         Convert workflow JSON from function calling to Python code format.
@@ -190,18 +259,16 @@ class CodeGenerator(Role):
         # Build final Python code
         python_code = f"WORKFLOW = {workflow_repr}\n\nresult = WORKFLOW"
         
-        # Calculate total edges (handle both old 'edges' format and new 'sequential_edges'/'parallel_edges' format)
-        total_edges = 0
-        if 'edges' in workflow_json:
-            total_edges = len(workflow_json['edges'])
-        else:
-            total_edges += len(workflow_json.get('sequential_edges', []))
-            total_edges += len(workflow_json.get('parallel_edges', []))
-            total_edges += len(workflow_json.get('conditional_edges', []))
+        # Handle different edge formats (edges key, sequential_edges, or derived from depends_on)
+        edge_count = (
+            len(workflow_json.get('edges', [])) or 
+            len(workflow_json.get('sequential_edges', [])) or
+            sum(len(node.get('depends_on', [])) for node in workflow_json.get('nodes', []))
+        )
         
         self.logger.info(
             f"[FUNCTION_CALLING] Generated {len(python_code)} chars of Python code "
-            f"({len(workflow_json['nodes'])} nodes, {total_edges} edges)"
+            f"({len(workflow_json.get('nodes', []))} nodes, {edge_count} edges)"
         )
         
         return python_code
@@ -416,7 +483,20 @@ class CodeGenerator(Role):
             self.plugin_pool = self.select_plugins_for_prompt(query)
 
         self.role_load_experience(query=query, memory=memory)
+        
+        # ✅ TRACEBACK: Log example loading
+        self.logger.info(f"[EXAMPLE_LOADING] 📂 Loading examples from: {self.config.example_base_path}")
         self.role_load_example(memory=memory, role_set={self.alias, "Planner"})
+        if hasattr(self, 'examples') and self.examples:
+            self.logger.info(f"[EXAMPLE_LOADING] ✅ Loaded {len(self.examples)} examples successfully")
+            for idx, example in enumerate(self.examples):
+                self.logger.info(f"[EXAMPLE_LOADING]   Example {idx+1}: {len(example.rounds)} rounds, enabled={example.enabled}")
+                # Log first round user_query to verify correct example
+                if example.rounds:
+                    user_query = getattr(example.rounds[0], 'user_query', 'N/A')
+                    self.logger.info(f"[EXAMPLE_LOADING]     Query: {user_query[:80]}...")
+        else:
+            self.logger.warning(f"[EXAMPLE_LOADING] ⚠️  NO EXAMPLES LOADED!")
 
         planning_enrichments = memory.get_shared_memory_entries(entry_type="plan")
 
@@ -505,10 +585,17 @@ class CodeGenerator(Role):
         self.logger.info(f"[CODE_GENERATOR] Workflow generation mode: {is_workflow_generation}")
         
         # =====================================================================
-        # 🚀 INSTRUCTOR-BASED WORKFLOW GENERATION (Replaces custom function calling)
+        # 🚀 FUNCTION CALLING PATH (Workflow IR Generation)
         # =====================================================================
         if is_workflow_generation and self.config.use_function_calling:
-            self.logger.info("[CODE_GENERATOR] 🚀 Using Instructor for workflow generation")
+            self.logger.info("[CODE_GENERATOR] 🚀 Using function calling for workflow generation")
+            
+            # ✅ TRACEBACK: Log system prompt details
+            self.logger.info(f"[PROMPT_TRACE] Instruction template length: {len(self.instruction_template)} chars")
+            if 'multi_tool' in self.instruction_template.lower():
+                self.logger.warning(f"[PROMPT_TRACE] ⚠️  'multi_tool' found in system prompt!")
+            else:
+                self.logger.info(f"[PROMPT_TRACE] ✅ 'multi_tool' NOT in system prompt")
             
             # Get filtered Composio actions
             composio_actions = next(
@@ -523,75 +610,188 @@ class CodeGenerator(Role):
                 )
                 # Fall through to regular path below
             else:
-                # Extract plan from enrichments
+                # Build function schema with filtered enum
+                function_schema = self._build_workflow_function_schema(tool_ids)
+                
+                # ✅ TRACEBACK: Log what schema contains
+                self.logger.info(f"[SCHEMA_TRACE] Built schema with {len(tool_ids)} tools")
+                # Check if schema contains parallel type
+                try:
+                    # json is already imported at top of file
+                    # The schema structure from workflow_schema_builder
+                    self.logger.info(f"[SCHEMA_TRACE] Schema keys: {list(function_schema.keys())}")
+                    
+                    # Navigate to node schemas
+                    params = function_schema.get('parameters', {})
+                    workflow_prop = params.get('properties', {}).get('workflow', {})
+                    nodes_prop = workflow_prop.get('properties', {}).get('nodes', {})
+                    node_items = nodes_prop.get('items', {})
+                    node_schemas = node_items.get('oneOf', [])
+                    
+                    self.logger.info(f"[SCHEMA_TRACE] Found {len(node_schemas)} node schema variants")
+                    
+                    # Extract node types
+                    node_types = []
+                    for schema in node_schemas:
+                        if 'properties' in schema and 'type' in schema['properties']:
+                            type_enum = schema['properties']['type'].get('enum', [])
+                            if type_enum:
+                                node_types.extend(type_enum)
+                    
+                    self.logger.info(f"[SCHEMA_TRACE] Node types in schema: {node_types}")
+                    if 'parallel' in node_types:
+                        self.logger.info(f"[SCHEMA_TRACE] ✅ 'parallel' type IS in schema")
+                    else:
+                        self.logger.warning(f"[SCHEMA_TRACE] ⚠️  'parallel' type NOT in schema!")
+                    
+                    # Log first 500 chars of schema for debugging
+                    schema_str = json.dumps(function_schema, indent=2)
+                    self.logger.info(f"[SCHEMA_TRACE] Schema preview (first 800 chars):\n{schema_str[:800]}...")
+                except Exception as e:
+                    self.logger.error(f"[SCHEMA_TRACE] Error inspecting schema: {e}", exc_info=True)
+                
+                # ✅ FIX 6: MINIMAL prompt (let schema do enforcement)
+                # Don't reuse compose_prompt() - it's too heavy with JSON schema examples
                 plan = next(
                     (e for e in enrichment_contents if "Plan" in e or "plan" in e.lower()),
-                    None
+                    "No plan provided"
                 )
                 
+                # ✅ ADD YAML EXAMPLES to show form vs hitl distinction
+                example_context = self._format_examples_for_function_calling()
+                
+                # ✅ ADD YAML EXAMPLES from loaded example files
+                yaml_examples = ""
+                if hasattr(self, 'examples') and self.examples:
+                    self.logger.info(f"[PROMPT_BUILD] Including {len(self.examples)} YAML examples in prompt")
+                    for idx, example in enumerate(self.examples):
+                        if not example.enabled:
+                            continue
+                        for round in example.rounds[:2]:  # Include first 2 rounds per example
+                            # Find CodeInterpreter's reply with the WORKFLOW
+                            for post in round.post_list:
+                                if post.send_from == "CodeInterpreter":
+                                    # Extract WORKFLOW from reply_content attachment
+                                    for attachment in post.attachment_list:
+                                        if attachment.type.value == "reply_content" and "WORKFLOW" in attachment.content:
+                                            yaml_examples += f"\n\n📚 REAL EXAMPLE from training:\nUser: {round.user_query}\nWorkflow:\n{attachment.content[:500]}...\n"
+                                            break
+                                    break
+                else:
+                    self.logger.warning(f"[PROMPT_BUILD] ⚠️  No YAML examples available!")
+                
+                minimal_prompt = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a workflow compiler. Generate workflows via function calls ONLY. "
+                            "Rules:\n"
+                            "- Use ONLY tool_id values from the Available Composio Actions list\n"
+                            "- All placeholders MUST use ${{...}} syntax\n"
+                            "- Node types are mutually exclusive\n"
+                            "- agent_with_tools REQUIRES tool_id\n"
+                            "- agent_only, form, hitl do NOT have tool_id\n\n"
+                            "**PARALLEL EXECUTION:**\n"
+                            "- For SIMULTANEOUS tasks, use type='parallel' with parallel_nodes list\n"
+                            "- Example: {{'id': 'search_all', 'type': 'parallel', 'parallel_nodes': ['search_a', 'search_b', 'search_c']}}\n"
+                            "- Then define each child: {{'id': 'search_a', 'type': 'agent_with_tools', ...}}\n"
+                            "- Edges connect to PARENT: ('start', 'search_all'), ('search_all', 'process_results')\n\n"
+                            f"{example_context}\n"
+                            f"{yaml_examples}"
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Plan:\n{plan}\n\n"
+                            f"{composio_actions}\n\n"
+                            f"Generate complete workflow for: {original_user_query}"
+                        )
+                    }
+                ]
+                
+                self.logger.info(f"[PROMPT_BUILD] Final prompt length: {len(minimal_prompt[0]['content'])} chars (system) + {len(minimal_prompt[1]['content'])} chars (user)")
+                
+                # ✅ DEBUG: Log if parallel is mentioned in prompt
+                full_prompt_text = minimal_prompt[0]['content'] + minimal_prompt[1]['content']
+                if 'parallel' in full_prompt_text:
+                    parallel_count = full_prompt_text.count('parallel')
+                    self.logger.info(f"[PROMPT_BUILD] ✅ 'parallel' mentioned {parallel_count} times in prompt")
+                if 'multi_tool' in full_prompt_text.lower():
+                    self.logger.warning(f"[PROMPT_BUILD] ⚠️  'multi_tool' found in final prompt! (checking context...)")
+                    # Log context around multi_tool
+                    idx = full_prompt_text.lower().find('multi_tool')
+                    context = full_prompt_text[max(0, idx-100):idx+100]
+                    self.logger.warning(f"[PROMPT_BUILD] Context: ...{context}...")
+                
+                # Call function calling API
                 try:
-                    # Create Instructor workflow generator
-                    from taskweaver.code_interpreter.code_interpreter.instructor_workflow_generator import (
-                        create_instructor_client
+                    result = self.llm_api.chat_completion_with_function_calling(
+                        messages=minimal_prompt,
+                        functions=[function_schema],
+                        function_call={"name": "create_workflow_ir"},
+                        temperature=0.0
                     )
                     
-                    # Get the underlying OpenAI client from LLMApi
-                    # LLMApi -> completion_service (OpenAIService) -> client (OpenAI)
-                    openai_client = None
-                    if hasattr(self.llm_api, 'completion_service') and hasattr(self.llm_api.completion_service, 'client'):
-                        openai_client = self.llm_api.completion_service.client
-                    elif hasattr(self.llm_api, 'client'):
-                        openai_client = self.llm_api.client
-                    
-                    if openai_client is None:
-                        raise ValueError("Could not extract OpenAI client from LLMApi")
-                    
-                    instructor_gen = create_instructor_client(
-                        openai_client=openai_client,
-                        max_retries=3  # Instructor will auto-retry with validation errors
-                    )
-                    
-                    # Generate workflow using Instructor
-                    # This replaces:
-                    # - Manual function calling
-                    # - Manual schema building (workflow_schema_builder.py)
-                    # - Manual validation (dynamic_model_validator.py)
-                    # - Custom retry logic
-                    
-                    # Get the correct model/deployment name for Azure OpenAI
-                    # For Azure, this must be the deployment name, not the model name
-                    model_name = None
-                    if hasattr(self.llm_api, 'config') and hasattr(self.llm_api.config, 'model'):
-                        model_name = self.llm_api.config.model
-                    elif hasattr(self.llm_api, 'completion_service') and hasattr(self.llm_api.completion_service, 'config'):
-                        model_name = self.llm_api.completion_service.config.model
-                    
-                    self.logger.info(f"[INSTRUCTOR] Using model/deployment: {model_name}")
-                    
-                    workflow_def, error_message = instructor_gen.generate_workflow(
-                        user_request=original_user_query,
-                        available_tools=tool_ids,
-                        plan=plan,
-                        model=model_name,  # Pass the actual deployment name
-                        temperature=0.0,
-                        composio_actions_text=composio_actions
-                    )
-                    
-                    if workflow_def is None:
-                        # Generation failed after all retries
-                        self.logger.error(f"[INSTRUCTOR] Workflow generation failed: {error_message}")
-                        post_proxy.update_attachment(error_message, AttachmentType.revise_message)
-                        post_proxy.update_send_to("Planner")
-                        return post_proxy.end()
-                    
-                    # Convert Pydantic model to dict for downstream processing
-                    workflow_json = workflow_def.model_dump()
-                    
+                    # Extract workflow JSON
+                    workflow_json = result["arguments"]["workflow"]
                     self.logger.info(
-                        f"[INSTRUCTOR] ✅ Workflow generated and validated: "
+                        f"[FUNCTION_CALLING] Got workflow: "
                         f"{len(workflow_json.get('nodes', []))} nodes, "
-                        f"{len(workflow_json.get('sequential_edges', []))} edges"
+                        f"{len(workflow_json.get('edges', []))} edges"
                     )
+                    
+                    # Debug: Log actual workflow JSON to see placeholder formats
+                    # json is already imported at top of file
+                    self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
+                    
+                    # ✅ VALIDATION: Skip dynamic model validator (module removed)
+                    # Workflow schema validation already done by OpenAI function calling
+                    param_warnings = []
+                    
+                    if param_warnings:
+                        # Check if any are errors (not just warnings)
+                        errors = [w for w in param_warnings if '[ERROR]' in w]
+                        if errors:
+                            self.logger.error(f"[DYNAMIC_VAL] {len(errors)} param validation errors")
+                            for error in errors[:5]:  # Show first 5
+                                self.logger.error(f"  {error}")
+                            
+                            # ⚠️ VALIDATION ERRORS: Send back to Planner for retry with hints
+                            error_summary = "\n".join(errors[:10])  # Top 10 errors
+                            error_message = (
+                                f"⚠️ Workflow validation failed with {len(errors)} parameter errors:\n\n"
+                                f"{error_summary}\n\n"
+                                f"💡 HINTS:\n"
+                                f"1. READ the user's request carefully and extract ALL mentioned values\n"
+                                f"2. For agent_with_tools nodes, populate the 'params' field with extracted values\n"
+                                f"3. Required parameters MUST have values (never null/empty)\n"
+                                f"4. Use parameter examples from tool schemas for correct formatting\n"
+                                f"5. For dates without year, use current year (e.g., 'Dec 25' → '2025-12-25')\n\n"
+                                f"Please regenerate the workflow with ALL required parameters extracted."
+                            )
+                            post_proxy.update_attachment(error_message, AttachmentType.revise_message)
+                            post_proxy.update_send_to("Planner")
+                            return post_proxy.end()
+                        else:
+                            self.logger.warning(f"[DYNAMIC_VAL] {len(param_warnings)} param warnings")
+                    
+                    # Step 3: Pydantic structural validation (node types, edges, DAG)
+                    from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
+                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_json)
+                    
+                    # ✅ workflow_json now has complete edges from WorkflowIR (including auto-added parallel edges)
+                    self.logger.info(f"[FUNCTION_CALLING] After validation: {len(workflow_json.get('edges', []))} complete edges")
+                    
+                    if not is_valid:
+                        self.logger.error(f"[FUNCTION_CALLING] Pydantic validation failed: {pydantic_errors}")
+                        self.logger.error(f"[FUNCTION_CALLING] Failed workflow nodes: {[n.get('id', '?') + ':' + n.get('type', '?') for n in workflow_json.get('nodes', [])]}")
+                        post_proxy.update_attachment(
+                            "Generated workflow has structural errors. Please simplify your request.",
+                            AttachmentType.revise_message
+                        )
+                        post_proxy.update_send_to("User")
+                        return post_proxy.end()
                     
                     # Convert to Python code format
                     generated_code = self._convert_workflow_json_to_python(workflow_json)
@@ -601,20 +801,26 @@ class CodeGenerator(Role):
                     post_proxy.update_attachment(generated_code, AttachmentType.reply_content)
                     post_proxy.update_send_to("Planner")
                     
-                    # Filter unused plugins
+                    # ✅ Early return - skip regular path
                     if self.config.enable_auto_plugin_selection:
                         self.selected_plugin_pool.filter_unused_plugins(code=generated_code)
                     
                     return post_proxy.end()
                     
                 except Exception as e:
-                    self.logger.error(f"[INSTRUCTOR] Error: {e}", exc_info=True)
-                    # Fall through to regular path as fallback
+                    self.logger.error(f"[FUNCTION_CALLING] Fatal error during workflow generation: {e}", exc_info=True)
+                    # ❌ NO FALLBACK - Function calling should be deterministic
+                    post_proxy.update_attachment(
+                        f"Workflow generation failed due to internal error. Please try rephrasing your request or contact support. Error: {str(e)}",
+                        AttachmentType.revise_message
+                    )
+                    post_proxy.update_send_to("User")
+                    return post_proxy.end()
         
         # =====================================================================
-        # 📝 REGULAR PATH (JSON Schema Response - Fallback)
+        # 📝 REGULAR PATH (JSON Schema Response - ONLY when function calling disabled)
         # =====================================================================
-        self.logger.info("[CODE_GENERATOR] Using regular JSON schema generation")
+        self.logger.info("[CODE_GENERATOR] Using regular JSON schema generation (function calling disabled)")
         
         prompt = self.compose_prompt(
             rounds,

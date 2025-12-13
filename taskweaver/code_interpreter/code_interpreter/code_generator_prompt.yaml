@@ -199,17 +199,20 @@ content: |-
       ```python
       WORKFLOW = {{
         "nodes": [
-          {{"id": "collect_details", "type": "form", "form_id": "passenger_form", "title": "Passenger Info", "fields": [{{"name": "name", "label": "Full Name", "required": True}}, {{"name": "email", "label": "Email", "required": True}}], "description": "Collect passenger details"}},
-          {{"id": "fetch_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_LIST_MESSAGES", "app_name": "outlook", "params": {{"folder": "inbox"}}, "parallel_group": 1, "description": "Fetch Outlook"}},
-          {{"id": "fetch_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_LIST_MESSAGES", "app_name": "slack", "params": {{"channel": "general"}}, "parallel_group": 1, "description": "Fetch Slack"}},
-          {{"id": "prepare_drafts", "type": "agent_only", "description": "Prepare draft responses", "params": {{"outlook_messages": "${{from_step:fetch_outlook.messages}}", "slack_messages": "${{from_step:fetch_slack.messages}}"}}, "depends_on": ["fetch_outlook", "fetch_slack"]}},
-          {{"id": "review", "type": "hitl", "form_id": "review_form", "title": "Review Drafts", "fields": [{{"name": "decision", "type": "select", "options": ["Approve", "Reject"], "required": True}}], "depends_on": ["prepare_drafts"], "description": "Approval"}},
-          {{"id": "send_outlook", "type": "agent_with_tools", "tool_id": "OUTLOOK_SEND_EMAIL", "app_name": "outlook", "params": {{"to": "${{from_step:collect_details.email}}", "body": "${{from_step:prepare_drafts.outlook_draft}}"}}, "parallel_group": 2, "description": "Send Outlook"}},
-          {{"id": "send_slack", "type": "agent_with_tools", "tool_id": "SLACKBOT_SEND_MESSAGE", "app_name": "slack", "params": {{"channel": "general", "text": "${{from_step:prepare_drafts.slack_draft}}"}}, "parallel_group": 2, "description": "Send Slack"}}
+          {{"id": "get_ticket_info", "type": "form", "form_id": "ticket_form", "title": "Support Ticket", "fields": [{{"name": "title", "label": "Issue Title", "required": True}}, {{"name": "priority", "type": "select", "options": ["High", "Low"], "required": True}}], "description": "Collect ticket details"}},
+          {{"id": "search_all_docs", "type": "parallel", "parallel_nodes": ["search_jira", "search_confluence"], "description": "Search documentation in parallel"}},
+          {{"id": "search_jira", "type": "agent_with_tools", "tool_id": "JIRA_SEARCH_ISSUES", "app_name": "jira", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Jira"}},
+          {{"id": "search_confluence", "type": "agent_with_tools", "tool_id": "CONFLUENCE_SEARCH", "app_name": "confluence", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Confluence"}},
+          {{"id": "analyze_results", "type": "agent_only", "description": "Analyze search results", "params": {{"jira_results": "${{search_jira.issues}}", "confluence_results": "${{search_confluence.pages}}"}}}},
+          {{"id": "approve_solution", "type": "hitl", "form_id": "approval_form", "title": "Approve Solution", "fields": [{{"name": "decision", "type": "select", "options": ["Create Ticket", "Mark Resolved"], "required": True}}], "description": "Approve action"}},
+          {{"id": "create_ticket", "type": "agent_with_tools", "tool_id": "JIRA_CREATE_ISSUE", "app_name": "jira", "params": {{"summary": "${{get_ticket_info.title}}", "priority": "${{get_ticket_info.priority}}"}}, "description": "Create Jira ticket"}}
         ],
-        "parallel_groups": {{"fetch": ["fetch_outlook", "fetch_slack"], "send": ["send_outlook", "send_slack"]}},
-        "conditional_edges": [{{"source": "review", "condition": "${{review.decision}} == 'Approve'", "if_true": "send_outlook", "if_false": "END"}}],
-        "sequential_edges": [("collect_details", "fetch_outlook"), ("prepare_drafts", "review"), ("send_outlook", "END"), ("send_slack", "END")]
+        "edges": [
+          {{"source": "get_ticket_info", "target": "search_all_docs"}},
+          {{"source": "search_all_docs", "target": "analyze_results"}},
+          {{"source": "analyze_results", "target": "approve_solution"}},
+          {{"source": "approve_solution", "target": "create_ticket", "condition": "${{approve_solution.decision}} == 'Create Ticket'"}}
+        ]
       }}
       result = WORKFLOW
       ```
@@ -360,10 +363,10 @@ content: |-
     
     **WHEN TO USE PARALLEL NODES**:
     - Each item needs DIFFERENT tool_id
-    - Operations are heterogeneous (fetch email AND check calendar AND search files)
+    - Operations are heterogeneous (search docs AND check issues AND query database)
     - User explicitly says "different" or "specific" for each item
-    - Example: "Fetch Gmail emails, check Google Calendar, search Google Drive"
-      ✅ USE: parallel_groups: {{"actions": ["fetch_gmail", "check_calendar", "search_drive"]}}
+    - Example: "Search Jira, Confluence, and GitHub simultaneously"
+      ✅ USE: {{"id": "search_all", "type": "parallel", "parallel_nodes": ["search_jira", "search_confluence", "search_github"]}}
       ❌ DON'T: Loop (can't use different tool_ids in loop body)
     
     **DECISION FLOWCHART**:
@@ -374,13 +377,13 @@ content: |-
     5. Are tool_ids DIFFERENT per item? → YES: **USE PARALLEL NODES**
     
     - WORKFLOW PATTERNS (ALL supported):
-      1. Sequential: Connect nodes with sequential_edges
-      2. Parallel: Assign same parallel_group number to nodes that should run in parallel
-      3. Conditional: Use conditional_edges for if/else branching
-      4. Fan-out/Fan-in: Parallel nodes converge at HITL node via depends_on
+      1. Sequential: Connect nodes with edges
+      2. Parallel: Create parent node with type="parallel" and parallel_nodes=["child1", "child2", ...]
+      3. Conditional: Use edges with condition field for if/else branching
+      4. Fan-out/Fan-in: Parallel node executes multiple children, then converges at next node
       5. Loops: Use loops array with iterate_over and exit_condition (PREFERRED for repetitive operations!)
       6. Nested: Combine patterns (parallel inside conditional, loops with approvals, etc.)
-      7. Multi-dimensional: Multiple parallel groups, multiple conditional branches, complex dependencies
+      7. Multi-dimensional: Multiple parallel nodes, multiple conditional branches, complex dependencies
     
     - NODE TYPE SELECTION RULES (CRITICAL - choose correct type):
       
@@ -421,10 +424,10 @@ content: |-
       * If NO suitable tools exist for user's request, STOP and explain what's missing
       * Example: "I cannot create this workflow because I don't have access to restaurant booking APIs"
       * Node IDs must be unique across entire workflow
-      * Parallel nodes: same parallel_group number, different IDs
-      * HITL/Form depends_on: list all parallel nodes that must complete first
+      * Parallel execution: Create parent node with type="parallel" and parallel_nodes list, then define children
+      * Edges: Connect to parent parallel node, NOT to individual children
       * Conditional edges: source must be a node that produces the condition field
-      * Data flow: use from_step to reference ANY previous node's output
+      * Data flow: use placeholders to reference ANY previous node's output
       * Keep total WORKFLOW under 150 lines (use clear, concise descriptions)
       * System handles ALL parameter resolution at runtime (extraction, data flow, aggregation)
     
@@ -432,20 +435,19 @@ content: |-
       
       **Simple Sequential:**
       nodes: [fetch_data → process_data → send_result]
-      sequential_edges: [("fetch_data", "process_data"), ("process_data", "send_result"), ("send_result", "END")]
+      edges: [{{"source": "fetch_data", "target": "process_data"}}, {{"source": "process_data", "target": "send_result"}}]
       
       **Parallel with Approval:**
-      nodes: [fetch_outlook, fetch_slack, fetch_instagram] (parallel_group: 1) → review_hitl (depends_on: all 3) → send_responses
-      parallel_groups: {{"fetch": ["fetch_outlook", "fetch_slack", "fetch_instagram"]}}
-      sequential_edges: [("review_hitl", "send_responses"), ("send_responses", "END")]
+      nodes: [start, search_all_repos (type: parallel, parallel_nodes: [search_github, search_gitlab, search_bitbucket]), search_github, search_gitlab, search_bitbucket, analyze_results, approve_action]
+      edges: [{{"source": "start", "target": "search_all_repos"}}, {{"source": "search_all_repos", "target": "analyze_results"}}, {{"source": "analyze_results", "target": "approve_action"}}]
       
       **Conditional Routing:**
       nodes: [check_status → process_if_pending, process_if_complete]
-      conditional_edges: [{{"source": "check_status", "condition": "${{check_status.status}} == 'pending'", "if_true": "process_if_pending", "if_false": "process_if_complete"}}]
+      edges: [{{"source": "check_status", "target": "process_if_pending", "condition": "${{check_status.status}} == 'pending'"}}, {{"source": "check_status", "target": "process_if_complete", "condition": "${{check_status.status}} == 'complete'"}}]
       
       **Multi-Platform with Post-Approval Actions:**
-      nodes: [parallel fetches] → [hitl approval] → [conditional routing] → [parallel sends]
-      Uses all patterns: parallel_groups, depends_on, conditional_edges, parallel sends
+      nodes: [start, fetch_all (type: parallel), [children], hitl_approval, send_all (type: parallel), [children]]
+      Uses: parallel nodes, conditional edges, placeholders for data flow
       
       **Loop with Processing:**
       nodes: [get_list] → [loop: process_each_item] → [final_summary]
