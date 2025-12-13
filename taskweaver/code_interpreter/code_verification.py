@@ -1,5 +1,4 @@
 import ast
-import json
 import re
 from typing import List, Optional, Tuple
 
@@ -364,16 +363,14 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
                 
                 workflow_str = workflow_match.group(1)
                 try:
-                    # CRITICAL FIX: Clean the extracted string before JSON parsing
+                    # CRITICAL FIX: Clean the extracted string before parsing
                     # Remove any trailing "result = WORKFLOW" if present
-                    import re
                     workflow_str_clean = re.sub(r'\s*\nresult\s*=.*$', '', workflow_str, flags=re.DOTALL)
                     
-                    # Convert Python syntax to JSON
-                    json_str = workflow_str_clean.replace('True', 'true').replace('False', 'false').replace('None', 'null')
-                    # Convert Python tuples to JSON arrays: ("a", "b") → ["a", "b"]
-                    json_str = re.sub(r'\(([^)]+)\)', r'[\1]', json_str)
-                    workflow_dict = json.loads(json_str)
+                    # ✅ Use ast.literal_eval() instead of json.loads()
+                    # pprint.pformat() generates Python dict syntax (single quotes, True/False/None)
+                    # ast.literal_eval() safely evaluates Python literals without conversion
+                    workflow_dict = ast.literal_eval(workflow_str_clean)
                     
                     # Validate structure with Pydantic + WorkflowIR
                     print(f"[CODE_VERIFICATION] 🔍 Calling validate_workflow_dict() with {len(workflow_dict.get('nodes', []))} nodes...")
@@ -386,7 +383,7 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
                     else:
                         print(f"[CODE_VERIFICATION] ✅ Validation PASSED!")
                 
-                except (json.JSONDecodeError, ValueError):
+                except (SyntaxError, ValueError):
                     pass  # Can't extract dict, fall through to basic error
         except Exception:
             pass  # Pydantic validation failed
@@ -424,7 +421,7 @@ def validate_workflow_structure(python_code: str, session_variables: Optional[di
         import re
         # CRITICAL FIX: Extract ONLY the WORKFLOW dict, stop before "result ="
         # Match: WORKFLOW = {...everything...} but STOP at line starting with "result ="
-        # This prevents json.loads() from choking on "result = WORKFLOW" line
+        # This prevents ast.literal_eval() from choking on "result = WORKFLOW" line
         # Use lazy match with lookahead to stop before \nresult
         workflow_match = re.search(r'WORKFLOW\s*=\s*(\{(?:[^{}]|\{[^{}]*\})*\})', python_code, re.DOTALL)
         if not workflow_match:
@@ -568,15 +565,14 @@ def validate_workflow_structure(python_code: str, session_variables: Optional[di
                     print(f"   - Thresholds: max_rep>=4 OR (parallel_groups AND max_rep>=3) OR (8+ nodes AND max_rep>=3)")
             
             try:
-                # CRITICAL FIX: Clean the extracted string before JSON parsing
+                # CRITICAL FIX: Clean the extracted string before parsing
                 # Remove any trailing "result = WORKFLOW" if present
                 workflow_str_clean = re.sub(r'\s*\nresult\s*=.*$', '', workflow_str, flags=re.DOTALL)
                 
-                # Convert Python syntax to JSON
-                json_str = workflow_str_clean.replace('True', 'true').replace('False', 'false').replace('None', 'null')
-                # Convert Python tuples to JSON arrays: ("a", "b") → ["a", "b"]
-                json_str = re.sub(r'\(([^)]+)\)', r'[\1]', json_str)
-                workflow_dict = json.loads(json_str)
+                # ✅ Use ast.literal_eval() instead of json.loads()
+                # pprint.pformat() generates Python dict syntax (single quotes, True/False/None)
+                # ast.literal_eval() safely evaluates Python literals without conversion
+                workflow_dict = ast.literal_eval(workflow_str_clean)
                 node_count = len(workflow_dict.get('nodes', []))
                 
                 # ========================================================================
@@ -598,7 +594,7 @@ def validate_workflow_structure(python_code: str, session_variables: Optional[di
                 else:
                     print(f"[CODE_VERIFICATION] ✅ Validation PASSED!")
             
-            except (json.JSONDecodeError, ValueError) as e:
+            except (SyntaxError, ValueError) as e:
                 print(f"[CODE_VERIFICATION] ⚠️ Could not parse WORKFLOW dict: {e}")
                 errors.append(f"WORKFLOW dict parse error: {e}")
     except Exception as e:

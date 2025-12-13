@@ -335,6 +335,118 @@ class OpenAIService(CompletionService, EmbeddingService):
             # Handle API error, e.g. retry or log
             raise Exception(f"OpenAI API returned an API Error: {e}")
 
+    def chat_completion_with_function_calling(
+        self,
+        messages: List[ChatMessageType],
+        functions: List[dict],
+        function_call: Optional[dict] = None,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> dict:
+        """
+        Call OpenAI with function calling (non-streaming).
+        
+        🔑 DESIGN: Deterministic function call for workflow IR generation.
+        - Non-streaming only (function calling requires full response)
+        - temperature=0.0 by default (deterministic output)
+        - Validates exactly one tool call (no ambiguity)
+        - Validates JSON before returning
+        
+        Args:
+            messages: Chat messages
+            functions: List of function schemas
+            function_call: {"name": "function_name"} to force a specific function
+            temperature: 0.0 for deterministic output (default)
+            max_tokens: Max tokens to generate
+            **kwargs: Additional parameters
+            
+        Returns:
+            {
+                "function_name": str,
+                "arguments": dict  # Already parsed and validated JSON
+            }
+            
+        Raises:
+            Exception: If no function call, multiple calls, or invalid JSON
+        """
+        import json
+        import openai
+
+        engine = self.config.model
+        if max_tokens is None:
+            max_tokens = self.config.max_tokens
+
+        try:
+            # Preprocess messages (same as regular call)
+            for i, message in enumerate(messages):
+                if (not self.config.support_system_role) and message["role"] == "system":
+                    message["role"] = "user"
+                if self.config.require_alternative_roles:
+                    if i > 0 and message["role"] == "user" and messages[i - 1]["role"] == "user":
+                        messages.insert(
+                            i,
+                            {"role": "assistant", "content": "I get it."},
+                        )
+
+            # Call OpenAI with tools (new API format)
+            response = self.client.chat.completions.create(
+                model=engine,
+                messages=messages,  # type: ignore
+                tools=[{"type": "function", "function": f} for f in functions],
+                tool_choice=(
+                    {"type": "function", "function": function_call}
+                    if function_call
+                    else "auto"
+                ),
+                temperature=temperature,
+                max_tokens=max_tokens,
+                frequency_penalty=self.config.frequency_penalty,
+                presence_penalty=self.config.presence_penalty,
+                stream=False,  # Function calling requires non-streaming
+            )
+
+            # ✅ FIX 1: Validate exactly one tool call
+            message_response = response.choices[0].message
+            tool_calls = message_response.tool_calls or []
+
+            if len(tool_calls) != 1:
+                raise Exception(
+                    f"Expected exactly one function call, got {len(tool_calls)}. "
+                    f"This indicates either OpenAI API change or schema ambiguity."
+                )
+
+            tool_call = tool_calls[0]
+
+            # ✅ FIX 2: Validate JSON before parsing
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as e:
+                raise Exception(
+                    f"Invalid JSON from function call '{tool_call.function.name}': {e}\n"
+                    f"Raw arguments: {tool_call.function.arguments[:200]}"
+                )
+
+            return {
+                "function_name": tool_call.function.name,
+                "arguments": arguments,
+            }
+
+        except openai.APITimeoutError as e:
+            raise Exception(f"OpenAI API request timed out: {e}")
+        except openai.APIConnectionError as e:
+            raise Exception(f"OpenAI API request failed to connect: {e}")
+        except openai.BadRequestError as e:
+            raise Exception(f"OpenAI API request was invalid: {e}")
+        except openai.AuthenticationError as e:
+            raise Exception(f"OpenAI API request was not authorized: {e}")
+        except openai.PermissionDeniedError as e:
+            raise Exception(f"OpenAI API request was not permitted: {e}")
+        except openai.RateLimitError as e:
+            raise Exception(f"OpenAI API request exceeded rate limit: {e}")
+        except openai.APIError as e:
+            raise Exception(f"OpenAI API returned an API Error: {e}")
+
     def get_embeddings(self, strings: List[str]) -> List[List[float]]:
         embedding_results = self.client.embeddings.create(
             input=strings,

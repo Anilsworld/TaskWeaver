@@ -1,5 +1,6 @@
 {
   "_comment": "Config overridden by eclipse_adapter.py from .env",
   "llm.response_format": "json_schema",
-  "code_interpreter.code_verification_on": true
+  "code_interpreter.code_verification_on": true,
+  "code_generator.use_function_calling": true
 }

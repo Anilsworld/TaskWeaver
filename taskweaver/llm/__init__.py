@@ -204,6 +204,46 @@ class LLMApi(object):
             return self._stream_smoother(get_generator)
         return get_generator()
 
+    def chat_completion_with_function_calling(
+        self,
+        messages: List[ChatMessageType],
+        functions: List[dict],
+        function_call: Optional[dict] = None,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        llm_alias: Optional[str] = None,
+        **kwargs: Any,
+    ) -> dict:
+        """
+        Wrapper for function calling (OpenAI only).
+        Delegates to the completion service's chat_completion_with_function_calling method.
+        """
+        if llm_alias is not None and llm_alias != "":
+            if llm_alias in self.ext_llms:
+                completion_service = self.ext_llms[llm_alias]
+            else:
+                raise ValueError(
+                    f"Cannot import extra LLM model {llm_alias}",
+                )
+        else:
+            completion_service = self.completion_service
+        
+        # Check if the service supports function calling
+        if not hasattr(completion_service, 'chat_completion_with_function_calling'):
+            raise AttributeError(
+                f"Service {type(completion_service).__name__} does not support function calling. "
+                "Function calling is only supported for OpenAI services."
+            )
+        
+        return completion_service.chat_completion_with_function_calling(
+            messages,
+            functions,
+            function_call,
+            temperature,
+            max_tokens,
+            **kwargs,
+        )
+
     def _stream_smoother(
         self,
         stream_init: Callable[[], Generator[ChatMessageType, None, None]],

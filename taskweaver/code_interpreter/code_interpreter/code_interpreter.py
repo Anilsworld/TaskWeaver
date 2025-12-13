@@ -136,6 +136,7 @@ class CodeInterpreter(Role, Interpreter):
             memory,
             post_proxy,
             prompt_log_path,
+            **kwargs,  # ✅ Forward kwargs to pass session_var to generator
         )
 
         if post_proxy.post.message is not None and post_proxy.post.message != "":  # type: ignore

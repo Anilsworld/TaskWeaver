@@ -47,9 +47,62 @@ class WorkflowNode(BaseModel):
     form_schema: Optional[Dict[str, Any]] = Field(None, description="Form schema for input nodes")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
     
+    # ✅ Code execution specific (for code_execution type)
+    code: Optional[str] = Field(None, description="Python code to execute")
+    
     class Config:
         # Allow extra fields for forward compatibility
         extra = "allow"
+    
+    @model_validator(mode='before')
+    @classmethod
+    def move_tool_params_to_params_dict(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        AUTO-HEALING: Move top-level tool params into 'params' dict.
+        
+        LLM often puts tool params at top level (adults, arrival_id, etc.) 
+        despite schema saying additionalProperties: false.
+        
+        This validator moves them to the correct location BEFORE validation.
+        """
+        if not isinstance(values, dict):
+            return values
+        
+        # Define structural fields that should stay at top level
+        structural_keys = {
+            'id', 'type', 'tool_id', 'params', 'depends_on', 'description',
+            'app_name', 'parallel_group', 'decision', 'blocking', 'form_schema',
+            'metadata', 'code', 'fields', 'approval_type', 'loop_over', 'iterate_over',
+            'loop_body', 'nodes', 'max_iterations', 'workflow_id', 'inputs'
+        }
+        
+        # Find non-structural keys (likely tool params)
+        top_level_params = {k: v for k, v in values.items() if k not in structural_keys}
+        
+        if top_level_params:
+            # Ensure params dict exists
+            if 'params' not in values:
+                values['params'] = {}
+            elif not isinstance(values['params'], dict):
+                values['params'] = {}
+            
+            # Move top-level params into params dict
+            moved_keys = []
+            for key, value in top_level_params.items():
+                if key not in values['params']:  # Don't overwrite existing params
+                    values['params'][key] = value
+                    moved_keys.append(key)
+            
+            # Remove from top level
+            for key in moved_keys:
+                del values[key]
+            
+            logger.info(
+                f"[PYDANTIC_HEAL] Node '{values.get('id')}': Moved {len(moved_keys)} param(s) "
+                f"from top-level to params dict: {moved_keys}"
+            )
+        
+        return values
     
     @model_validator(mode='after')
     def validate_tool_and_decision(self):

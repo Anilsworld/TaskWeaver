@@ -196,6 +196,7 @@ class Session:
                         self.workspace,
                         f"code_generator_prompt_log_{chat_round.id}_{post.id}.json",
                     ),
+                    session_var=self.session_var,  # ✅ Pass session_var to workers (same as Planner)
                 )
             else:
                 raise Exception(f"Unknown recipient {recipient}")
