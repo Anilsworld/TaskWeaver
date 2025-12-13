@@ -50,7 +50,8 @@ class OpenAIServiceConfig(LLMServiceConfig):
         self.response_format = self.llm_module_config.response_format
 
         # openai specific config
-        self.api_version = self._get_str("api_version", "2024-06-01")
+        # ✅ NO FALLBACK - Must be provided by eclipse_adapter from .env
+        self.api_version = self._get_str("api_version", None, required=False)
         is_azure_ad_login = self.api_type == "azure_ad"
         self.aad_auth_mode = self._get_enum(
             "aad_auth_mode",
@@ -183,11 +184,23 @@ class OpenAIService(CompletionService, EmbeddingService):
             elif self.config.response_format == "json_schema":
                 response_format = {"type": "json_schema"}
                 assert "json_schema" in kwargs, "JSON schema is required for JSON schema response format"
-                response_format["json_schema"] = {
-                    "name": "response",
-                    "strict": True,
-                    "schema": kwargs["json_schema"],
-                }
+                
+                # Fix: Extract inner schema if wrapped (TaskWeaver wraps schema with {"properties":{"response":{...}}})
+                schema = kwargs["json_schema"]
+                if "properties" in schema and "response" in schema.get("properties", {}):
+                    # Use inner "response" schema directly for Azure API
+                    inner_schema = schema["properties"]["response"]
+                    response_format["json_schema"] = {
+                        "name": "response",
+                        "strict": False,  # Azure 2025-01-01-preview compatibility
+                        "schema": inner_schema,
+                    }
+                else:
+                    response_format["json_schema"] = {
+                        "name": "response",
+                        "strict": False,
+                        "schema": schema,
+                    }
             else:
                 response_format = None
 

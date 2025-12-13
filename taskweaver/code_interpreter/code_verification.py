@@ -195,7 +195,10 @@ def code_snippet_verification(
     allowed_variables: Optional[List[str]] = None,
 ) -> Optional[List[str]]:
     if not code_verification_on:
+        print("[CODE_VERIFICATION] ⚠️ Code verification is DISABLED")
         return None
+    
+    print(f"[CODE_VERIFICATION] 🔍 Code verification ENABLED - checking {len(code_snippet)} chars...")
     errors = []
     try:
         magics, python_code, _ = separate_magics_and_code(code_snippet)
@@ -225,6 +228,17 @@ def code_snippet_verification(
         composio_errors = validate_composio_actions(python_code)
         if composio_errors:
             errors.extend(composio_errors)
+        
+        # ✅ WORKFLOW VALIDATION (Pydantic + WorkflowIR)
+        # Validate WORKFLOW dicts even if syntax is correct
+        if "WORKFLOW" in python_code:
+            print("[CODE_VERIFICATION] 🔍 Detected WORKFLOW in code, running validation...")
+            workflow_errors = validate_workflow_structure(python_code)
+            if workflow_errors:
+                print(f"[CODE_VERIFICATION] ❌ WORKFLOW validation failed with {len(workflow_errors)} errors")
+                errors.extend(workflow_errors)
+            else:
+                print("[CODE_VERIFICATION] ✅ WORKFLOW validation passed!")
         
         return errors
     except SyntaxError as e:
@@ -329,7 +343,10 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
             import re
             workflow_match = re.search(r'WORKFLOW\s*=\s*(\{.*\})\s*(?:result\s*=|$)', python_code, re.DOTALL)
             
+            print(f"[CODE_VERIFICATION] WORKFLOW pattern match: {bool(workflow_match)}")
+            
             if workflow_match:
+                print("[CODE_VERIFICATION] 📋 WORKFLOW dict detected! Running Pydantic + WorkflowIR validation...")
                 from taskweaver.code_interpreter.workflow_schema import (
                     validate_workflow_dict,
                     format_workflow_validation_error
@@ -340,11 +357,16 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
                     # Try to extract dict even if Python can't parse it
                     workflow_dict = ast.literal_eval(workflow_str)
                     
-                    # Validate structure with Pydantic
+                    # Validate structure with Pydantic + WorkflowIR
+                    print(f"[CODE_VERIFICATION] 🔍 Calling validate_workflow_dict() with {len(workflow_dict.get('nodes', []))} nodes...")
                     is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_dict)
+                    print(f"[CODE_VERIFICATION] ✅ validate_workflow_dict() returned: is_valid={is_valid}, errors={len(pydantic_errors)}")
                     
                     if not is_valid:
+                        print(f"[CODE_VERIFICATION] ❌ Validation FAILED: {pydantic_errors}")
                         return [format_workflow_validation_error(pydantic_errors, python_code)]
+                    else:
+                        print(f"[CODE_VERIFICATION] ✅ Validation PASSED!")
                 
                 except (SyntaxError, ValueError):
                     pass  # Can't extract dict, fall through to basic error
@@ -362,6 +384,53 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
                 error_line = lines[original_error.lineno - 1]
                 error_msg += f"\n  -> Line {original_error.lineno}: {error_line.strip()}"
         errors.append(error_msg)
+    
+    return errors
+
+
+def validate_workflow_structure(python_code: str) -> List[str]:
+    """
+    Validate WORKFLOW dict structure using Pydantic + WorkflowIR.
+    
+    This runs for ALL WORKFLOW dicts, not just syntax errors.
+    """
+    errors = []
+    try:
+        import re
+        workflow_match = re.search(r'WORKFLOW\s*=\s*(\{.*\})\s*(?:result\s*=|$)', python_code, re.DOTALL)
+        
+        print(f"[CODE_VERIFICATION] WORKFLOW pattern match: {bool(workflow_match)}")
+        
+        if workflow_match:
+            print("[CODE_VERIFICATION] 📋 WORKFLOW dict detected! Running Pydantic + WorkflowIR validation...")
+            from taskweaver.code_interpreter.workflow_schema import (
+                validate_workflow_dict,
+                format_workflow_validation_error
+            )
+            
+            workflow_str = workflow_match.group(1)
+            try:
+                # Extract dict
+                workflow_dict = ast.literal_eval(workflow_str)
+                
+                # Validate structure with Pydantic + WorkflowIR
+                print(f"[CODE_VERIFICATION] 🔍 Calling validate_workflow_dict() with {len(workflow_dict.get('nodes', []))} nodes...")
+                is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_dict)
+                print(f"[CODE_VERIFICATION] ✅ validate_workflow_dict() returned: is_valid={is_valid}, errors={len(pydantic_errors)}")
+                
+                if not is_valid:
+                    print(f"[CODE_VERIFICATION] ❌ Validation FAILED: {pydantic_errors}")
+                    return [format_workflow_validation_error(pydantic_errors, python_code)]
+                else:
+                    print(f"[CODE_VERIFICATION] ✅ Validation PASSED!")
+            
+            except (SyntaxError, ValueError) as e:
+                print(f"[CODE_VERIFICATION] ⚠️ Could not parse WORKFLOW dict: {e}")
+                errors.append(f"WORKFLOW dict parse error: {e}")
+    except Exception as e:
+        print(f"[CODE_VERIFICATION] ⚠️ Workflow validation error: {e}")
+        import logging
+        logging.getLogger(__name__).debug(f"Workflow validation failed: {e}")
     
     return errors
 

@@ -1,7 +1,5 @@
 {
-  "llm.api_base": "https://api.openai.com/v1",
-  "llm.api_key": "",
-  "llm.model": "gpt-4-1106-preview",
-  "llm.response_max_tokens": 32000,
+  "_comment": "Config overridden by eclipse_adapter.py from .env",
+  "llm.response_format": "json_schema",
   "code_interpreter.code_verification_on": true
 }

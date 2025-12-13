@@ -3,10 +3,17 @@ Pydantic-based Workflow Validation
 ===================================
 Fully scalable, adaptive schema validation for WORKFLOW dicts.
 No hardcoding - just update the schema when requirements change.
+
+Integration with WorkflowIR:
+- Pydantic validates schema (types, required fields)
+- WorkflowIR validates DAG logic (cycles, connectivity, data flow)
 """
 from typing import List, Dict, Any, Optional, Union, Literal
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowParams(BaseModel):
@@ -44,22 +51,18 @@ class WorkflowNode(BaseModel):
         # Allow extra fields for forward compatibility
         extra = "allow"
     
-    @validator('tool_id', always=True)
-    def validate_tool_id(cls, v, values):
-        """Validate that agent_with_tools nodes have tool_id."""
-        node_type = values.get('type')
-        if node_type == 'agent_with_tools' and not v:
+    @model_validator(mode='after')
+    def validate_tool_and_decision(self):
+        """Validate that agent_with_tools nodes have tool_id and HITL nodes have decision."""
+        # Validate tool_id for agent_with_tools
+        if self.type == 'agent_with_tools' and not self.tool_id:
             raise ValueError(f"agent_with_tools nodes must have tool_id")
-        return v
-    
-    @validator('decision', always=True)
-    def validate_hitl_decision(cls, v, values):
-        """Validate that HITL nodes have decision field."""
-        node_type = values.get('type')
-        if node_type == 'hitl' and values.get('blocking') and not v:
-            # Only require decision for blocking HITL nodes
+        
+        # Validate decision for blocking HITL nodes
+        if self.type == 'hitl' and self.blocking and not self.decision:
             raise ValueError(f"Blocking HITL nodes must have 'decision' field for conditional routing")
-        return v
+        
+        return self
 
 
 class WorkflowDefinition(BaseModel):
@@ -78,7 +81,8 @@ class WorkflowDefinition(BaseModel):
         # Allow extra fields for forward compatibility
         extra = "allow"
     
-    @validator('sequential_edges', 'parallel_edges', pre=True)
+    @field_validator('sequential_edges', 'parallel_edges', mode='before')
+    @classmethod
     def normalize_edges(cls, v):
         """Normalize edges to list of dicts."""
         if not v:
@@ -94,14 +98,14 @@ class WorkflowDefinition(BaseModel):
                 raise ValueError(f"Invalid edge format: {edge}. Expected tuple (source, target) or dict with 'source' and 'target' keys.")
         return normalized
     
-    @root_validator
-    def validate_edges(cls, values):
-        """Validate that all edges reference existing nodes."""
-        nodes = values.get('nodes', [])
-        node_ids = {node.id for node in nodes}
+    @model_validator(mode='after')
+    def validate_edges_and_dependencies(self):
+        """Validate that all edges and dependencies reference existing nodes."""
+        node_ids = {node.id for node in self.nodes}
         
+        # Validate edges
         for edge_list_name in ['sequential_edges', 'parallel_edges']:
-            edges = values.get(edge_list_name, [])
+            edges = getattr(self, edge_list_name, []) or []
             for edge in edges:
                 if isinstance(edge, dict):
                     source = edge.get('source')
@@ -111,27 +115,63 @@ class WorkflowDefinition(BaseModel):
                     if target not in node_ids:
                         raise ValueError(f"Edge references non-existent node: '{target}'. Available nodes: {', '.join(sorted(node_ids))}")
         
-        return values
-    
-    @root_validator
-    def validate_dependencies(cls, values):
-        """Validate that all depends_on reference existing nodes."""
-        nodes = values.get('nodes', [])
-        node_ids = {node.id for node in nodes}
-        
-        for node in nodes:
+        # Validate dependencies
+        for node in self.nodes:
             for dep in node.depends_on:
                 if dep not in node_ids:
                     raise ValueError(
                         f"Node '{node.id}' depends on non-existent node: '{dep}'. Available nodes: {', '.join(sorted(node_ids))}"
                     )
         
-        return values
+        return self
+    
+    def to_ir(self):
+        """
+        Convert WorkflowDefinition to WorkflowIR for DAG validation.
+        
+        Returns:
+            WorkflowIR instance with cycle detection, edge inference, and topological ordering
+        """
+        from taskweaver.code_interpreter.workflow_ir import WorkflowIR
+        
+        # Convert Pydantic model to dict for WorkflowIR
+        workflow_dict = {
+            'nodes': [
+                {
+                    'id': node.id,
+                    'type': node.type,
+                    'tool_id': node.tool_id,
+                    'app_name': node.app_name,
+                    'params': node.params if isinstance(node.params, dict) else node.params.dict(),
+                    'description': node.description,
+                    'depends_on': node.depends_on,
+                    'parallel_group': node.parallel_group,
+                    'decision': node.decision,
+                    'blocking': node.blocking,
+                    'form_schema': node.form_schema,
+                    'metadata': node.metadata,
+                }
+                for node in self.nodes
+            ],
+            'sequential_edges': self.sequential_edges or [],
+            'parallel_edges': self.parallel_edges or [],
+        }
+        
+        # Copy over any extra fields from original dict
+        for key, value in self.__dict__.items():
+            if key not in ['nodes', 'sequential_edges', 'parallel_edges'] and not key.startswith('_'):
+                workflow_dict[key] = value
+        
+        return WorkflowIR(workflow_dict)
 
 
 def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optional[WorkflowDefinition], List[str]]:
     """
-    Validate WORKFLOW dict using Pydantic.
+    Validate WORKFLOW dict using Pydantic + WorkflowIR.
+    
+    Two-phase validation:
+    1. Pydantic: Schema validation (types, required fields, basic structure)
+    2. WorkflowIR: DAG validation (cycles, connectivity, edge inference, data flow)
     
     Args:
         workflow_dict: The WORKFLOW dictionary to validate
@@ -142,13 +182,12 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
         - workflow_obj: Validated WorkflowDefinition object (None if invalid)
         - error_messages: List of human-readable error messages
     """
+    error_messages = []
+    
+    # Phase 1: Pydantic validation (schema)
     try:
         workflow = WorkflowDefinition(**workflow_dict)
-        return True, workflow, []
     except Exception as e:
-        # Parse Pydantic validation errors into readable messages
-        error_messages = []
-        
         if hasattr(e, 'errors'):
             # Pydantic ValidationError
             for error in e.errors():
@@ -164,10 +203,30 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
                 else:
                     error_messages.append(f"[!] {loc}: {msg}")
         else:
-            # Other errors (e.g., syntax errors caught before Pydantic)
             error_messages.append(f"[!] Validation error: {str(e)}")
         
         return False, None, error_messages
+    
+    # Phase 2: WorkflowIR validation (DAG logic)
+    try:
+        print(f"[WORKFLOW_SCHEMA] 🔍 Starting WorkflowIR validation for {len(workflow.nodes)} nodes...")
+        workflow_ir = workflow.to_ir()
+        edge_count = len(workflow_ir.edges) if hasattr(workflow_ir, 'edges') else 0
+        print(f"[WORKFLOW_SCHEMA] ✅ WorkflowIR validation PASSED: {len(workflow.nodes)} nodes, {edge_count} edges")
+        logger.info(f"✅ WorkflowIR validation passed: {len(workflow.nodes)} nodes, {edge_count} edges")
+    except ValueError as e:
+        # WorkflowIR raises ValueError for cycles or invalid DAG structure
+        print(f"[WORKFLOW_SCHEMA] ❌ WorkflowIR DAG validation FAILED: {str(e)}")
+        error_messages.append(f"[!] Workflow DAG validation failed: {str(e)}")
+        return False, None, error_messages
+    except Exception as e:
+        # Unexpected errors during IR conversion
+        print(f"[WORKFLOW_SCHEMA] ❌ WorkflowIR conversion ERROR: {str(e)}")
+        error_messages.append(f"[!] WorkflowIR conversion failed: {str(e)}")
+        logger.error(f"WorkflowIR conversion error: {e}", exc_info=True)
+        return False, None, error_messages
+    
+    return True, workflow, []
 
 
 def format_workflow_validation_error(errors: List[str], code: str) -> str:
@@ -188,7 +247,7 @@ def format_workflow_validation_error(errors: List[str], code: str) -> str:
 {error_text}
 
 **Common Fixes:**
-1. **Bracket matching**: Check for ]}} (wrong) vs ]}, (correct)
+1. **Bracket matching**: Check for ]{{}}}} (wrong) vs ]{{}}, (correct)
 2. **Node references**: All node IDs in edges/depends_on must exist in nodes list
 3. **Tool requirements**: agent_with_tools nodes MUST have tool_id field
 4. **HITL requirements**: Blocking HITL nodes MUST have decision field
