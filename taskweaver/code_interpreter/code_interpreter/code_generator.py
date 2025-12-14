@@ -657,28 +657,11 @@ class CodeGenerator(Role):
                     "No plan provided"
                 )
                 
-                # ✅ ADD YAML EXAMPLES to show form vs hitl distinction
-                example_context = self._format_examples_for_function_calling()
-                
-                # ✅ ADD YAML EXAMPLES from loaded example files
+                # ✅ SKIP EXAMPLES for function calling - schema is already very detailed
+                # Loading 4 examples adds ~10K tokens and causes function calling issues
+                # The JSON schema provides all the information the LLM needs
+                example_context = ""
                 yaml_examples = ""
-                if hasattr(self, 'examples') and self.examples:
-                    self.logger.info(f"[PROMPT_BUILD] Including {len(self.examples)} YAML examples in prompt")
-                    for idx, example in enumerate(self.examples):
-                        if not example.enabled:
-                            continue
-                        for round in example.rounds[:2]:  # Include first 2 rounds per example
-                            # Find CodeInterpreter's reply with the WORKFLOW
-                            for post in round.post_list:
-                                if post.send_from == "CodeInterpreter":
-                                    # Extract WORKFLOW from reply_content attachment
-                                    for attachment in post.attachment_list:
-                                        if attachment.type.value == "reply_content" and "WORKFLOW" in attachment.content:
-                                            yaml_examples += f"\n\n📚 REAL EXAMPLE from training:\nUser: {round.user_query}\nWorkflow:\n{attachment.content[:500]}...\n"
-                                            break
-                                    break
-                else:
-                    self.logger.warning(f"[PROMPT_BUILD] ⚠️  No YAML examples available!")
                 
                 minimal_prompt = [
                     {
