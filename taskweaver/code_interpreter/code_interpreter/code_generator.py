@@ -499,73 +499,7 @@ class CodeGenerator(Role):
             self.logger.warning(f"[EXAMPLE_LOADING] ⚠️  NO EXAMPLES LOADED!")
 
         planning_enrichments = memory.get_shared_memory_entries(entry_type="plan")
-
-        # =====================================================================
-        # COMPOSIO ACTION INJECTION (arch-31)
-        # Inject relevant Composio actions into prompt so LLM knows exact action IDs
-        # This prevents hallucination of action names like "COMPOSIO_SEARCH_TOOLS"
-        # =====================================================================
         enrichment_contents = [pe.content for pe in planning_enrichments]
-        try:
-            # ✅ SCALABLE FIX: Skip expensive action selection on retry rounds
-            # When code execution fails, CodeInterpreter sends the error message back for retry
-            # We don't need to re-search for actions - reuse the ones from first attempt
-            is_retry_round = any(
-                indicator in query for indicator in [
-                    "execution failed",
-                    "The following python code has been executed:",
-                    "SyntaxError:",
-                    "Syntax error:",  # TaskWeaver format (lowercase)
-                    "IndentationError:",
-                    "NameError:",
-                    "TypeError:",
-                    "ValueError:",
-                    "KeyError:",
-                    "AttributeError:",
-                    "Cell In[",  # Jupyter error traceback
-                ]
-            )
-            
-            if is_retry_round:
-                self.logger.info(
-                    "⏭️ [CODE_GENERATOR] Retry round detected - skipping action selection "
-                    "(reusing tools from first attempt)"
-                )
-            else:
-                # Dynamic import - same pattern as code_verification.py
-                from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions
-                
-                # ✅ SCALABLE: action_matcher.py now handles ALL app detection semantically
-                # No more keyword matching or hardcoded app lists
-                # The select_composio_actions() function will auto-detect apps using pgvector embeddings
-                
-                # ✅ ADAPTIVE APPROACH:
-                # - query: Step-specific intent from Planner ("Fetch emails from Outlook")
-                # - context: Full user request for domain/app discovery ("read emails... send responses")
-                # - adaptive_top_k=True: Auto-scales based on detected apps
-                #
-                # ✅ COMPLETE WORKFLOW INJECTION:
-                # For multi-platform workflows (3+ apps), the action selector will set intent="both"
-                # This ensures BOTH read (fetch/list) AND write (send/reply) actions are available
-                # Get session ID from environment (set by eclipse_adapter.py)
-                import os
-                session_id = os.environ.get('TASKWEAVER_SESSION_ID', None)
-                
-                composio_actions = select_composio_actions(
-                    user_query=query,  # Step query - action selector detects multi-platform and sets intent="both"
-                    context=original_user_query,  # Full query for domain/app discovery
-                    top_k=10,  # Balanced - enough for both read and write actions
-                    adaptive_top_k=True,  # Enable automatic scaling based on detected apps
-                    session_id=session_id  # ✅ Enable batch API caching per session
-                )
-                if composio_actions:
-                    enrichment_contents.append(composio_actions)
-                    self.logger.info(f"[CODE_GENERATOR] Injected Composio actions: {len(composio_actions.splitlines())} lines")
-        except ImportError:
-            # Composio selector not available, skip silently
-            pass
-        except Exception as e:
-            self.logger.debug(f"[CODE_GENERATOR] Composio action injection skipped: {e}")
 
         # =====================================================================
         # 🔥 WORKFLOW GENERATION MODE DETECTION
@@ -590,214 +524,232 @@ class CodeGenerator(Role):
         if is_workflow_generation and self.config.use_function_calling:
             self.logger.info("[CODE_GENERATOR] 🚀 Using function calling for workflow generation")
             
-            # ✅ TRACEBACK: Log system prompt details
-            self.logger.info(f"[PROMPT_TRACE] Instruction template length: {len(self.instruction_template)} chars")
-            if 'multi_tool' in self.instruction_template.lower():
-                self.logger.warning(f"[PROMPT_TRACE] ⚠️  'multi_tool' found in system prompt!")
-            else:
-                self.logger.info(f"[PROMPT_TRACE] ✅ 'multi_tool' NOT in system prompt")
+            # ✅ NEW: Get init_plan from Planner's response
+            init_plan_text = None
+            if rounds and rounds[-1].post_list:
+                for post in rounds[-1].post_list:
+                    if post.send_from == "Planner":
+                        init_plan_attachments = post.get_attachment(type=AttachmentType.init_plan)
+                        if init_plan_attachments:
+                            init_plan_text = init_plan_attachments[0].content
+                            self.logger.info(f"[CODE_GENERATOR] ✅ Found init_plan: {len(init_plan_text)} chars")
+                            break
             
-            # Get filtered Composio actions
-            composio_actions = next(
-                (e for e in enrichment_contents if "Available Composio Actions" in e),
-                ""
-            )
-            tool_ids = self._extract_tool_ids_from_actions(composio_actions)
-            
-            if not tool_ids:
-                self.logger.error(
-                    "[CODE_GENERATOR] ❌ No tool IDs found! Cannot generate workflow without tools."
-                )
+            if not init_plan_text:
+                self.logger.error("[CODE_GENERATOR] ❌ No init_plan found in Planner's response")
                 post_proxy.update_attachment(
-                    "Cannot generate workflow: No matching tools found for your request. "
-                    "Please ensure you have connected the required integrations or rephrase your request.",
+                    "Cannot generate workflow: No plan available from Planner.",
                     AttachmentType.revise_message
                 )
                 post_proxy.update_send_to("User")
                 return post_proxy.end()
-            else:
-                # Build function schema with filtered enum
-                function_schema = self._build_workflow_function_schema(tool_ids)
+            
+            # ✅ NEW: Get tools organized by steps (with pre-assigned tool_id)
+            try:
+                # Import from plugins directory
+                import sys
+                import os
+                plugins_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'project', 'plugins')
+                if plugins_dir not in sys.path:
+                    sys.path.insert(0, plugins_dir)
                 
-                # ✅ TRACEBACK: Log what schema contains
-                self.logger.info(f"[SCHEMA_TRACE] Built schema with {len(tool_ids)} tools")
-                # Check if schema contains parallel type
-                try:
-                    # json is already imported at top of file
-                    # The schema structure from workflow_schema_builder
-                    self.logger.info(f"[SCHEMA_TRACE] Schema keys: {list(function_schema.keys())}")
-                    
-                    # Navigate to node schemas
-                    params = function_schema.get('parameters', {})
-                    workflow_prop = params.get('properties', {}).get('workflow', {})
-                    nodes_prop = workflow_prop.get('properties', {}).get('nodes', {})
-                    node_items = nodes_prop.get('items', {})
-                    node_schemas = node_items.get('oneOf', [])
-                    
-                    self.logger.info(f"[SCHEMA_TRACE] Found {len(node_schemas)} node schema variants")
-                    
-                    # Extract node types
-                    node_types = []
-                    for schema in node_schemas:
-                        if 'properties' in schema and 'type' in schema['properties']:
-                            type_enum = schema['properties']['type'].get('enum', [])
-                            if type_enum:
-                                node_types.extend(type_enum)
-                    
-                    self.logger.info(f"[SCHEMA_TRACE] Node types in schema: {node_types}")
-                    if 'parallel' in node_types:
-                        self.logger.info(f"[SCHEMA_TRACE] ✅ 'parallel' type IS in schema")
-                    else:
-                        self.logger.warning(f"[SCHEMA_TRACE] ⚠️  'parallel' type NOT in schema!")
-                    
-                    # Log first 500 chars of schema for debugging
-                    schema_str = json.dumps(function_schema, indent=2)
-                    self.logger.info(f"[SCHEMA_TRACE] Schema preview (first 800 chars):\n{schema_str[:800]}...")
-                except Exception as e:
-                    self.logger.error(f"[SCHEMA_TRACE] Error inspecting schema: {e}", exc_info=True)
+                from composio_action_selector import get_tools_by_steps
                 
-                # ✅ FIX 6: MINIMAL prompt (let schema do enforcement)
-                # Don't reuse compose_prompt() - it's too heavy with JSON schema examples
-                plan = next(
-                    (e for e in enrichment_contents if "Plan" in e or "plan" in e.lower()),
-                    "No plan provided"
+                session_id = os.environ.get('TASKWEAVER_SESSION_ID', None)
+                
+                self.logger.info(f"[CODE_GENERATOR] Fetching tools by steps (session: {session_id})")
+                
+                # Get structured steps with pre-assigned tools
+                steps_with_tools = get_tools_by_steps(
+                    init_plan_text=init_plan_text,
+                    session_id=session_id,
+                    context=original_user_query,
+                    top_k=10  # Top 10 tools per step
                 )
                 
-                # ✅ ADD YAML EXAMPLES to show form vs hitl distinction
-                example_context = self._format_examples_for_function_calling()
-                
-                # ✅ ADD YAML EXAMPLES from loaded example files
-                yaml_examples = ""
-                if hasattr(self, 'examples') and self.examples:
-                    self.logger.info(f"[PROMPT_BUILD] Including {len(self.examples)} YAML examples in prompt")
-                    for idx, example in enumerate(self.examples):
-                        if not example.enabled:
-                            continue
-                        for round in example.rounds[:2]:  # Include first 2 rounds per example
-                            # Find CodeInterpreter's reply with the WORKFLOW
-                            for post in round.post_list:
-                                if post.send_from == "CodeInterpreter":
-                                    # Extract WORKFLOW from reply_content attachment
-                                    for attachment in post.attachment_list:
-                                        if attachment.type.value == "reply_content" and "WORKFLOW" in attachment.content:
-                                            yaml_examples += f"\n\n📚 REAL EXAMPLE from training:\nUser: {round.user_query}\nWorkflow:\n{attachment.content[:500]}...\n"
-                                            break
-                                    break
-                else:
-                    self.logger.warning(f"[PROMPT_BUILD] ⚠️  No YAML examples available!")
-                
-                minimal_prompt = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a workflow compiler. Generate workflows via function calls ONLY. "
-                            "Rules:\n"
-                            "- Use ONLY tool_id values from the Available Composio Actions list\n"
-                            "- All placeholders MUST use ${{...}} syntax\n"
-                            "- Node types are mutually exclusive\n"
-                            "- agent_with_tools REQUIRES tool_id\n"
-                            "- agent_only, form, hitl do NOT have tool_id\n\n"
-                            "**PARALLEL EXECUTION:**\n"
-                            "- For SIMULTANEOUS tasks, use type='parallel' with parallel_nodes list\n"
-                            "- Example: {{'id': 'search_all', 'type': 'parallel', 'parallel_nodes': ['search_a', 'search_b', 'search_c']}}\n"
-                            "- Then define each child: {{'id': 'search_a', 'type': 'agent_with_tools', ...}}\n"
-                            "- Edges connect to PARENT: ('start', 'search_all'), ('search_all', 'process_results')\n\n"
-                            f"{example_context}\n"
-                            f"{yaml_examples}"
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Plan:\n{plan}\n\n"
-                            f"{composio_actions}\n\n"
-                            f"Generate complete workflow for: {original_user_query}"
-                        )
-                    }
-                ]
-                
-                self.logger.info(f"[PROMPT_BUILD] Final prompt length: {len(minimal_prompt[0]['content'])} chars (system) + {len(minimal_prompt[1]['content'])} chars (user)")
-                
-                # ✅ DEBUG: Log if parallel is mentioned in prompt
-                full_prompt_text = minimal_prompt[0]['content'] + minimal_prompt[1]['content']
-                if 'parallel' in full_prompt_text:
-                    parallel_count = full_prompt_text.count('parallel')
-                    self.logger.info(f"[PROMPT_BUILD] ✅ 'parallel' mentioned {parallel_count} times in prompt")
-                if 'multi_tool' in full_prompt_text.lower():
-                    self.logger.warning(f"[PROMPT_BUILD] ⚠️  'multi_tool' found in final prompt! (checking context...)")
-                    # Log context around multi_tool
-                    idx = full_prompt_text.lower().find('multi_tool')
-                    context = full_prompt_text[max(0, idx-100):idx+100]
-                    self.logger.warning(f"[PROMPT_BUILD] Context: ...{context}...")
-                
-                # Call function calling API
-                try:
-                    result = self.llm_api.chat_completion_with_function_calling(
-                        messages=minimal_prompt,
-                        functions=[function_schema],
-                        function_call={"name": "create_workflow_ir"},
-                        temperature=0.0
-                    )
-                    
-                    # Extract workflow JSON
-                    workflow_json = result["arguments"]["workflow"]
-                    self.logger.info(
-                        f"[FUNCTION_CALLING] Got workflow: "
-                        f"{len(workflow_json.get('nodes', []))} nodes, "
-                        f"{len(workflow_json.get('edges', []))} edges"
-                    )
-                    
-                    # Debug: Log actual workflow JSON to see placeholder formats
-                    # json is already imported at top of file
-                    self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
-                    
-                    # Step 3: Pydantic structural validation (node types, edges, DAG, placeholders)
-                    from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
-                    # TODO: Load tool_cache from composio_schemas_cache.json for deep placeholder validation
-                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_json, tool_cache=None)
-                    
-                    # ✅ workflow_json now has complete edges from WorkflowIR (including auto-added parallel edges)
-                    self.logger.info(f"[FUNCTION_CALLING] After validation: {len(workflow_json.get('edges', []))} complete edges")
-                    
-                    if not is_valid:
-                        self.logger.error(f"[FUNCTION_CALLING] Pydantic validation failed: {pydantic_errors}")
-                        # Safe node logging (handles malformed nodes that might be strings)
-                        try:
-                            node_info = [f"{n.get('id', '?')}:{n.get('type', '?')}" if isinstance(n, dict) else f"MALFORMED:{type(n).__name__}" for n in workflow_json.get('nodes', [])]
-                            self.logger.error(f"[FUNCTION_CALLING] Failed workflow nodes: {node_info}")
-                        except Exception as e:
-                            self.logger.error(f"[FUNCTION_CALLING] Could not log node info: {e}")
-                        
-                        post_proxy.update_attachment(
-                            "Generated workflow has structural errors. Please simplify your request.",
-                            AttachmentType.revise_message
-                        )
-                        post_proxy.update_send_to("User")
-                        return post_proxy.end()
-                    
-                    # Convert to Python code format
-                    generated_code = self._convert_workflow_json_to_python(workflow_json)
-                    
-                    # Update post proxy with generated code
-                    post_proxy.update_attachment("python", AttachmentType.reply_type)
-                    post_proxy.update_attachment(generated_code, AttachmentType.reply_content)
-                    post_proxy.update_send_to("Planner")
-                    
-                    # ✅ Early return - skip regular path
-                    if self.config.enable_auto_plugin_selection:
-                        self.selected_plugin_pool.filter_unused_plugins(code=generated_code)
-                    
-                    return post_proxy.end()
-                    
-                except Exception as e:
-                    self.logger.error(f"[FUNCTION_CALLING] Fatal error during workflow generation: {e}", exc_info=True)
-                    # ❌ NO FALLBACK - Function calling should be deterministic
+                if not steps_with_tools:
+                    self.logger.error("[CODE_GENERATOR] ❌ No tools retrieved from batch API")
                     post_proxy.update_attachment(
-                        f"Workflow generation failed due to internal error. Please try rephrasing your request or contact support. Error: {str(e)}",
+                        "Cannot generate workflow: No matching tools found for your request.",
                         AttachmentType.revise_message
                     )
                     post_proxy.update_send_to("User")
                     return post_proxy.end()
+                
+                self.logger.info(f"[CODE_GENERATOR] ✅ Got {len(steps_with_tools)} steps with tools")
+                
+                # Log each step's tool assignment
+                for step_id, step_data in steps_with_tools.items():
+                    self.logger.info(
+                        f"[CODE_GENERATOR] Step {step_id}: {step_data['step_description'][:50]}... "
+                        f"→ {step_data['primary_tool_id']} ({step_data['tool_count']} alternatives)"
+                    )
+                
+                # Collect all unique tool IDs for function schema
+                all_tool_ids = []
+                for step_data in steps_with_tools.values():
+                    # Add primary tool
+                    if step_data.get('primary_tool_id'):
+                        if step_data['primary_tool_id'] not in all_tool_ids:
+                            all_tool_ids.append(step_data['primary_tool_id'])
+                    
+                    # Add top 3 alternatives as fallback options
+                    for tool in step_data.get('tools', [])[:3]:
+                        if tool['action_id'] not in all_tool_ids:
+                            all_tool_ids.append(tool['action_id'])
+                
+                self.logger.info(f"[CODE_GENERATOR] Total unique tool IDs: {len(all_tool_ids)}")
+                
+                if not all_tool_ids:
+                    self.logger.error("[CODE_GENERATOR] ❌ No tool IDs extracted")
+                    post_proxy.update_attachment(
+                        "Cannot generate workflow: No valid tool IDs found.",
+                        AttachmentType.revise_message
+                    )
+                    post_proxy.update_send_to("User")
+                    return post_proxy.end()
+                
+            except Exception as e:
+                self.logger.error(f"[CODE_GENERATOR] ❌ Failed to get tools by steps: {e}", exc_info=True)
+                post_proxy.update_attachment(
+                    f"Cannot generate workflow: Tool fetching failed - {str(e)}",
+                    AttachmentType.revise_message
+                )
+                post_proxy.update_send_to("User")
+                return post_proxy.end()
+            
+            # Build function schema with all tool IDs
+            function_schema = self._build_workflow_function_schema(all_tool_ids)
+            
+            # Build step-tool mapping for prompt (NEW FEATURE)
+            step_tool_mapping = "\n".join([
+                f"Step {step_id}: {data['step_description'][:70]}...\n  → PRIMARY TOOL: {data['primary_tool_id']}\n  → Alternatives: {', '.join([t['action_id'] for t in data.get('tools', [])[:3]])}"
+                for step_id, data in steps_with_tools.items()
+                if data.get('primary_tool_id')
+            ])
+            
+            # Format composio actions for prompt (old feature)
+            composio_actions = f"Available Composio Actions:\n" + "\n".join([f"- {tool_id}" for tool_id in all_tool_ids])
+            
+            # Get example context (old feature)
+            example_context = self._format_examples_for_function_calling()
+            
+            # Get YAML examples (old feature)
+            yaml_examples = ""
+            if hasattr(self, 'examples') and self.examples:
+                for idx, example in enumerate(self.examples):
+                    if not example.enabled:
+                        continue
+                    for round in example.rounds:
+                        for post in round.post_list:
+                            for attachment in post.attachment_list:
+                                if attachment.type.value == "reply_content" and "WORKFLOW" in attachment.content:
+                                    yaml_examples += f"\n\n📚 REAL EXAMPLE from training:\nUser: {round.user_query}\nWorkflow:\n{attachment.content[:500]}...\n"
+                                    break
+                            break
+            
+            self.logger.info(f"[SCHEMA_TRACE] Built schema with {len(all_tool_ids)} tools")
+            # Build prompt (restored old structure + new step-tool mapping)
+            minimal_prompt = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a workflow compiler. Generate workflows via function calls ONLY. "
+                        "Rules:\n"
+                        "- Use ONLY tool_id values from the Available Composio Actions list\n"
+                        "- All placeholders MUST use ${{...}} syntax\n"
+                        "- Node types are mutually exclusive\n"
+                        "- agent_with_tools REQUIRES tool_id\n"
+                        "- agent_only, form, hitl do NOT have tool_id\n\n"
+                        "**PARALLEL EXECUTION:**\n"
+                        "- For SIMULTANEOUS tasks, use type='parallel' with parallel_nodes list\n"
+                        "- Example: {{'id': 'search_all', 'type': 'parallel', 'parallel_nodes': ['search_a', 'search_b', 'search_c']}}\n"
+                        "- Then define each child: {{'id': 'search_a', 'type': 'agent_with_tools', ...}}\n"
+                        "- Edges connect to PARENT: ('start', 'search_all'), ('search_all', 'process_results')\n\n"
+                        "✅ TOOLS ARE PRE-ASSIGNED TO EACH STEP:\n\n"
+                        f"{step_tool_mapping}\n\n"
+                        f"{example_context}\n"
+                        f"{yaml_examples}"
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Plan:\n{init_plan_text}\n\n"
+                        f"{composio_actions}\n\n"
+                        f"Generate complete workflow for: {original_user_query}"
+                    )
+                }
+            ]
+            
+            self.logger.info(f"[PROMPT_BUILD] Final prompt length: {len(minimal_prompt[0]['content'])} chars (system) + {len(minimal_prompt[1]['content'])} chars (user)")
+            
+            # Call function calling API
+            try:
+                result = self.llm_api.chat_completion_with_function_calling(
+                    messages=minimal_prompt,
+                    functions=[function_schema],
+                    function_call={"name": "create_workflow_ir"},
+                    temperature=0.0
+                )
+                
+                # Extract workflow JSON
+                workflow_json = result["arguments"]["workflow"]
+                self.logger.info(
+                    f"[FUNCTION_CALLING] Got workflow: "
+                    f"{len(workflow_json.get('nodes', []))} nodes, "
+                    f"{len(workflow_json.get('edges', []))} edges"
+                )
+                
+                # Debug: Log actual workflow JSON to see placeholder formats
+                self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
+                
+                # Step 3: Pydantic structural validation (node types, edges, DAG, placeholders)
+                from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
+                is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_json, tool_cache=None)
+                
+                # ✅ workflow_json now has complete edges from WorkflowIR (including auto-added parallel edges)
+                self.logger.info(f"[FUNCTION_CALLING] After validation: {len(workflow_json.get('edges', []))} complete edges")
+                
+                if not is_valid:
+                    self.logger.error(f"[FUNCTION_CALLING] Pydantic validation failed: {pydantic_errors}")
+                    # Safe node logging (handles malformed nodes that might be strings)
+                    try:
+                        node_info = [f"{n.get('id', '?')}:{n.get('type', '?')}" if isinstance(n, dict) else f"MALFORMED:{type(n).__name__}" for n in workflow_json.get('nodes', [])]
+                        self.logger.error(f"[FUNCTION_CALLING] Failed workflow nodes: {node_info}")
+                    except Exception as e:
+                        self.logger.error(f"[FUNCTION_CALLING] Could not log node info: {e}")
+                    
+                    post_proxy.update_attachment(
+                        "Generated workflow has structural errors. Please simplify your request.",
+                        AttachmentType.revise_message
+                    )
+                    post_proxy.update_send_to("User")
+                    return post_proxy.end()
+                
+                # Convert to Python code format
+                generated_code = self._convert_workflow_json_to_python(workflow_json)
+                
+                # Update post proxy with generated code
+                post_proxy.update_attachment("python", AttachmentType.reply_type)
+                post_proxy.update_attachment(generated_code, AttachmentType.reply_content)
+                post_proxy.update_send_to("Planner")
+                
+                # ✅ Early return - skip regular path
+                if self.config.enable_auto_plugin_selection:
+                    self.selected_plugin_pool.filter_unused_plugins(code=generated_code)
+                
+                return post_proxy.end()
+                
+            except Exception as e:
+                self.logger.error(f"[FUNCTION_CALLING] Fatal error during workflow generation: {e}", exc_info=True)
+                # ❌ NO FALLBACK - Function calling should be deterministic
+                post_proxy.update_attachment(
+                    f"Workflow generation failed due to internal error. Please try rephrasing your request or contact support. Error: {str(e)}",
+                    AttachmentType.revise_message
+                )
+                post_proxy.update_send_to("User")
+                return post_proxy.end()
         
         # =====================================================================
         # ❌ REGULAR GENERATION REMOVED
