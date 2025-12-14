@@ -275,17 +275,13 @@ class AIBatchSearch:
             index = result_data.get('index', 0)
             use_case = result_data.get('use_case', '')
             
-            # Try multiple possible field names for tools (API might have changed)
-            # ✅ UPDATED: Composio changed from 'main_tool_slugs' to 'primary_tool_slugs'
-            main_tool_slugs = (
-                result_data.get('primary_tool_slugs', []) or  # ← NEW: Current Composio API
-                result_data.get('main_tool_slugs', []) or     # ← OLD: Legacy support
-                result_data.get('tools', []) or
-                result_data.get('tool_ids', []) or
-                result_data.get('actions', []) or
-                result_data.get('tool_slugs', []) or
-                []
-            )
+            # ✅ SIMPLIFIED: Use ONE variable name - tool_slugs
+            # Composio returns tools in TWO fields: primary (main task) + related (complementary)
+            primary_tools = result_data.get('primary_tool_slugs', []) or result_data.get('main_tool_slugs', []) or []
+            related_tools = result_data.get('related_tool_slugs', []) or []
+            
+            # Merge both into single list
+            tool_slugs = list(primary_tools) + list(related_tools)
             
             validated_plan = result_data.get('validated_plan', [])
             pitfalls = result_data.get('pitfalls', [])
@@ -295,28 +291,25 @@ class AIBatchSearch:
             
             logger.info(
                 f"  📋 Sub-task {index}: {use_case}\n"
-                f"     Tools: {len(main_tool_slugs)}, "
+                f"     Tools: {len(tool_slugs)}, "
                 f"Difficulty: {difficulty}, "
                 f"Pitfalls: {len(pitfalls)}"
             )
             
             # DEBUG: Log what tools Composio actually returned
-            if main_tool_slugs:
-                logger.info(f"  🔧 [DEBUG] Composio returned tools: {main_tool_slugs}")
+            if tool_slugs:
+                logger.info(f"  🔧 [DEBUG] Composio returned tools: {tool_slugs}")
             
             # Get tools for this sub-task
             # ✅ TRUST COMPOSIO'S ORDERING: Use ALL tools in the order Composio provides
             # Composio already validated the plan and determined the correct execution sequence!
             sub_task_tools = []
             
-            # Get related tools as fallback
-            related_tool_slugs = result_data.get('related_tool_slugs', [])
-            
             # ✅ NEW APPROACH: Preserve ALL tools in Composio's validated order
-            if main_tool_slugs and len(main_tool_slugs) > 0:
-                logger.info(f"  📦 [ORDER] Processing {len(main_tool_slugs)} tools in Composio's sequence...")
+            if tool_slugs:
+                logger.info(f"  📦 [ORDER] Processing {len(tool_slugs)} tools in Composio's sequence...")
                 
-                for tool_index, tool_slug in enumerate(main_tool_slugs, 1):
+                for tool_index, tool_slug in enumerate(tool_slugs, 1):
                     if tool_slug in tool_schemas:
                         schema = tool_schemas[tool_slug]
                         
@@ -339,7 +332,7 @@ class AIBatchSearch:
                     else:
                         logger.warning(f"⚠️ [PARSE] Tool schema not found for: {tool_slug}")
             else:
-                logger.warning(f"⚠️ [PARSE] No tools found for: {use_case}")
+                logger.warning(f"⚠️ [PARSE] No tools returned for: {use_case}")
             
             sub_task_results.append(SubTaskResult(
                 index=index,

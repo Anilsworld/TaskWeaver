@@ -5,7 +5,7 @@ description: >-
   🔁 USE LOOPS when user says "fetch from A, B, C" or "send to X, Y, Z"
   - Same operation repeated across multiple items
   - All items use THE SAME tool_id
-  - Example: "Read messages from Gmail, Outlook, Slack, Teams"
+  - Example: "Send notifications to Alice, Bob, Carol, David"
     ✅ USE: loops (1500 tokens) vs ❌ 4 separate nodes (6000 tokens)
   
   ⚡ LOOP BENEFITS:
@@ -18,39 +18,39 @@ description: >-
   
   📝 ALTERNATIVE SIMPLE EXAMPLES:
   1. "Get my last 3 Slack messages and reply to each" → Loop over messages, reply to each
-  2. "Search for flights to Paris, London, Tokyo and save to spreadsheet" → Loop searches, aggregate results
-  3. "Invite users alice@email.com, bob@email.com, carol@email.com to meeting" → Loop over emails, send invites
+  2. "Fetch repository info from GitHub projects A, B, C and create report" → Loop searches, aggregate results
+  3. "Send invites to alice@email.com, bob@email.com, carol@email.com" → Loop over emails, send invites
 
 rounds:
-  - user_query: Create a workflow to search for flights to Paris, London, and Tokyo, then create a spreadsheet with all the results.
+  - user_query: Create a workflow to fetch repository information for multiple GitHub projects, then create a spreadsheet with all the results.
     state: finished
     post_list:
-      - message: Search for flights to Paris, London, and Tokyo, then create a spreadsheet with all the results.
+      - message: Fetch repository information for multiple GitHub projects, then create a spreadsheet with all the results.
         send_from: Planner
         send_to: CodeInterpreter
         attachment_list: []
       
-      - message: I've created an optimized workflow using LOOP pattern to handle 3 destinations with minimal tokens.
+      - message: I've created an optimized workflow using LOOP pattern to handle multiple repositories with minimal tokens.
         send_from: CodeInterpreter
         send_to: Planner
         attachment_list:
           - type: thought
             content: |-
               🔍 COMPLEXITY ANALYSIS DETECTED:
-              - Operation: "search flights" (same action repeated)
-              - Destinations: Paris, London, Tokyo (3 items)
-              - Tool: FLIGHT_SEARCH (same tool_id for all destinations)
+              - Operation: "fetch repository info" (same action repeated)
+              - Repositories: 3 projects (3 items)
+              - Tool: GITHUB_GET_REPOSITORY (same tool_id for all repos)
               
               ✅ DECISION: USE LOOP PATTERN
-              - WITHOUT loop: 3 search nodes = 3 nodes × 800 tokens = 2400 tokens
+              - WITHOUT loop: 3 fetch nodes = 3 nodes × 800 tokens = 2400 tokens
               - WITH loop: 1 loop definition + 2 other nodes = 3 items × 400 tokens = 1200 tokens
               - SAVINGS: 1200 tokens (50% reduction!)
               
               📋 WORKFLOW STRUCTURE:
-              1. collect_destinations: Form to get list of destinations from user
-              2. search_flights_loop: Loop over destinations, search for each
+              1. collect_repositories: Form to get list of repository names from user
+              2. fetch_repo_loop: Loop over repositories, fetch info for each
               3. create_spreadsheet: Create spreadsheet with results
-              4. update_spreadsheet: Add all flight results to spreadsheet
+              4. update_spreadsheet: Add all repository data to spreadsheet
               
               🔁 LOOP SYNTAX:
               loops: [{
@@ -64,7 +64,7 @@ rounds:
               📦 LOOP OUTPUT AGGREGATION:
               - Loop results are automatically collected in loop_aggregated_outputs
               - Reference aggregated results: ${{from_loop:loop_id.field_name}}
-              - Example: ${{from_loop:search_flights_loop.results}} gets ALL results from loop
+              - Example: ${{from_loop:fetch_repo_loop.results}} gets ALL results from loop
               - This is different from ${{from_step:...}} which references individual node outputs
               - Use loop aggregation to collect data from ALL iterations for downstream processing
           
@@ -75,14 +75,18 @@ rounds:
             content: |-
               WORKFLOW = {
                 "nodes": [
-                  {"id": "collect_destinations", "type": "form", "form_id": "destination_form", "title": "Select Destinations", "fields": [{"name": "destinations", "label": "Cities to search flights for", "type": "multiselect", "options": ["Paris", "London", "Tokyo"], "required": True}], "description": "Collect list of destinations"},
-                  {"id": "search_flights_loop", "type": "loop", "loop_over": "${{from_step:collect_destinations.destinations}}", "nodes": [
-                    {"id": "search_flight", "type": "agent_with_tools", "tool_id": "FLIGHT_SEARCH", "app_name": "skyscanner", "params": {"destination": "${{loop_item}}", "departure_date": "2024-06-01", "return_date": "2024-06-08"}, "description": "Search flights to destination"}
-                  ], "max_iterations": 3, "description": "Search flights for each destination"},
-                  {"id": "create_spreadsheet", "type": "agent_with_tools", "tool_id": "GOOGLESHEETS_CREATE_GOOGLE_SHEET1", "app_name": "googlesheets", "params": {"title": "Flight Search Results"}, "depends_on": ["search_flights_loop"], "description": "Create spreadsheet for results"},
-                  {"id": "update_spreadsheet", "type": "agent_with_tools", "tool_id": "GOOGLESHEETS_BATCH_UPDATE", "app_name": "googlesheets", "params": {"spreadsheet_id": "${{from_step:create_spreadsheet.spreadsheetId}}", "sheet_name": "Sheet1", "values": [["Destination", "Price", "Airline"], "${{from_loop:search_flights_loop.results}}"]}, "depends_on": ["create_spreadsheet"], "description": "Add all flight results to spreadsheet"}
+                  {"id": "collect_repositories", "type": "form", "form_id": "repo_form", "title": "Select Repositories", "fields": [{"name": "repositories", "label": "Repository names to fetch", "type": "multiselect", "options": ["nodejs/node", "facebook/react", "microsoft/vscode"], "required": True}], "description": "Collect list of GitHub repositories"},
+                  {"id": "fetch_repo_loop", "type": "loop", "loop_over": "${{from_step:collect_repositories.repositories}}", "nodes": [
+                  {"id": "fetch_repository", "type": "agent_with_tools", "tool_id": "GITHUB_GET_REPOSITORY", "app_name": "github", "params": {"owner": "${{loop_item.split('/')[0]}}", "repo": "${{loop_item.split('/')[1]}}"}, "description": "Fetch repository information"}
+                ], "max_iterations": 5, "description": "Fetch info for each repository"},
+                  {"id": "create_spreadsheet", "type": "agent_with_tools", "tool_id": "GOOGLESHEETS_CREATE_GOOGLE_SHEET1", "app_name": "googlesheets", "params": {"title": "Repository Analysis"}, "description": "Create spreadsheet for results"},
+                  {"id": "update_spreadsheet", "type": "agent_with_tools", "tool_id": "GOOGLESHEETS_BATCH_UPDATE", "app_name": "googlesheets", "params": {"spreadsheet_id": "${{from_step:create_spreadsheet.spreadsheetId}}", "sheet_name": "Sheet1", "values": [["Repository", "Stars", "Forks", "Language"], "${{from_loop:fetch_repo_loop.results}}"]}, "description": "Add all repository data to spreadsheet"}
                 ],
-                "sequential_edges": [("collect_destinations", "search_flights_loop"), ("search_flights_loop", "create_spreadsheet"), ("create_spreadsheet", "update_spreadsheet")]
+                "edges": [
+                  {"from": "collect_repositories", "to": "fetch_repo_loop", "type": "sequential"},
+                  {"from": "fetch_repo_loop", "to": "create_spreadsheet", "type": "sequential"},
+                  {"from": "create_spreadsheet", "to": "update_spreadsheet", "type": "sequential"}
+                ]
               }
               result = WORKFLOW
 

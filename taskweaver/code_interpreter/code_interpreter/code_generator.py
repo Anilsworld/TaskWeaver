@@ -605,10 +605,16 @@ class CodeGenerator(Role):
             tool_ids = self._extract_tool_ids_from_actions(composio_actions)
             
             if not tool_ids:
-                self.logger.warning(
-                    "[CODE_GENERATOR] No tool IDs found, falling back to regular generation"
+                self.logger.error(
+                    "[CODE_GENERATOR] ❌ No tool IDs found! Cannot generate workflow without tools."
                 )
-                # Fall through to regular path below
+                post_proxy.update_attachment(
+                    "Cannot generate workflow: No matching tools found for your request. "
+                    "Please ensure you have connected the required integrations or rephrase your request.",
+                    AttachmentType.revise_message
+                )
+                post_proxy.update_send_to("User")
+                return post_proxy.end()
             else:
                 # Build function schema with filtered enum
                 function_schema = self._build_workflow_function_schema(tool_ids)
@@ -745,47 +751,23 @@ class CodeGenerator(Role):
                     # json is already imported at top of file
                     self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
                     
-                    # ✅ VALIDATION: Skip dynamic model validator (module removed)
-                    # Workflow schema validation already done by OpenAI function calling
-                    param_warnings = []
-                    
-                    if param_warnings:
-                        # Check if any are errors (not just warnings)
-                        errors = [w for w in param_warnings if '[ERROR]' in w]
-                        if errors:
-                            self.logger.error(f"[DYNAMIC_VAL] {len(errors)} param validation errors")
-                            for error in errors[:5]:  # Show first 5
-                                self.logger.error(f"  {error}")
-                            
-                            # ⚠️ VALIDATION ERRORS: Send back to Planner for retry with hints
-                            error_summary = "\n".join(errors[:10])  # Top 10 errors
-                            error_message = (
-                                f"⚠️ Workflow validation failed with {len(errors)} parameter errors:\n\n"
-                                f"{error_summary}\n\n"
-                                f"💡 HINTS:\n"
-                                f"1. READ the user's request carefully and extract ALL mentioned values\n"
-                                f"2. For agent_with_tools nodes, populate the 'params' field with extracted values\n"
-                                f"3. Required parameters MUST have values (never null/empty)\n"
-                                f"4. Use parameter examples from tool schemas for correct formatting\n"
-                                f"5. For dates without year, use current year (e.g., 'Dec 25' → '2025-12-25')\n\n"
-                                f"Please regenerate the workflow with ALL required parameters extracted."
-                            )
-                            post_proxy.update_attachment(error_message, AttachmentType.revise_message)
-                            post_proxy.update_send_to("Planner")
-                            return post_proxy.end()
-                        else:
-                            self.logger.warning(f"[DYNAMIC_VAL] {len(param_warnings)} param warnings")
-                    
-                    # Step 3: Pydantic structural validation (node types, edges, DAG)
+                    # Step 3: Pydantic structural validation (node types, edges, DAG, placeholders)
                     from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
-                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_json)
+                    # TODO: Load tool_cache from composio_schemas_cache.json for deep placeholder validation
+                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_json, tool_cache=None)
                     
                     # ✅ workflow_json now has complete edges from WorkflowIR (including auto-added parallel edges)
                     self.logger.info(f"[FUNCTION_CALLING] After validation: {len(workflow_json.get('edges', []))} complete edges")
                     
                     if not is_valid:
                         self.logger.error(f"[FUNCTION_CALLING] Pydantic validation failed: {pydantic_errors}")
-                        self.logger.error(f"[FUNCTION_CALLING] Failed workflow nodes: {[n.get('id', '?') + ':' + n.get('type', '?') for n in workflow_json.get('nodes', [])]}")
+                        # Safe node logging (handles malformed nodes that might be strings)
+                        try:
+                            node_info = [f"{n.get('id', '?')}:{n.get('type', '?')}" if isinstance(n, dict) else f"MALFORMED:{type(n).__name__}" for n in workflow_json.get('nodes', [])]
+                            self.logger.error(f"[FUNCTION_CALLING] Failed workflow nodes: {node_info}")
+                        except Exception as e:
+                            self.logger.error(f"[FUNCTION_CALLING] Could not log node info: {e}")
+                        
                         post_proxy.update_attachment(
                             "Generated workflow has structural errors. Please simplify your request.",
                             AttachmentType.revise_message
@@ -818,82 +800,23 @@ class CodeGenerator(Role):
                     return post_proxy.end()
         
         # =====================================================================
-        # 📝 REGULAR PATH (JSON Schema Response - ONLY when function calling disabled)
+        # ❌ REGULAR GENERATION REMOVED
         # =====================================================================
-        self.logger.info("[CODE_GENERATOR] Using regular JSON schema generation (function calling disabled)")
+        # Regular generation has been completely removed to prevent tool hallucination.
+        # Function calling is now the ONLY path for workflow generation.
+        # This ensures strict enum validation of tool_id values.
+        # =====================================================================
         
-        prompt = self.compose_prompt(
-            rounds,
-            self.plugin_pool,
-            planning_enrichments=enrichment_contents,
+        self.logger.error(
+            "[CODE_GENERATOR] ❌ Reached end of reply() without generating workflow. "
+            "This should never happen - all code paths should return early."
         )
-
-        self.tracing.set_span_attribute("prompt", json.dumps(prompt, indent=2))
-        prompt_size = self.tracing.count_tokens(json.dumps(prompt))
-        self.tracing.set_span_attribute("prompt_size", prompt_size)
-        self.tracing.add_prompt_size(
-            size=prompt_size,
-            labels={
-                "direction": "input",
-            },
+        post_proxy.update_attachment(
+            "Internal error: Workflow generation failed. Please contact support.",
+            AttachmentType.revise_message
         )
-
-        def early_stop(_type: AttachmentType, value: str) -> bool:
-            if _type in [AttachmentType.reply_content]:
-                return True
-            else:
-                return False
-
-        self.post_translator.raw_text_to_post(
-            llm_output=self.llm_api.chat_completion_stream(
-                prompt,
-                use_smoother=True,
-                llm_alias=self.config.llm_alias,
-                json_schema=self.response_json_schema,
-            ),
-            post_proxy=post_proxy,
-            early_stop=early_stop,
-        )
-
-        post_proxy.update_send_to("Planner")
-        generated_code = ""
-        reply_type: Optional[str] = None
-        for attachment in post_proxy.post.attachment_list:
-            if attachment.type == AttachmentType.reply_type:
-                reply_type = attachment.content
-                break
-        for attachment in post_proxy.post.attachment_list:
-            if attachment.type == AttachmentType.reply_content:
-                if reply_type == "python":
-                    generated_code = attachment.content
-                    
-                    # 🔍 EARLY TRUNCATION DETECTION for WORKFLOW dicts
-                    if "WORKFLOW" in generated_code and "result = WORKFLOW" in generated_code:
-                        # Check if code ends with incomplete string (common truncation pattern)
-                        if generated_code.rstrip().endswith(("${from_step:", '"${from_step:', "'${from_step:", ', "params":', ', "text":')):
-                            self.logger.error("🚨 [TRUNCATION] LLM output was truncated - WORKFLOW dict is incomplete")
-                            # Don't break - let code_interpreter handle it with proper retry message
-                            post_proxy.update_attachment(
-                                "⚠️ WARNING: Generated code appears to be truncated (incomplete WORKFLOW dict). "
-                                "This usually means the workflow is too complex. Try simplifying your request.",
-                                AttachmentType.revise_message,
-                            )
-                    
-                    break
-                elif reply_type == "text":
-                    post_proxy.update_message(attachment.content)
-                    break
-
-        if self.config.enable_auto_plugin_selection:
-            # filter out plugins that are not used in the generated code
-            self.selected_plugin_pool.filter_unused_plugins(code=generated_code)
-
-        if prompt_log_path is not None:
-            self.logger.dump_prompt_file(prompt, prompt_log_path)
-
-        self.tracing.set_span_attribute("code", generated_code)
-
-        return post_proxy.post
+        post_proxy.update_send_to("User")
+        return post_proxy.end()
 
     def format_plugins(
         self,

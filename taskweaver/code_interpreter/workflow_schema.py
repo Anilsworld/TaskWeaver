@@ -7,6 +7,7 @@ No hardcoding - just update the schema when requirements change.
 Integration with WorkflowIR:
 - Pydantic validates schema (types, required fields)
 - WorkflowIR validates DAG logic (cycles, connectivity, data flow)
+- Placeholder validator validates reference resolution
 """
 from typing import List, Dict, Any, Optional, Union, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -170,16 +171,24 @@ class WorkflowDefinition(BaseModel):
         return WorkflowIR(workflow_dict)
 
 
-def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optional[WorkflowDefinition], List[str]]:
+def validate_workflow_dict(
+    workflow_dict: Dict[str, Any],
+    tool_cache: Optional[Dict[str, Any]] = None
+) -> tuple[bool, Optional[WorkflowDefinition], List[str]]:
     """
-    Validate WORKFLOW dict using Pydantic + WorkflowIR.
+    Validate WORKFLOW dict using three-phase validation.
     
-    Two-phase validation:
+    Three-phase validation:
     1. Pydantic: Schema validation (types, required fields, basic structure)
     2. WorkflowIR: DAG validation (cycles, connectivity, edge inference, data flow)
+    3. Placeholder: Reference validation (node existence, field availability)
+    
+    SCALABLE: No domain knowledge, no keyword matching, no hardcoded tools.
+    Works for ANY workflow, ANY tools, ANY complexity.
     
     Args:
         workflow_dict: The WORKFLOW dictionary to validate
+        tool_cache: Optional tool schema cache for deep placeholder validation
     
     Returns:
         Tuple of (is_valid, workflow_obj, error_messages)
@@ -189,7 +198,7 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
     """
     error_messages = []
     
-    # Phase 1: Pydantic validation (schema)
+    # Phase 1: Pydantic validation (schema only - no semantic checking)
     try:
         workflow = WorkflowDefinition(**workflow_dict)
     except Exception as e:
@@ -269,6 +278,37 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
         logger.error(f"WorkflowIR conversion error: {e}", exc_info=True)
         return False, None, error_messages
     
+    # Phase 3: Placeholder validation (reference resolution)
+    try:
+        from taskweaver.code_interpreter.workflow_placeholder_validator import validate_workflow_placeholders
+        
+        print(f"[WORKFLOW_SCHEMA] 🔍 Starting placeholder validation...")
+        placeholder_result = validate_workflow_placeholders(workflow_dict, tool_cache=tool_cache)
+        
+        if not placeholder_result.valid:
+            print(f"[WORKFLOW_SCHEMA] ❌ Placeholder validation FAILED: {len(placeholder_result.errors)} errors")
+            logger.warning(f"❌ Placeholder validation failed: {len(placeholder_result.errors)} errors")
+            error_messages.extend(placeholder_result.errors)
+            return False, None, error_messages
+        
+        # Log warnings (non-blocking)
+        if placeholder_result.warnings:
+            print(f"[WORKFLOW_SCHEMA] ⚠️  Placeholder validation: {len(placeholder_result.warnings)} warnings")
+            for warning in placeholder_result.warnings[:3]:  # Show first 3
+                logger.warning(f"  {warning}")
+        
+        print(f"[WORKFLOW_SCHEMA] ✅ Placeholder validation PASSED: {placeholder_result.validated_references} validated, {placeholder_result.skipped_references} skipped")
+        logger.info(
+            f"✅ Placeholder validation passed: "
+            f"{placeholder_result.validated_references} validated, "
+            f"{placeholder_result.skipped_references} skipped"
+        )
+        
+    except Exception as e:
+        # Placeholder validation is a best-effort check - don't fail the entire workflow if it errors
+        print(f"[WORKFLOW_SCHEMA] ⚠️  Placeholder validation ERROR (non-blocking): {str(e)}")
+        logger.warning(f"Placeholder validation error (non-blocking): {e}")
+    
     return True, workflow, []
 
 
@@ -291,7 +331,7 @@ def format_workflow_validation_error(errors: List[str], code: str) -> str:
 
 **Common Fixes:**
 1. **Bracket matching**: Check for ]{{}}}} (wrong) vs ]{{}}, (correct)
-2. **Node references**: All node IDs in edges/depends_on must exist in nodes list
+2. **Node references**: All node IDs in edges must exist in nodes list
 3. **Tool requirements**: agent_with_tools nodes MUST have tool_id field
 4. **HITL requirements**: Blocking HITL nodes MUST have decision field
 5. **Edge format**: Use tuples like ("source", "target") or dicts with 'source' and 'target' keys

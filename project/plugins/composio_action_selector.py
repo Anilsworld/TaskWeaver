@@ -783,11 +783,15 @@ def select_composio_actions(
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             
-            # Make batch API call with full context
+            # Make batch API call with FULL USER QUERY (complete workflow intent)
+            # ✅ FIX: Use original user query for complete tool coverage
+            # Context: "search flights... then finally email once approved" (mentions ALL tasks!)
+            # Planner query: "collect passenger details for flight search" (only mentions first step)
+            # Result: Context gives us BOTH flight AND email tools!
             composio_api = AIBatchSearch()
             search_result = loop.run_until_complete(
                 composio_api.search_batch(
-                    user_prompt=context,  # Full workflow prompt
+                    user_prompt=context,  # ← Full user query with complete workflow intent
                     entity_id="taskweaver_batch",
                     timeout=10  # 10 seconds for batch
                 )

@@ -188,11 +188,10 @@ rounds:
                           "fields": [
                               {"name": "decision", "type": "select", "options": ["Approve", "Reject"], "required": true},
                               {"name": "gmail_response", "type": "textarea", "label": "Gmail Response"},
-                              {"name": "slack_response", "type": "textarea", "label": "Slack Response"}
-                          ],
-                          "depends_on": ["fetch_gmail", "fetch_slack"],
-                          "description": "Review and approve responses"
-                      },
+                          {"name": "slack_response", "type": "textarea", "label": "Slack Response"}
+                      ],
+                      "description": "Review and approve responses"
+                  },
                       {
                           "id": "send_gmail",
                           "type": "tool",
