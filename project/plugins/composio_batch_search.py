@@ -245,6 +245,85 @@ class AIBatchSearch:
         
         return result
     
+    async def search_batch_multi_queries(
+        self,
+        queries: List[Dict[str, Any]],
+        entity_id: str,
+        session_id: Optional[str] = None,
+        timeout: int = 60
+    ) -> BatchSearchResult:
+        """
+        Search for tools using batch API with multiple pre-parsed queries.
+        Each query gets tools independently (better than letting Composio decompose).
+        
+        Args:
+            queries: List like [{'use_case': 'Search flights', 'known_fields': '', 'index': 2}, ...]
+            entity_id: User/company ID for Composio
+            session_id: Optional session ID
+            timeout: Request timeout in seconds
+            
+        Returns:
+            BatchSearchResult with tools for each query
+        """
+        logger.info(f"🔍 [BATCH_MULTI] Starting batch search with {len(queries)} queries...")
+        
+        # Build payload
+        payload = {
+            'arguments': {
+                'queries': queries,
+                'session': {
+                    'generate_id': session_id is None,
+                    **({'id': session_id} if session_id else {})
+                }
+            },
+            'entity_id': entity_id
+        }
+        
+        logger.info(f"📤 [BATCH_MULTI] Calling Composio API...")
+        
+        if not HAS_REQUESTS:
+            raise ImportError("requests library not installed")
+        
+        if not self.api_key:
+            raise ValueError("COMPOSIO_API_KEY not configured")
+        
+        # Call API
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: requests.post(
+                self.api_url,
+                json=payload,
+                headers={
+                    'X-API-Key': self.api_key,
+                    'Content-Type': 'application/json'
+                },
+                timeout=timeout
+            )
+        )
+        
+        if response.status_code != 200:
+            error_msg = f"Batch API returned {response.status_code}: {response.text[:500]}"
+            logger.error(f"❌ [BATCH_MULTI] {error_msg}")
+            raise ValueError(error_msg)
+        
+        # Parse results
+        logger.info("📥 [BATCH_MULTI] Parsing response...")
+        data = response.json()
+        
+        # Use first query as user_prompt for logging
+        user_prompt = queries[0]['use_case'] if queries else ''
+        result = self._parse_batch_result(data, user_prompt)
+        
+        logger.info(
+            f"✅ [BATCH_MULTI] Success!\n"
+            f"  - Queries sent: {len(queries)}\n"
+            f"  - Sub-tasks returned: {result.total_sub_tasks}\n"
+            f"  - Total tools: {result.total_tools}"
+        )
+        
+        return result
+    
     def _parse_batch_result(self, data: Dict[str, Any], user_prompt: str) -> BatchSearchResult:
         """
         Parse batch API response into structured result.

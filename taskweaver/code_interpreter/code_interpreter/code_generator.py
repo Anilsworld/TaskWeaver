@@ -582,21 +582,15 @@ class CodeGenerator(Role):
                 for step_id, step_data in steps_with_tools.items():
                     self.logger.info(
                         f"[CODE_GENERATOR] Step {step_id}: {step_data['step_description'][:50]}... "
-                        f"→ {step_data['primary_tool_id']} ({step_data['tool_count']} alternatives)"
+                        f"→ {step_data['primary_tool_id']}"
                     )
                 
-                # Collect all unique tool IDs for function schema
+                # Collect all unique tool IDs for function schema (only primary tools)
                 all_tool_ids = []
                 for step_data in steps_with_tools.values():
-                    # Add primary tool
                     if step_data.get('primary_tool_id'):
                         if step_data['primary_tool_id'] not in all_tool_ids:
                             all_tool_ids.append(step_data['primary_tool_id'])
-                    
-                    # Add top 3 alternatives as fallback options
-                    for tool in step_data.get('tools', [])[:3]:
-                        if tool['action_id'] not in all_tool_ids:
-                            all_tool_ids.append(tool['action_id'])
                 
                 self.logger.info(f"[CODE_GENERATOR] Total unique tool IDs: {len(all_tool_ids)}")
                 
@@ -622,8 +616,9 @@ class CodeGenerator(Role):
             function_schema = self._build_workflow_function_schema(all_tool_ids)
             
             # Build step-tool mapping for prompt (NEW FEATURE)
+            # One tool per step (Composio's best match)
             step_tool_mapping = "\n".join([
-                f"Step {step_id}: {data['step_description'][:70]}...\n  → PRIMARY TOOL: {data['primary_tool_id']}\n  → Alternatives: {', '.join([t['action_id'] for t in data.get('tools', [])[:3]])}"
+                f"Step {step_id}: {data['step_description'][:70]}...\n  → TOOL: {data['primary_tool_id']}"
                 for step_id, data in steps_with_tools.items()
                 if data.get('primary_tool_id')
             ])
@@ -666,8 +661,9 @@ class CodeGenerator(Role):
                         "- Example: {{'id': 'search_all', 'type': 'parallel', 'parallel_nodes': ['search_a', 'search_b', 'search_c']}}\n"
                         "- Then define each child: {{'id': 'search_a', 'type': 'agent_with_tools', ...}}\n"
                         "- Edges connect to PARENT: ('start', 'search_all'), ('search_all', 'process_results')\n\n"
-                        "✅ TOOLS ARE PRE-ASSIGNED TO EACH STEP:\n\n"
+                        "✅ EACH STEP HAS EXACTLY ONE PRE-ASSIGNED TOOL (Composio's best match):\n\n"
                         f"{step_tool_mapping}\n\n"
+                        "USE THESE EXACT TOOL IDs - DO NOT substitute or choose alternatives.\n\n"
                         f"{example_context}\n"
                         f"{yaml_examples}"
                     )

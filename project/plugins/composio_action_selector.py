@@ -767,14 +767,63 @@ def get_tools_by_steps(
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        # Make batch API call with init_plan
-        # Composio will decompose the plan into steps automatically
+        # Parse init_plan into individual steps with dependency hints
+        import re
+        step_pattern = r'^\s*(\d+)\.\s+(.+?)\s*<([^>]+)>.*$'
+        all_steps = []
+        
+        for line in init_plan_text.strip().split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            
+            match = re.match(step_pattern, line)
+            if match:
+                step_num = match.group(1)
+                step_desc = match.group(2).strip()
+                dependency_type = match.group(3).strip().lower()
+                
+                all_steps.append({
+                    'step_num': step_num,
+                    'description': step_desc,
+                    'dependency': dependency_type,
+                    'is_interactive': 'interactive' in dependency_type
+                })
+        
+        logger.info(f"[GET_TOOLS_BY_STEPS] Parsed {len(all_steps)} steps from init_plan")
+        
+        # Filter: Only send steps with sequential dependencies (they need tools)
+        # Skip interactive dependencies (form, hitl)
+        tool_steps = [step for step in all_steps if not step['is_interactive']]
+        
+        for step in all_steps:
+            status = "SKIP (form/hitl)" if step['is_interactive'] else "FETCH TOOLS"
+            logger.info(f"[GET_TOOLS_BY_STEPS]   Step {step['step_num']}: {step['description'][:50]}... → {status}")
+        
+        if not tool_steps:
+            logger.warning("[GET_TOOLS_BY_STEPS] ⚠️  No tool-requiring steps found")
+            return {}
+        
+        # Make batch API call with multiple queries (one per tool-requiring step)
         composio_api = AIBatchSearch()
+        
+        # Build queries list for batch API
+        queries = [
+            {
+                'use_case': step['description'],
+                'known_fields': '',
+                'index': int(step['step_num'])
+            }
+            for step in tool_steps
+        ]
+        
+        logger.info(f"[GET_TOOLS_BY_STEPS] Calling Composio with {len(queries)} tool-requiring steps")
+        
         search_result = loop.run_until_complete(
-            composio_api.search_batch(
-                user_prompt=init_plan_text,  # ✅ Use init_plan - Composio decomposes it
+            composio_api.search_batch_multi_queries(
+                queries=queries,
                 entity_id="taskweaver_batch",
-                timeout=15  # 15 seconds for batch
+                timeout=15
             )
         )
         
@@ -784,30 +833,37 @@ def get_tools_by_steps(
         
         logger.info(f"[GET_TOOLS_BY_STEPS] ✅ Got {len(search_result.sub_task_results)} sub-task results")
         
-        # Build structured cache with step references
+        # Build structured cache - map results back to original step numbers
         _BATCH_CACHE[session_id] = {}
         
         for idx, sub_task_result in enumerate(search_result.sub_task_results):
-            step_id = str(idx + 1)  # Steps are 1-indexed
+            # Get original step number from tool_steps
+            if idx < len(tool_steps):
+                step_id = tool_steps[idx]['step_num']
+            else:
+                logger.warning(f"[GET_TOOLS_BY_STEPS] ⚠️  Result index {idx} exceeds tool_steps length")
+                step_id = str(idx + 1)
+            
             step_query = sub_task_result.use_case
             tools = sub_task_result.tools
             
-            # Extract primary tool (first tool is best match from Composio)
+            # Composio returns tools in priority order - use only the first (best) tool per step
             primary_tool_id = None
-            if tools and len(tools) > 0:
-                primary_tool_id = tools[0].get('tool_id', tools[0].get('action_id'))
-            
-            # Convert tools to action_dicts format
             action_dicts = []
-            for tool in tools[:top_k]:
+            
+            if tools and len(tools) > 0:
+                best_tool = tools[0]
+                primary_tool_id = best_tool.get('tool_id', best_tool.get('action_id'))
+                
+                # Store only the primary tool (no alternatives)
                 action_dicts.append({
-                    'action_id': tool.get('tool_id', tool.get('action_id', 'UNKNOWN')),
-                    'action_name': tool.get('name', tool.get('action_name', '')),
-                    'app_name': tool.get('app_name', ''),
-                    'app_display_name': tool.get('app_display_name', tool.get('app_name', '')),
-                    'description': tool.get('description', ''),
-                    'parameters': tool.get('parameters', {}),
-                    'response': tool.get('response', {}),
+                    'action_id': primary_tool_id,
+                    'action_name': best_tool.get('name', best_tool.get('action_name', '')),
+                    'app_name': best_tool.get('app_name', ''),
+                    'app_display_name': best_tool.get('app_display_name', best_tool.get('app_name', '')),
+                    'description': best_tool.get('description', ''),
+                    'parameters': best_tool.get('parameters', {}),
+                    'response': best_tool.get('response', {}),
                 })
             
             # Store with step reference
@@ -821,12 +877,11 @@ def get_tools_by_steps(
             
             logger.info(
                 f"[GET_TOOLS_BY_STEPS] Step {step_id}: {step_query[:50]}... "
-                f"→ {primary_tool_id} ({len(action_dicts)} tools)"
+                f"→ {primary_tool_id}"
             )
             _log_to_debug_file(
                 f"[STEP_{step_id}] {step_query}\n"
-                f"  Primary: {primary_tool_id}\n"
-                f"  Alternatives: {[t['action_id'] for t in action_dicts[:3]]}"
+                f"  Tool: {primary_tool_id}"
             )
         
         logger.info(f"[GET_TOOLS_BY_STEPS] ✅ Cached {len(_BATCH_CACHE[session_id])} steps")
