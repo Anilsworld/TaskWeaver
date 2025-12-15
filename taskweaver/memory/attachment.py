@@ -19,6 +19,7 @@ class AttachmentType(Enum):
     thought = "thought"
     reply_type = "reply_type"
     reply_content = "reply_content"
+    workflow_metadata = "workflow_metadata"  # Programmatic workflow completion signal
 
     # CodeInterpreter - verification
     verification = "verification"

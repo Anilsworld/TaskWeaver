@@ -168,8 +168,12 @@ class CodeInterpreter(Role, Interpreter):
                 "NONE",
                 "No code is executed due to code generation failure.",
             )
-            post_proxy.update_message("Failed to generate code.")
+            
+            # ✅ FIX: Only update message once - different message for retry vs max retries
             if self.retry_count < self.config.max_retry_count:
+                # Retry: Use generic message
+                post_proxy.update_message("Failed to generate code.")
+                
                 # ✅ Check if code_generator already provided specific validation error
                 # Don't overwrite detailed error messages with generic ones
                 existing_error = next(
@@ -191,6 +195,7 @@ class CodeInterpreter(Role, Interpreter):
                 post_proxy.update_send_to("CodeInterpreter")
                 self.retry_count += 1
             else:
+                # Max retries: Use user-facing message
                 self.retry_count = 0
                 post_proxy.update_send_to("User")
                 post_proxy.update_message(
@@ -375,6 +380,23 @@ class CodeInterpreter(Role, Interpreter):
                     "2. Breaking it into smaller workflows\n"
                     "3. Using fewer apps/platforms"
                 )
+            else:
+                # ✅ SUCCESS - Add programmatic completion flag for workflow generation
+                session_var = kwargs.get("session_var", {})
+                is_workflow_mode = session_var.get("_workflow_generation_mode", "false") == "true"
+                
+                if is_workflow_mode:
+                    # Add deterministic completion flag - no LLM interpretation needed
+                    import json
+                    post_proxy.update_attachment(
+                        json.dumps({"workflow_generation_complete": True}),
+                        AttachmentType.workflow_metadata
+                    )
+                    self.logger.info(f"✅ [WORKFLOW_COMPLETE] Added programmatic completion flag")
+                
+                # Send back to Planner to signal completion
+                post_proxy.update_send_to("Planner")
+                self.logger.info(f"✅ [CODE_EXEC] Execution succeeded, sending result to Planner")
             self.retry_count = 0
         else:
             post_proxy.update_send_to("CodeInterpreter")

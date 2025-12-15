@@ -169,8 +169,9 @@ class CodeGenerator(Role):
         nodes = workflow_json.get('nodes', [])
         node_map = {node['id']: node for node in nodes}
         
-        # Pattern 1: Node references with dot - ${{node_id.field_name}} or ${node_id.field_name}
-        param_ref_pattern = r'\$\{\{?([a-zA-Z_][a-zA-Z0-9_]*?)\.([a-zA-Z_][a-zA-Z0-9_]*?)\}?\}'
+        # Pattern 1: Node references with dot - ${{node_id.field_name}} or ${{from_step:node_id.field_name}}
+        # ✅ FIX: Captures optional prefix (from_step:, from_loop:, aggregate:), node_id, and field_name
+        param_ref_pattern = r'\$\{\{?(?:from_step:|from_loop:|aggregate:)?([a-zA-Z_][a-zA-Z0-9_]*?)\.([a-zA-Z_][a-zA-Z0-9_]*?)\}?\}'
         
         # Pattern 2: Simple placeholders (no dot) - ${{something}}
         simple_placeholder_pattern = r'\$\{\{([a-zA-Z_][a-zA-Z0-9_:.\[\]]*?)\}\}'
@@ -1059,82 +1060,26 @@ class CodeGenerator(Role):
                     return post_proxy.end()
         
         # =====================================================================
-        # 📝 REGULAR PATH (JSON Schema Response - ONLY when function calling disabled)
+        # ⚠️ UNREACHABLE: Function calling is always enabled
         # =====================================================================
-        self.logger.info("[CODE_GENERATOR] Using regular JSON schema generation (function calling disabled)")
-        
-        prompt = self.compose_prompt(
-            rounds,
-            self.plugin_pool,
-            planning_enrichments=enrichment_contents,
+        # If execution reaches here, it means:
+        # 1. is_workflow_generation=False (not in workflow mode), OR
+        # 2. use_function_calling=False (config disabled)
+        # 
+        # In production, both conditions should never occur for workflow generation.
+        # This is a safety fallback that should never execute.
+        self.logger.error(
+            "[CODE_GENERATOR] ⚠️ UNREACHABLE CODE PATH REACHED! "
+            f"is_workflow_generation={is_workflow_generation}, "
+            f"use_function_calling={self.config.use_function_calling}"
         )
-
-        self.tracing.set_span_attribute("prompt", json.dumps(prompt, indent=2))
-        prompt_size = self.tracing.count_tokens(json.dumps(prompt))
-        self.tracing.set_span_attribute("prompt_size", prompt_size)
-        self.tracing.add_prompt_size(
-            size=prompt_size,
-            labels={
-                "direction": "input",
-            },
+        post_proxy.update_attachment(
+            "Internal error: Workflow generation mode is misconfigured. "
+            "Please contact support.",
+            AttachmentType.revise_message
         )
-
-        def early_stop(_type: AttachmentType, value: str) -> bool:
-            if _type in [AttachmentType.reply_content]:
-                return True
-            else:
-                return False
-
-        self.post_translator.raw_text_to_post(
-            llm_output=self.llm_api.chat_completion_stream(
-                prompt,
-                use_smoother=True,
-                llm_alias=self.config.llm_alias,
-                json_schema=self.response_json_schema,
-            ),
-            post_proxy=post_proxy,
-            early_stop=early_stop,
-        )
-
-        post_proxy.update_send_to("Planner")
-        generated_code = ""
-        reply_type: Optional[str] = None
-        for attachment in post_proxy.post.attachment_list:
-            if attachment.type == AttachmentType.reply_type:
-                reply_type = attachment.content
-                break
-        for attachment in post_proxy.post.attachment_list:
-            if attachment.type == AttachmentType.reply_content:
-                if reply_type == "python":
-                    generated_code = attachment.content
-                    
-                    # 🔍 EARLY TRUNCATION DETECTION for WORKFLOW dicts
-                    if "WORKFLOW" in generated_code and "result = WORKFLOW" in generated_code:
-                        # Check if code ends with incomplete string (common truncation pattern)
-                        if generated_code.rstrip().endswith(("${from_step:", '"${from_step:', "'${from_step:", ', "params":', ', "text":')):
-                            self.logger.error("🚨 [TRUNCATION] LLM output was truncated - WORKFLOW dict is incomplete")
-                            # Don't break - let code_interpreter handle it with proper retry message
-                            post_proxy.update_attachment(
-                                "⚠️ WARNING: Generated code appears to be truncated (incomplete WORKFLOW dict). "
-                                "This usually means the workflow is too complex. Try simplifying your request.",
-                                AttachmentType.revise_message,
-                            )
-                    
-                    break
-                elif reply_type == "text":
-                    post_proxy.update_message(attachment.content)
-                    break
-
-        if self.config.enable_auto_plugin_selection:
-            # filter out plugins that are not used in the generated code
-            self.selected_plugin_pool.filter_unused_plugins(code=generated_code)
-
-        if prompt_log_path is not None:
-            self.logger.dump_prompt_file(prompt, prompt_log_path)
-
-        self.tracing.set_span_attribute("code", generated_code)
-
-        return post_proxy.post
+        post_proxy.update_send_to("User")
+        return post_proxy.end()
 
     def format_plugins(
         self,

@@ -256,6 +256,80 @@ class Planner(Role):
         return chat_history
 
     @tracing_decorator
+    def _check_workflow_completion(self, rounds: List[Round], session_var: Optional[Dict] = None) -> bool:
+        """
+        Deterministic check for workflow generation completion.
+        No LLM reasoning - simple boolean flag check.
+        
+        Returns True if CodeInterpreter sent workflow_generation_complete flag.
+        """
+        # Only check if we're in workflow generation mode
+        if not session_var or session_var.get("_workflow_generation_mode", "false") != "true":
+            return False
+        
+        # Check the last round's last post for the completion flag
+        if not rounds or len(rounds) == 0:
+            return False
+        
+        last_round = rounds[-1]
+        if not last_round.post_list or len(last_round.post_list) == 0:
+            return False
+        
+        last_post = last_round.post_list[-1]
+        
+        # Look for workflow_metadata attachment with completion flag
+        for attachment in last_post.attachment_list:
+            if attachment.type == AttachmentType.workflow_metadata:
+                try:
+                    metadata = json.loads(attachment.content)
+                    if metadata.get("workflow_generation_complete") == True:
+                        self.logger.info(f"✅ [WORKFLOW_COMPLETE] Programmatic completion flag detected")
+                        return True
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+        
+        return False
+    
+    def _generate_completed_response(self, rounds: List[Round], post_proxy) -> Post:
+        """
+        Generate a completed response without calling LLM.
+        Used when workflow generation is programmatically determined to be complete.
+        """
+        self.logger.info(f"✅ [WORKFLOW_COMPLETE] Generating completed response (no LLM call)")
+        
+        # Get the last CodeInterpreter response (contains the workflow)
+        last_round = rounds[-1]
+        last_post = last_round.post_list[-1]
+        
+        # Extract init_plan and plan from previous Planner response
+        planner_posts = [p for r in rounds for p in r.post_list if p.send_from == "Planner"]
+        last_planner_post = planner_posts[-1] if planner_posts else None
+        
+        init_plan = "Workflow generation completed successfully."
+        plan = "Workflow generation completed successfully."
+        current_step = "Workflow generated and validated"
+        
+        if last_planner_post:
+            for attachment in last_planner_post.attachment_list:
+                if attachment.type == AttachmentType.init_plan:
+                    init_plan = attachment.content
+                elif attachment.type == AttachmentType.plan:
+                    plan = attachment.content
+                elif attachment.type == AttachmentType.current_plan_step:
+                    current_step = attachment.content
+        
+        # Build completed response
+        post_proxy.update_message(
+            "✅ Workflow has been generated and validated successfully. "
+            "The workflow is ready for execution."
+        )
+        post_proxy.update_send_to("User")
+        post_proxy.update_attachment(init_plan, AttachmentType.init_plan)
+        post_proxy.update_attachment(plan, AttachmentType.plan)
+        post_proxy.update_attachment(current_step, AttachmentType.current_plan_step)
+        
+        return post_proxy.end()
+
     def reply(
         self,
         memory: Memory,
@@ -275,8 +349,13 @@ class Planner(Role):
 
         post_proxy = self.event_emitter.create_post_proxy(self.alias)
 
-        post_proxy.update_status("composing prompt")
+        # ✅ DETERMINISTIC COMPLETION CHECK (before LLM call)
         session_var = kwargs.get("session_var", None)
+        if self._check_workflow_completion(rounds, session_var):
+            # Workflow is programmatically complete - skip LLM, return completed response
+            return self._generate_completed_response(rounds, post_proxy)
+
+        post_proxy.update_status("composing prompt")
         chat_history = self.compose_prompt(rounds, session_var=session_var)
 
         def check_post_validity(post: Post):
