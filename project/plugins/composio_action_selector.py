@@ -784,11 +784,23 @@ def select_composio_actions(
                 asyncio.set_event_loop(loop)
             
             # Make batch API call with full context
+            # ✅ Get entity_id from environment (set by eclipse_adapter.py)
+            # This ensures we use the actual user's Composio entity with configured integrations
+            entity_id = os.environ.get('COMPOSIO_ENTITY_ID', 'default')
+            logger.info(f"[BATCH_API] Using entity_id: {entity_id}")
+            
+            # ✅ FIX: Pass session_id to avoid namespace errors
+            # When session_id is None, Composio tries to use default namespace which doesn't exist
+            # Use the TaskWeaver session_id (not a Composio session_id) to generate unique session
+            composio_session_id = session_id if session_id else None  # Let Composio generate if needed
+            logger.info(f"[BATCH_API] Using session_id: {composio_session_id}")
+            
             composio_api = AIBatchSearch()
             search_result = loop.run_until_complete(
                 composio_api.search_batch(
                     user_prompt=context,  # Full workflow prompt
-                    entity_id="taskweaver_batch",
+                    entity_id=entity_id,  # ✅ Use actual user's entity (not hardcoded)
+                    session_id=composio_session_id,  # ✅ Pass session to avoid namespace error
                     timeout=10  # 10 seconds for batch
                 )
             )

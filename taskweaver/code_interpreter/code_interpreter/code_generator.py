@@ -1,7 +1,7 @@
 import datetime
 import json
 import os
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from injector import inject
 
@@ -18,6 +18,9 @@ from taskweaver.module.tracing import Tracing, tracing_decorator
 from taskweaver.role import PostTranslator, Role
 from taskweaver.role.role import RoleConfig
 from taskweaver.utils import read_yaml
+
+# ✅ Consolidated placeholder validator (Pydantic-based)
+from apps.analytics_conversation.services.workflow_placeholder_validator import validate_workflow_placeholders
 
 
 class CodeGeneratorConfig(RoleConfig):
@@ -99,8 +102,37 @@ class CodeGenerator(Role):
             self.selected_plugin_pool = SelectedPluginPool()
 
         self.experience_generator = experience_generator
+        
+        # Load Composio tool cache for placeholder validation
+        self.composio_cache = self._load_composio_cache()
 
         self.logger.info("CodeGenerator initialized successfully")
+    
+    def _load_composio_cache(self) -> Dict[str, Any]:
+        """
+        Load Composio tool cache from composio_schemas_cache.json.
+        Used by placeholder validator for deep schema validation.
+        
+        Returns:
+            Dict mapping tool_id -> tool schema, or {} if not available
+        """
+        try:
+            cache_file = 'composio_schemas_cache.json'
+            # Navigate from code_interpreter/code_interpreter/ to project/plugins/
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            cache_path = os.path.join(base_dir, 'project', 'plugins', cache_file)
+            
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+                    self.logger.info(f"✅ [TOOL_CACHE] Loaded {len(cache)} tools for validation")
+                    return cache
+            else:
+                self.logger.warning(f"⚠️ [TOOL_CACHE] Cache not found at {cache_path} (optional for validation)")
+                return {}
+        except Exception as e:
+            self.logger.warning(f"⚠️ [TOOL_CACHE] Failed to load cache: {e} (optional for validation)")
+            return {}
 
     def configure_verification(
         self,
@@ -135,13 +167,6 @@ class CodeGenerator(Role):
             )
         return "\n".join(requirements)
 
-    def compose_sys_prompt(self, context: str):
-        return self.instruction_template.format(
-            ENVIRONMENT_CONTEXT=context,
-            ROLE_NAME=self.role_name,
-            RESPONSE_JSON_SCHEMA=json.dumps(self.response_json_schema),
-        )
-
     def get_env_context(self):
         # get date and time
         now = datetime.datetime.now()
@@ -149,122 +174,6 @@ class CodeGenerator(Role):
 
         return f"- Current time: {current_time}"
 
-    def _validate_parameter_references(self, workflow_json: dict) -> List[str]:
-        """
-        Validate that all parameter references point to existing fields in source nodes.
-        
-        Checks:
-        1. Node references (${{node.field}}) point to valid nodes and fields
-        2. Simple placeholders (${{xyz}}) use valid prefixes (EXTRACT:, from_step:, etc.)
-        
-        Args:
-            workflow_json: Generated workflow dictionary
-            
-        Returns:
-            List of validation errors/warnings
-        """
-        import re
-        warnings = []
-        
-        nodes = workflow_json.get('nodes', [])
-        node_map = {node['id']: node for node in nodes}
-        
-        # Pattern 1: Node references with dot - ${{node_id.field_name}} or ${{from_step:node_id.field_name}}
-        # ✅ FIX: Captures optional prefix (from_step:, from_loop:, aggregate:), node_id, and field_name
-        param_ref_pattern = r'\$\{\{?(?:from_step:|from_loop:|aggregate:)?([a-zA-Z_][a-zA-Z0-9_]*?)\.([a-zA-Z_][a-zA-Z0-9_]*?)\}?\}'
-        
-        # Pattern 2: Simple placeholders (no dot) - ${{something}}
-        simple_placeholder_pattern = r'\$\{\{([a-zA-Z_][a-zA-Z0-9_:.\[\]]*?)\}\}'
-        
-        # Valid prefixes for simple placeholders (from code_generator_prompt.yaml line 227)
-        valid_prefixes = ['EXTRACT:', 'from_step:', 'from_loop:', 'aggregate:', 'loop_item']
-        
-        for node in nodes:
-            node_id = node.get('id', '?')
-            node_type = node.get('type', '?')
-            
-            # Check params field for parameter references
-            params = node.get('params', {})
-            if not params:
-                continue
-            
-            for param_name, param_value in params.items():
-                if not isinstance(param_value, str):
-                    continue
-                
-                # ✅ CHECK 1: Detect invalid simple placeholders (e.g., ${{channel_id}})
-                # Extract ALL ${{...}} patterns first
-                all_placeholders = re.findall(simple_placeholder_pattern, param_value)
-                
-                for placeholder_content in all_placeholders:
-                    # Check if it has a dot (node reference) or valid prefix
-                    has_dot = '.' in placeholder_content
-                    has_valid_prefix = any(placeholder_content.startswith(prefix) for prefix in valid_prefixes)
-                    
-                    # If no dot AND no valid prefix, it's INVALID
-                    if not has_dot and not has_valid_prefix:
-                        warnings.append(
-                            f"[ERROR] Invalid placeholder '${{{{{placeholder_content}}}}}' in node '{node_id}' param '{param_name}'. "
-                            f"Use one of:\n"
-                            f"  • ${{{{EXTRACT:{placeholder_content}}}}} - Extract from user query\n"
-                            f"  • ${{{{from_step:node_id.{placeholder_content}}}}} - Reference previous node field\n"
-                            f"  • Static value: \"{placeholder_content}\" (without ${{{{...}}}})\n"
-                            f"💡 Common fix: If '{placeholder_content}' should come from a form, "
-                            f"add a form node with field name='{placeholder_content}', then use ${{{{from_step:form_node.{placeholder_content}}}}}"
-                        )
-                
-                # ✅ CHECK 2: Validate node.field references point to valid sources
-                matches = re.findall(param_ref_pattern, param_value)
-                
-                for source_node_id, field_name in matches:
-                    # Check if source node exists
-                    if source_node_id not in node_map:
-                        warnings.append(
-                            f"[ERROR] Node '{node_id}' references non-existent node '{source_node_id}' in param '{param_name}'"
-                        )
-                        continue
-                    
-                    source_node = node_map[source_node_id]
-                    source_type = source_node.get('type', '?')
-                    
-                    # Validate field exists in source node based on its type
-                    if source_type == 'form':
-                        # Check if field exists in form fields
-                        form_fields = source_node.get('fields', [])
-                        field_names = [f.get('name') for f in form_fields if isinstance(f, dict)]
-                        
-                        if field_name not in field_names:
-                            warnings.append(
-                                f"[ERROR] Node '{node_id}' ({node_type}) references field '{field_name}' from form node '{source_node_id}', "
-                                f"but form only has fields: {field_names}. "
-                                f"💡 Form must collect '{field_name}' field for downstream use!"
-                            )
-                    
-                    elif source_type == 'hitl':
-                        # HITL nodes expose approval status and collected data
-                        # We'll trust the LLM and log for debugging
-                        self.logger.info(
-                            f"[PARAM_REF] Node '{node_id}' references '{source_node_id}.{field_name}' "
-                            f"(source type: {source_type})"
-                        )
-                    
-                    elif source_type in ['agent_with_tools', 'code_execution']:
-                        # These expose their response data - harder to validate without schema
-                        # We'll trust the LLM here but log for debugging
-                        self.logger.info(
-                            f"[PARAM_REF] Node '{node_id}' references '{source_node_id}.{field_name}' "
-                            f"(source type: {source_type})"
-                        )
-        
-        if warnings:
-            self.logger.warning(f"[PARAM_VALIDATION] Found {len(warnings)} parameter reference issues")
-            for warning in warnings:
-                self.logger.warning(f"  {warning}")
-        else:
-            self.logger.info(f"[PARAM_VALIDATION] ✅ All parameter references are valid")
-        
-        return warnings
-    
     def _extract_tool_ids_from_actions(self, composio_actions: str, init_plan: str = "") -> List[str]:
         """
         Extract tool IDs from select_composio_actions() formatted output.
@@ -278,48 +187,73 @@ class CodeGenerator(Role):
         
         🔑 CRITICAL: This creates the filtered enum (5-50 tools, not 17k!)
         
-        ✅ DETERMINISTIC FILTERING: Uses step numbers from init_plan
-        - Parse init_plan → Get step numbers with <interactive dependency>
-        - Remove tools at those positions (by list order)
-        - LLM only sees tools for non-interactive steps
-        - LLM naturally uses native form/hitl for interactive steps
+        ✅ HIERARCHICAL MAPPING (Alternative 2):
+        - Parse init_plan into hierarchical structure (handles 2.1, 2.2 sub-steps)
+        - Map tools to <agent_with_tools> steps in sequential order
+        - Returns only tools that match agent_with_tools steps
         """
         import re
         # ✅ FIX: Match format "- ACTION_ID (app: ...)" or "- ACTION_ID:"
         all_tool_ids = re.findall(r'^\s*-\s*([A-Z][A-Z0-9_]+)\s*(?:\(app:|:)', composio_actions, re.MULTILINE)
         
-        # ✅ DETERMINISTIC: Parse init_plan to find interactive step positions
         self.logger.info(f"[FUNCTION_CALLING] _extract_tool_ids_from_actions called with init_plan length: {len(init_plan)}")
-        interactive_step_nums = set()
-        if init_plan:
-            self.logger.info(f"[FUNCTION_CALLING] Parsing init_plan for interactive steps...")
-            for line in init_plan.split('\n'):
-                self.logger.info(f"[FUNCTION_CALLING] Checking line: {line[:100]}")
-                # Match "1. Description <interactive dependency>" OR "3. Description <interactive dependency on 2>"
-                match = re.match(r'^\s*(\d+)\.\s+.*<interactive dependency(?:\s+on\s+\d+)?>', line)
-                if match:
-                    step_num = int(match.group(1))
-                    interactive_step_nums.add(step_num)
-                    self.logger.info(f"[FUNCTION_CALLING] Found interactive step: {step_num}")
-            
-            if interactive_step_nums:
-                self.logger.info(f"[FUNCTION_CALLING] Interactive steps detected: {sorted(interactive_step_nums)}")
-            else:
-                self.logger.warning(f"[FUNCTION_CALLING] ⚠️ No interactive steps found in init_plan!")
+        self.logger.info(f"[FUNCTION_CALLING] Composio returned {len(all_tool_ids)} tools: {all_tool_ids}")
         
-        # Remove tools at interactive step positions (1-indexed)
-        filtered_tool_ids = []
-        for idx, tool_id in enumerate(all_tool_ids, start=1):
-            if idx in interactive_step_nums:
-                self.logger.info(f"[FUNCTION_CALLING] Skipping tool at position {idx}: {tool_id} (interactive step)")
+        if not init_plan:
+            self.logger.warning(f"[FUNCTION_CALLING] No init_plan provided - returning all tools")
+            return all_tool_ids
+        
+        # ✅ HIERARCHICAL: Parse init_plan into structured steps (handles 2.1, 2.2 correctly)
+        self.logger.info(f"[FUNCTION_CALLING] Parsing init_plan hierarchically...")
+        steps = []
+        for line in init_plan.split('\n'):
+            # Match both top-level (1.) and nested (2.1.) step numbers
+            match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+(.+?)\s*<([\w_]+)>', line)
+            if match:
+                step_num, description, step_type = match.groups()
+                steps.append({
+                    'num': step_num,
+                    'desc': description.strip(),
+                    'type': step_type,
+                    'needs_tool': step_type == 'agent_with_tools'
+                })
+                self.logger.info(
+                    f"[FUNCTION_CALLING] Step {step_num}: '{description[:50]}' <{step_type}> "
+                    f"(needs_tool={step_type == 'agent_with_tools'})"
+                )
+        
+        # Filter to only agent_with_tools steps (in order)
+        agent_steps = [s for s in steps if s['needs_tool']]
+        self.logger.info(
+            f"[FUNCTION_CALLING] Found {len(agent_steps)} agent_with_tools steps: "
+            f"{[s['num'] for s in agent_steps]}"
+        )
+        
+        # ✅ EXPLICIT MAPPING: Map tools to agent_with_tools steps (1:1 in order)
+        # Composio returns tools in execution order matching the agent_with_tools steps
+        tool_mapping = {}
+        for idx, step in enumerate(agent_steps):
+            if idx < len(all_tool_ids):
+                tool_mapping[step['num']] = all_tool_ids[idx]
+                self.logger.info(
+                    f"[MAPPING] Step {step['num']} ('{step['desc'][:40]}') → {all_tool_ids[idx]}"
+                )
             else:
-                filtered_tool_ids.append(tool_id)
+                self.logger.warning(
+                    f"[MAPPING] No tool available for step {step['num']} - "
+                    f"Composio returned {len(all_tool_ids)} tools but need {len(agent_steps)}"
+                )
+        
+        # Return only tools that were mapped to agent_with_tools steps
+        filtered_tool_ids = list(tool_mapping.values())
         
         if len(filtered_tool_ids) < len(all_tool_ids):
             removed = len(all_tool_ids) - len(filtered_tool_ids)
-            self.logger.info(f"[FUNCTION_CALLING] Filtered out {removed} tools for interactive steps")
+            self.logger.info(
+                f"[FUNCTION_CALLING] Filtered out {removed} tools (not needed for agent_with_tools steps)"
+            )
         
-        self.logger.info(f"[FUNCTION_CALLING] Extracted {len(filtered_tool_ids)} tool IDs for enum (after filtering)")
+        self.logger.info(f"[FUNCTION_CALLING] Extracted {len(filtered_tool_ids)} tool IDs for enum (after hierarchical mapping)")
         return filtered_tool_ids
 
 
@@ -443,164 +377,13 @@ class CodeGenerator(Role):
         
         return python_code
 
-    def compose_prompt(
-        self,
-        rounds: List[Round],
-        plugins: List[PluginEntry],
-        planning_enrichments: Optional[List[str]] = None,
-    ) -> List[ChatMessageType]:
-        experiences = self.format_experience(
-            template=self.prompt_data["experience_instruction"],
-        )
-
-        chat_history = [
-            format_chat_message(
-                role="system",
-                message=f"{self.compose_sys_prompt(context=self.get_env_context())}" f"\n{experiences}",
-            ),
-        ]
-
-        for i, example in enumerate(self.examples):
-            chat_history.extend(
-                self.compose_conversation(example.rounds, example.plugins, add_requirements=False),
-            )
-
-        summary = None
-        if self.config.prompt_compression:
-            summary, rounds = self.round_compressor.compress_rounds(
-                rounds,
-                rounds_formatter=lambda _rounds: str(
-                    self.compose_conversation(_rounds, plugins, add_requirements=False),
-                ),
-                prompt_template=self.compression_template,
-            )
-
-        chat_history.extend(
-            self.compose_conversation(
-                rounds,
-                add_requirements=True,
-                summary=summary,
-                plugins=plugins,
-                planning_enrichments=planning_enrichments,
-            ),
-        )
-        return chat_history
-
-    def format_attachment(self, attachment: Attachment):
-        if attachment.type == AttachmentType.thought and "{ROLE_NAME}" in attachment.content:
-            return attachment.content.format(ROLE_NAME=self.role_name)
-        else:
-            return attachment.content
-
-    def compose_conversation(
-        self,
-        rounds: List[Round],
-        plugins: List[PluginEntry],
-        add_requirements: bool = False,
-        summary: Optional[str] = None,
-        planning_enrichments: Optional[List[str]] = None,
-    ) -> List[ChatMessageType]:
-        chat_history: List[ChatMessageType] = []
-        ignored_types = [
-            AttachmentType.revise_message,
-            AttachmentType.verification,
-            AttachmentType.code_error,
-            AttachmentType.execution_status,
-            AttachmentType.execution_result,
-        ]
-
-        is_first_post = True
-        last_post: Post = None
-        for round_index, conversation_round in enumerate(rounds):
-            for post_index, post in enumerate(conversation_round.post_list):
-                # compose user query
-                user_message = ""
-                assistant_message = ""
-                is_final_post = round_index == len(rounds) - 1 and post_index == len(conversation_round.post_list) - 1
-                if is_first_post:
-                    user_message = (
-                        self.conversation_head_template.format(
-                            SUMMARY="None" if summary is None else summary,
-                            PLUGINS="None" if len(plugins) == 0 else self.format_plugins(plugins),
-                            ROLE_NAME=self.role_name,
-                        )
-                        + "\n"
-                    )
-                    is_first_post = False
-
-                if post.send_from == "Planner" and post.send_to == self.alias:
-                    # to avoid planner imitating the below handcrafted format,
-                    # we merge context information in the code generator here
-                    enrichment = ""
-                    if is_final_post:
-                        user_query = conversation_round.user_query
-                        enrichment = f"The user request is: {user_query}\n\n"
-
-                        if planning_enrichments:
-                            enrichment += "Additional context:\n" + "\n".join(planning_enrichments) + "\n\n"
-
-                    user_feedback = "None"
-                    if last_post is not None and last_post.send_from == self.alias:
-                        user_feedback = format_code_feedback(last_post)
-
-                    user_message += self.user_message_head_template.format(
-                        FEEDBACK=user_feedback,
-                        MESSAGE=f"{enrichment}The task for this specific step is: {post.message}",
-                    )
-                elif post.send_from == post.send_to == self.alias:
-                    # for code correction
-                    user_message += self.user_message_head_template.format(
-                        FEEDBACK=format_code_feedback(post),
-                        MESSAGE=f"{post.get_attachment(AttachmentType.revise_message)[0].content}",
-                    )
-
-                    assistant_message = self.post_translator.post_to_raw_text(
-                        post=post,
-                        content_formatter=self.format_attachment,
-                        if_format_message=False,
-                        if_format_send_to=False,
-                        ignored_types=ignored_types,
-                    )
-                elif post.send_from == self.alias and post.send_to == "Planner":
-                    if is_final_post:
-                        # This user message is added to make the conversation complete
-                        # It is used to make sure the last assistant message has a feedback
-                        # This is only used for examples or context summarization
-                        user_message += self.user_message_head_template.format(
-                            FEEDBACK=format_code_feedback(post),
-                            MESSAGE="This is the feedback.",
-                        )
-
-                    assistant_message = self.post_translator.post_to_raw_text(
-                        post=post,
-                        content_formatter=self.format_attachment,
-                        if_format_message=False,
-                        if_format_send_to=False,
-                        ignored_types=ignored_types,
-                    )
-                else:
-                    raise ValueError(f"Invalid post: {post}")
-                last_post = post
-
-                if len(assistant_message) > 0:
-                    chat_history.append(
-                        format_chat_message(
-                            role="assistant",
-                            message=assistant_message,
-                        ),
-                    )
-                if len(user_message) > 0:
-                    # add requirements to the last user message
-                    if is_final_post and add_requirements:
-                        user_message += "\n" + self.query_requirements_template.format(
-                            CODE_GENERATION_REQUIREMENTS=self.compose_verification_requirements(),
-                            ROLE_NAME=self.role_name,
-                        )
-                    chat_history.append(
-                        format_chat_message(role="user", message=user_message),
-                    )
-
-        return chat_history
+    # ============================================================================
+    # LEGACY METHODS DELETED (unused after function calling migration)
+    # - compose_prompt()
+    # - compose_conversation()
+    # - format_attachment()
+    # These were only used by the non-function-calling path which has been removed.
+    # ============================================================================
 
     def select_plugins_for_prompt(
         self,
@@ -644,6 +427,13 @@ class CodeGenerator(Role):
         # Planner's message can lose key domain keywords (e.g., "flights" → "passenger details")
         # This ensures action matcher sees the full user intent with all domain-specific terms
         original_user_query = rounds[-1].user_query if hasattr(rounds[-1], 'user_query') and rounds[-1].user_query else query
+        
+        # ✅ DEBUG: Log what queries we're working with
+        self.logger.info(f"[QUERY_DEBUG] Planner message (query): {query[:150]}")
+        self.logger.info(f"[QUERY_DEBUG] Original user query: {original_user_query[:150]}")
+        self.logger.info(f"[QUERY_DEBUG] Has user_query attr: {hasattr(rounds[-1], 'user_query')}")
+        if hasattr(rounds[-1], 'user_query'):
+            self.logger.info(f"[QUERY_DEBUG] Round user_query value: {rounds[-1].user_query[:150] if rounds[-1].user_query else 'None'}")
 
         self.tracing.set_span_attribute("query", query)
         self.tracing.set_span_attribute("enable_auto_plugin_selection", self.config.enable_auto_plugin_selection)
@@ -654,20 +444,9 @@ class CodeGenerator(Role):
 
         self.role_load_experience(query=query, memory=memory)
         
-        # ✅ TRACEBACK: Log example loading
-        self.logger.info(f"[EXAMPLE_LOADING] 📂 Loading examples from: {self.config.example_base_path}")
-        self.role_load_example(memory=memory, role_set={self.alias, "Planner"})
-        if hasattr(self, 'examples') and self.examples:
-            self.logger.info(f"[EXAMPLE_LOADING] ✅ Loaded {len(self.examples)} examples successfully")
-            for idx, example in enumerate(self.examples):
-                self.logger.info(f"[EXAMPLE_LOADING]   Example {idx+1}: {len(example.rounds)} rounds, enabled={example.enabled}")
-                # Log first round user_query to verify correct example
-                if example.rounds:
-                    user_query = getattr(example.rounds[0], 'user_query', 'N/A')
-                    self.logger.info(f"[EXAMPLE_LOADING]     Query: {user_query[:80]}...")
-        else:
-            self.logger.warning(f"[EXAMPLE_LOADING] ⚠️  NO EXAMPLES LOADED!")
-
+        # ✅ LEGACY: Example loading removed (not used by function calling path)
+        # Function calling relies on JSON schema, not conversation examples
+        
         planning_enrichments = memory.get_shared_memory_entries(entry_type="plan")
         
         # ✅ Extract init_plan from Planner's attachments (has <interactive dependency> markers)
@@ -726,6 +505,11 @@ class CodeGenerator(Role):
                 # ✅ On retry (when query is "Failed to generate code..."), use original_user_query
                 # This ensures cache lookup matches the cached key from first attempt
                 query_for_composio = original_user_query if "failed" in query.lower() or "error" in query.lower() else query
+                
+                # ✅ DEBUG: Log what's being sent to Composio
+                self.logger.info(f"[COMPOSIO_CALL] user_query param: {query_for_composio[:150]}")
+                self.logger.info(f"[COMPOSIO_CALL] context param (sent to batch API): {original_user_query[:150]}")
+                self.logger.info(f"[COMPOSIO_CALL] session_id: {session_id}")
                 
                 composio_actions = select_composio_actions(
                     user_query=query_for_composio,  # Use original query on retry for cache hit
@@ -991,32 +775,38 @@ class CodeGenerator(Role):
                             f"{original_node_count} → {corrected_node_count} nodes"
                         )
                     
-                    # ✅ VALIDATION: Validate all parameter references have valid source fields
-                    # (After auto-correction fixes invalid references)
-                    param_warnings = self._validate_parameter_references(workflow_json)
+                    # ✅ VALIDATION: Comprehensive placeholder validation (Pydantic-based)
+                    # Validates:
+                    # 1. Simple placeholders (${{bare_name}}) use valid prefixes
+                    # 2. Cross-node references (${{from_step:node.field}}) point to valid fields
+                    # 3. Nested paths and array access patterns
+                    # 4. Runtime keywords (loop_item, loop_index) are properly handled
+                    validation_result = validate_workflow_placeholders(
+                        workflow_dict=workflow_json,
+                        tool_cache=self.composio_cache
+                    )
                     
-                    if param_warnings:
-                        # Check if any are errors (not just warnings)
-                        errors = [w for w in param_warnings if '[ERROR]' in w]
-                        if errors:
-                            self.logger.error(f"[DYNAMIC_VAL] {len(errors)} param validation errors")
-                            for error in errors[:5]:  # Show first 5
-                                self.logger.error(f"  {error}")
-                            
-                            # ⚠️ VALIDATION ERRORS: Send back to Planner for retry with hints
-                            error_summary = "\n".join(errors[:10])  # Top 10 errors
-                            
-                            # Build a completely dynamic error message based on actual errors
-                            error_message = (
-                                f"⚠️ Workflow validation failed with {len(errors)} parameter reference errors:\n\n"
-                                f"{error_summary}\n\n"
-                                f"💡 Fix these issues and regenerate the workflow."
-                            )
-                            post_proxy.update_attachment(error_message, AttachmentType.revise_message)
-                            post_proxy.update_send_to("CodeInterpreter")  # ✅ Send to self for retry with error feedback
-                            return post_proxy.end()
-                        else:
-                            self.logger.warning(f"[DYNAMIC_VAL] {len(param_warnings)} param warnings")
+                    if not validation_result.valid:
+                        self.logger.error(f"[PLACEHOLDER_VAL] {len(validation_result.errors)} validation errors")
+                        for error in validation_result.errors[:5]:  # Show first 5
+                            self.logger.error(f"  {error}")
+                        
+                        # ⚠️ VALIDATION ERRORS: Send back to CodeInterpreter for retry with detailed feedback
+                        error_summary = "\n".join(validation_result.errors[:10])  # Top 10 errors
+                        
+                        # Build a completely dynamic error message based on actual errors
+                        error_message = (
+                            f"⚠️ Workflow validation failed with {len(validation_result.errors)} placeholder errors:\n\n"
+                            f"{error_summary}\n\n"
+                            f"💡 Fix these issues and regenerate the workflow."
+                        )
+                        post_proxy.update_attachment(error_message, AttachmentType.revise_message)
+                        post_proxy.update_send_to("CodeInterpreter")  # ✅ Send to self for retry with error feedback
+                        return post_proxy.end()
+                    elif validation_result.warnings:
+                        self.logger.warning(f"[PLACEHOLDER_VAL] {len(validation_result.warnings)} warnings (non-blocking)")
+                        for warning in validation_result.warnings[:3]:  # Show first 3
+                            self.logger.warning(f"  {warning}")
                     
                     # Step 3: Pydantic structural validation (node types, edges, DAG)
                     from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
@@ -1080,16 +870,6 @@ class CodeGenerator(Role):
         )
         post_proxy.update_send_to("User")
         return post_proxy.end()
-
-    def format_plugins(
-        self,
-        plugin_list: List[PluginEntry],
-    ) -> str:
-        if self.config.load_plugin:
-            return "\n".join(
-                [plugin.format_prompt() for plugin in plugin_list],
-            )
-        return ""
 
     def get_plugin_pool(self) -> List[PluginEntry]:
         return self.plugin_pool

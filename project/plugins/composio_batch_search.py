@@ -176,7 +176,7 @@ class AIBatchSearch:
             BatchSearchResult with tools and guidance
         """
         logger.info(f"🔍 [BATCH_SEARCH] Starting batch search...")
-        logger.debug(f"📝 [BATCH_SEARCH] Prompt: {user_prompt[:200]}...")
+        logger.info(f"📝 [BATCH_SEARCH] FULL Prompt being sent to Composio:\n{user_prompt}")
         
         # ===== STEP 1: BUILD BATCH PAYLOAD =====
         logger.info("📤 [STEP 1] Sending full prompt to Composio (let Composio decompose)...")
@@ -189,13 +189,15 @@ class AIBatchSearch:
             'index': 1
         }]
         
+        logger.info(f"[DEBUG_PAYLOAD] Queries being sent: {queries}")
+        
+        # ✅ FIX: Don't send session field to avoid namespace lookup errors
+        # Composio's namespace 'usecase_plans_prod_new_v1' doesn't exist (404 error)
+        # Omitting 'session' entirely allows Composio to work without cached plans
         payload = {
             'arguments': {
-                'queries': queries,
-                'session': {
-                    'generate_id': session_id is None,
-                    **({'id': session_id} if session_id else {})
-                }
+                'queries': queries
+                # ✅ NO session field - avoid namespace lookups entirely
             },
             'entity_id': entity_id
         }
@@ -233,6 +235,18 @@ class AIBatchSearch:
         logger.info("📥 [STEP 3] Parsing batch API response...")
         
         data = response.json()
+        
+        # ✅ DEBUG: Log raw API response to diagnose field name changes
+        import json
+        logger.info(f"[DEBUG_RAW] Full Composio response structure: {json.dumps(data, indent=2)[:3000]}")
+        logger.info(f"[DEBUG_RAW] Top-level keys: {list(data.keys())}")
+        if 'data' in data:
+            logger.info(f"[DEBUG_RAW] data keys: {list(data.get('data', {}).keys())}")
+            if 'results' in data.get('data', {}):
+                results = data['data']['results']
+                if results and len(results) > 0:
+                    logger.info(f"[DEBUG_RAW] First result keys: {list(results[0].keys())}")
+        
         result = self._parse_batch_result(data, user_prompt)
         
         logger.info(
@@ -275,6 +289,9 @@ class AIBatchSearch:
             index = result_data.get('index', 0)
             use_case = result_data.get('use_case', '')
             
+            # ✅ DEBUG: Log ALL fields in result_data to see what Composio is actually returning
+            logger.info(f"[DEBUG_FIELDS] Result {index} available fields: {list(result_data.keys())}")
+            
             # Try multiple possible field names for tools (API might have changed)
             # ✅ UPDATED: Composio changed from 'main_tool_slugs' to 'primary_tool_slugs'
             main_tool_slugs = (
@@ -286,6 +303,12 @@ class AIBatchSearch:
                 result_data.get('tool_slugs', []) or
                 []
             )
+            
+            # ✅ DEBUG: Log what each field actually contains
+            logger.info(f"[DEBUG_FIELDS] primary_tool_slugs: {result_data.get('primary_tool_slugs', 'NOT_FOUND')}")
+            logger.info(f"[DEBUG_FIELDS] main_tool_slugs: {result_data.get('main_tool_slugs', 'NOT_FOUND')}")
+            logger.info(f"[DEBUG_FIELDS] tools: {result_data.get('tools', 'NOT_FOUND')}")
+            logger.info(f"[DEBUG_FIELDS] Final main_tool_slugs: {main_tool_slugs}")
             
             validated_plan = result_data.get('validated_plan', [])
             pitfalls = result_data.get('pitfalls', [])

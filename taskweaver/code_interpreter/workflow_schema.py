@@ -31,6 +31,7 @@ class WorkflowNode(BaseModel):
         "hitl", 
         "form",
         "code_execution",
+        "loop",
         "parallel"
     ] = Field(..., description="Node execution type")
     
@@ -219,7 +220,7 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
                                 f"[!] INVALID NODE TYPE at {loc}: '{actual_value}' is not valid.\n"
                                 f"    ✅ CORRECT: Use type='parallel' with parallel_nodes=['child1', 'child2', ...]\n"
                                 f"    📚 See example: Check stock prices from 3 financial APIs\n"
-                                f"    ℹ️  Valid types: agent_with_tools, code_execution, form, hitl, parallel"
+                                f"    ℹ️  Valid types: agent_with_tools, agent_only, code_execution, form, hitl, loop, parallel"
                             )
                             continue
                     except:
