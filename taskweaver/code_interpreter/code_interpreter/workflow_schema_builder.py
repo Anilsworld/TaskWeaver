@@ -700,7 +700,7 @@ class WorkflowSchemaBuilder:
             "description": (
                 "Parallel execution node - executes multiple nodes simultaneously. "
                 "Use this when multiple operations can run independently (e.g., fetching from multiple APIs). "
-                "Example: Fetch emails from Gmail, Outlook, Instagram, and Facebook at the same time."
+                "Example: Fetch data from Platform A, Platform B, Service X, and Service Y at the same time."
             ),
             "properties": {
                 "id": {"type": "string"},
@@ -728,7 +728,7 @@ class WorkflowSchemaBuilder:
                 "Loop node for iterating over arrays/collections. "
                 "🎯 USE THIS when same operation repeats 3+ times with different inputs. "
                 "💡 BENEFITS: 90% token savings vs separate nodes! "
-                "Example: 'Fetch from Gmail, Outlook, Slack, Teams' → ONE loop node (not 4 separate nodes). "
+                "Example: 'Fetch from multiple platforms' → ONE loop node (not 4 separate nodes). "
                 "\n\n"
                 "WHEN TO USE:\n"
                 "- Same tool_id repeated multiple times\n"

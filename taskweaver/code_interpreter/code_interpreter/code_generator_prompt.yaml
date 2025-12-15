@@ -1,36 +1,6 @@
 version: 0.2
 content: |-
-    ## 🚨 STEP 1: CHECK ENVIRONMENT CONTEXT FIRST (MANDATORY!)
     {ENVIRONMENT_CONTEXT}
-    
-    **STOP! Before generating ANY code, check the environment context above for these flags:**
-    
-    ### 🚫 HARD CONSTRAINT: _use_loops Flag (MANDATORY CHECK!)
-    ```
-    IF "_use_loops: True" appears above:
-      → YOU MUST use loops, NOT separate nodes!
-      → Generating 3+ nodes with same operation = IMMEDIATE REJECTION
-      → Example: "fetch from Gmail, Outlook, Slack" → ONE loop node, NOT 3 fetch nodes
-    
-    IF "_complexity_guidance:" appears above:
-      → READ IT CAREFULLY - it contains MANDATORY requirements
-      → Example: "Token savings: 4300 tokens" means you MUST use the suggested pattern
-      → IGNORING this guidance = workflow will be rejected for exceeding token limits
-    ```
-    
-    **WHY THIS IS CRITICAL:**
-    - Workflows with 4+ similar nodes hit LLM token limits (>4000 tokens)
-    - System ALREADY analyzed the query and determined optimal pattern
-    - Your job: FOLLOW the guidance, don't second-guess it
-    
-    **CORRECT Pattern When _use_loops=True:**
-    ```python
-    # ✅ ONE loop node (400 tokens)
-    loops: [{{"iterate_over": "${{items}}", "loop_body": ["process_item"]}}]
-    
-    # ❌ 4 separate nodes (4800 tokens) - REJECTED!
-    nodes: [fetch_gmail, fetch_outlook, fetch_slack, fetch_teams]
-    ```
     
     ## On conversations:
     - Each conversation starts with "==============================\n## Conversation Start"
@@ -88,8 +58,8 @@ content: |-
     - ❌ Don't create app_name from user's text (they use casual language)
     
     **EXAMPLE FROM YOUR LOGS:**
-    User: "Fetch from Gmail, Outlook, Instagram, Facebook and reply to each"
-    - ✅ CORRECT app names: gmail, outlook, instagram, facebook (4 apps)
+    User: "Fetch from Platform A, Platform B, Service X, Service Y and reply to each"
+    - ✅ CORRECT app names: platforma, platformb, servicex, servicey (4 apps)
     - ❌ WRONG app names: fetch, reply, cal, exist, parallel (5 false positives)
     
     **RULE:** If a word doesn't have a "WORD_*" pattern in Available Actions, it's NOT an app!
@@ -184,7 +154,7 @@ content: |-
          - ❌ DO NOT use plausible-sounding names like "SHOPIFY_SEARCH_PRODUCTS", "STRIPE_CHARGE_CARD", "HOTEL_API_SEARCH"
          - ❌ DO NOT proceed with workflow generation
          - ✅ Instead: Return a clear message explaining what's missing
-         - ✅ Example: "I cannot create this workflow because I don't have access to hotel booking APIs in the available actions list. I can work with Gmail, Slack, Google Sheets, and 800+ other integrations."
+         - ✅ Example: "I cannot create this workflow because I don't have access to hotel booking APIs in the available actions list. I can work with email platforms, messaging apps, spreadsheet tools, and 800+ other integrations."
       4. ONLY proceed with workflow generation if ALL tools exist in the actions list
       5. **CRITICAL**: Every tool_id MUST be copied EXACTLY from the "Available Composio Actions" list - no modifications, no inventions
     - This format supports ALL workflow patterns: sequential, parallel, conditional, loops, nested, multi-dimensional, any complexity
@@ -200,12 +170,12 @@ content: |-
       WORKFLOW = {{
         "nodes": [
           {{"id": "get_ticket_info", "type": "form", "form_id": "ticket_form", "title": "Support Ticket", "fields": [{{"name": "title", "label": "Issue Title", "required": True}}, {{"name": "priority", "type": "select", "options": ["High", "Low"], "required": True}}], "description": "Collect ticket details"}},
-          {{"id": "search_all_docs", "type": "parallel", "parallel_nodes": ["search_jira", "search_confluence"], "description": "Search documentation in parallel"}},
-          {{"id": "search_jira", "type": "agent_with_tools", "tool_id": "JIRA_SEARCH_ISSUES", "app_name": "jira", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Jira"}},
-          {{"id": "search_confluence", "type": "agent_with_tools", "tool_id": "CONFLUENCE_SEARCH", "app_name": "confluence", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Confluence"}},
-          {{"id": "analyze_results", "type": "agent_only", "description": "Analyze search results", "params": {{"jira_results": "${{search_jira.issues}}", "confluence_results": "${{search_confluence.pages}}"}}}},
+          {{"id": "search_all_docs", "type": "parallel", "parallel_nodes": ["search_tool_a", "search_tool_b"], "description": "Search documentation in parallel"}},
+          {{"id": "search_tool_a", "type": "agent_with_tools", "tool_id": "TOOLA_SEARCH", "app_name": "toola", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Tool A"}},
+          {{"id": "search_tool_b", "type": "agent_with_tools", "tool_id": "TOOLB_SEARCH", "app_name": "toolb", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Tool B"}},
+          {{"id": "analyze_results", "type": "agent_only", "description": "Analyze search results", "params": {{"toola_results": "${{search_tool_a.issues}}", "toolb_results": "${{search_tool_b.pages}}"}}}},
           {{"id": "approve_solution", "type": "hitl", "form_id": "approval_form", "title": "Approve Solution", "fields": [{{"name": "decision", "type": "select", "options": ["Create Ticket", "Mark Resolved"], "required": True}}], "description": "Approve action"}},
-          {{"id": "create_ticket", "type": "agent_with_tools", "tool_id": "JIRA_CREATE_ISSUE", "app_name": "jira", "params": {{"summary": "${{get_ticket_info.title}}", "priority": "${{get_ticket_info.priority}}"}}, "description": "Create Jira ticket"}}
+          {{"id": "create_ticket", "type": "agent_with_tools", "tool_id": "TOOLA_CREATE", "app_name": "toola", "params": {{"summary": "${{get_ticket_info.title}}", "priority": "${{get_ticket_info.priority}}"}}, "description": "Create ticket"}}
         ],
         "edges": [
           {{"source": "get_ticket_info", "target": "search_all_docs"}},
@@ -365,8 +335,8 @@ content: |-
     - Each item needs DIFFERENT tool_id
     - Operations are heterogeneous (search docs AND check issues AND query database)
     - User explicitly says "different" or "specific" for each item
-    - Example: "Search Jira, Confluence, and GitHub simultaneously"
-      ✅ USE: {{"id": "search_all", "type": "parallel", "parallel_nodes": ["search_jira", "search_confluence", "search_github"]}}
+    - Example: "Search multiple knowledge bases simultaneously"
+      ✅ USE: {{"id": "search_all", "type": "parallel", "parallel_nodes": ["search_tool_a", "search_tool_b", "search_tool_c"]}}
       ❌ DON'T: Loop (can't use different tool_ids in loop body)
     
     **DECISION FLOWCHART**:
@@ -400,10 +370,10 @@ content: |-
       * Example: "Review and approve responses", "Approve hotel booking", "Accept terms"
       
       **"agent_with_tools"** (External Tool/API Execution):
-      * Use when: Need to call external API/service via Composio (Gmail, Slack, databases, etc.)
+      * Use when: Need to call external API/service via Composio (messaging platforms, databases, etc.)
       * Has tool_id: EXACT tool_id from "Available Composio Actions" list
       * Behavior: Executes external action, returns API response
-      * Example: "Fetch Gmail messages", "Send Slack message", "Search hotels"
+      * Example: "Fetch platform messages", "Send notification", "Search database"
       
       **"agent_only"** (Pure AI Processing - Two Modes):
       * Use when: Need AI to analyze, transform, draft, or process data WITHOUT calling external APIs

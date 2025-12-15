@@ -206,11 +206,6 @@ class Planner(Role):
                     "\n  * Do NOT stop and talk to User for approval - generate the full workflow including post-approval steps"
                     "\n  * The workflow will be executed later; your job is to define the complete structure now"
                 )
-                
-                # ✅ ADD COMPLEXITY GUIDANCE
-                complexity_guidance = session_var.get("_complexity_guidance", "")
-                if complexity_guidance:
-                    context += complexity_guidance
         
         return context
 

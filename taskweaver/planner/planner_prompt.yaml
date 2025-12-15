@@ -67,7 +67,7 @@ instruction_template: |-
     * Example: "1. Collect customer name, email, and product requirements <form>"
     * ⚠️ CRITICAL RULES (DETERMINISTIC - MUST FOLLOW):
       1. Integration auth/permissions → NEVER use `<form>` (OAuth handles this automatically)
-         ❌ WRONG: "Collect Slack credentials <form>"
+         ❌ WRONG: "Collect platform credentials <form>"
          ✅ RIGHT: Just use the tool directly - auth is automatic
       2. Value already in prompt → NEVER ask again via `<form>`
          ❌ WRONG: User says "last 20 emails" → Don't create form asking for count
@@ -84,7 +84,7 @@ instruction_template: |-
     * Use when: Need user to approve, review, authorize, or make a decision
     * Example: "3. Get user approval for selected product <hitl>"
   
-  - `<agent_with_tools>` - Execute external API/tool (Gmail, Slack, databases, search engines, etc.)
+  - `<agent_with_tools>` - Execute external API/tool (messaging platforms, databases, search engines, etc.)
     * Use when: Calling external services or APIs
     * Example: "2. Search inventory database for matching products <agent_with_tools>"
   
@@ -101,7 +101,7 @@ instruction_template: |-
     * **CRITICAL: Loop body MUST be specified as sub-steps with indentation**
     * Example:
       ```
-      2. For each platform in [Gmail, Outlook, Slack], perform actions <loop>
+      2. For each platform in [Platform A, Platform B, Platform C], perform actions <loop>
          2.1. Fetch unread messages from platform <agent_with_tools>
          2.2. Mark messages as read <agent_with_tools>
       ```
@@ -110,12 +110,12 @@ instruction_template: |-
   
   - `<parallel>` - Execute multiple operations simultaneously (NOT a loop - different operations!)
     * Use when: Multiple DIFFERENT operations can run at the same time
-    * Example: "2. Search Jira, Confluence, and GitHub simultaneously <parallel>"
+    * Example: "2. Search Tool A, Tool B, and Tool C simultaneously <parallel>"
   
   **Marker Selection Rules (DETERMINISTIC):**
   1. INITIAL data collection (ONLY if NOT in prompt) → `<form>` 
      ✅ "Collect product preferences" (not specified)
-     ❌ "Collect Slack permissions" (auth, not user input)
+     ❌ "Collect platform permissions" (auth, not user input)
      ❌ "Get count" when user said "last 20" (already specified)
   2. Approval/review/authorization → `<hitl>` (e.g., "Approve order")
   3. External API/service call → `<agent_with_tools>` (e.g., "Send email", "Search database")
@@ -127,7 +127,7 @@ instruction_template: |-
   - "Collect approval" → `<hitl>` (NOT `<form>` - it's approval, not initial input)
   - "Get my emails" → `<agent_with_tools>` (NOT `<form>` - no user input needed, "my" = authenticated user)
   - "Last 20 messages" → `<agent_with_tools>` with limit=20 (NOT `<form>` - count already specified!)
-  - "Access Slack" → `<agent_with_tools>` (NOT `<form>` - OAuth handles auth automatically)
+  - "Access platform" → `<agent_with_tools>` (NOT `<form>` - OAuth handles auth automatically)
   - "Analyze data" → `<agent_only>` (NOT `<agent_with_tools>` - no external API)
   - "Fetch from A, B, C" → `<loop>` with sub-steps (NOT 3 separate steps!)
   - "Search X and Y simultaneously" → `<parallel>` with sub-steps (NOT `<loop>`)
@@ -240,21 +240,21 @@ instruction_template: |-
   3. Place order for approved products
   
   [Example 2: NO Form - Values Already Specified]
-  User: Get my last 30 GitHub commits and calculate which day I commit most
+  User: Get my last 30 version control commits and calculate which day I commit most
   init_plan:
-  1. Fetch last 30 commits from GitHub <agent_with_tools>
+  1. Fetch last 30 commits from repository <agent_with_tools>
   2. Calculate commit frequency by day <agent_only>
   3. Identify most active day <agent_only>
   plan:
-  1. Fetch GitHub commits and analyze commit patterns
-  ❌ WRONG: "1. Ask for GitHub credentials <form>" - OAuth handles this!
+  1. Fetch repository commits and analyze commit patterns
+  ❌ WRONG: "1. Ask for repository credentials <form>" - OAuth handles this!
   ❌ WRONG: "1. Collect commit count <form>" - User said "30"!
   ✅ CORRECT: No form needed, start with tool using limit=30
   
   [Example 2b: Loop Pattern with Sub-Steps]
-  User: Fetch unread messages from Gmail, Outlook, Slack, and Teams
+  User: Fetch unread messages from multiple messaging platforms
   init_plan:
-  1. Define platforms list: Gmail, Outlook, Slack, Teams <agent_only>
+  1. Define platforms list: Platform A, Platform B, Platform C, Platform D <agent_only>
   2. For each platform, perform fetch operations <loop>
      2.1. Fetch unread messages from platform <agent_with_tools>
   3. Summarize all messages <agent_only>
@@ -278,14 +278,16 @@ instruction_template: |-
   2. Aggregate results and get executive approval
   
   [Example 3: Parallel + Analysis Pattern]
-  User: Search Jira and Confluence simultaneously, then analyze results
+  User: Search multiple knowledge bases simultaneously, then analyze results
   init_plan:
   1. Collect search query from user <form>
-  2. Search Jira and Confluence simultaneously <parallel>
+  2. Search Tool A and Tool B simultaneously <parallel>
+     2.1. Search Tool A <agent_with_tools>
+     2.2. Search Tool B <agent_with_tools>
   3. Analyze and rank results by relevance <agent_only>
   4. Get approval for action <hitl>
   plan:
-  1. Collect search query and search Jira/Confluence in parallel
+  1. Collect search query and search tools in parallel
   2. Analyze results and get approval for action
   
   [Example 4: Pure AI Processing]
@@ -303,10 +305,10 @@ instruction_template: |-
   User: Collect customer preferences, search multiple product catalogs, analyze best options, get approval, and create order
   init_plan:
   1. Collect product category, budget, and feature preferences <form>
-  2. Search Amazon, eBay, and Walmart catalogs simultaneously <parallel>
-     2.1. Search Amazon catalog <agent_with_tools>
-     2.2. Search eBay catalog <agent_with_tools>
-     2.3. Search Walmart catalog <agent_with_tools>
+  2. Search multiple vendor catalogs simultaneously <parallel>
+     2.1. Search Vendor A catalog <agent_with_tools>
+     2.2. Search Vendor B catalog <agent_with_tools>
+     2.3. Search Vendor C catalog <agent_with_tools>
   3. Analyze results and rank by value (price + reviews) <agent_only>
   4. Get user approval for top recommendation <hitl>
   5. Create purchase order for approved item <agent_with_tools>

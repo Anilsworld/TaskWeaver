@@ -269,7 +269,7 @@ You have access to the following Composio tool IDs:
    ```
    
    **WHEN TO USE PARALLEL:**
-   - ✅ Fetching from multiple sources (Gmail + Outlook + Slack)
+   - ✅ Fetching from multiple independent sources (Platform A + Platform B + Platform C)
    - ✅ Sending to multiple destinations simultaneously
    - ✅ Independent API calls that don't depend on each other
    - ❌ NOT for sequential steps (use regular nodes)
