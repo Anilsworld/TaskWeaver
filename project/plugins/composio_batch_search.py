@@ -156,38 +156,51 @@ class AIBatchSearch:
         user_prompt: str,
         entity_id: str,
         session_id: Optional[str] = None,
-        timeout: int = 60
+        timeout: int = 60,
+        structured_steps: Optional[List[Dict[str, Any]]] = None
     ) -> BatchSearchResult:
         """
         Search for tools using batch API.
         
         Process:
-        1. Send full prompt to Composio (let Composio handle decomposition)
+        1. Send prompt(s) to Composio (either structured steps or full prompt)
         2. Parse results with intelligent fallback to related tools
         3. Return structured result
         
         Args:
-            user_prompt: Full user request (Composio will decompose internally)
+            user_prompt: Full user request (used if structured_steps is None)
             entity_id: User/company ID for Composio
             session_id: Optional session ID for continuation
             timeout: Request timeout in seconds
+            structured_steps: Optional list of dicts with 'step_num', 'description', 'index'
+                             If provided, each step gets its own query for targeted tool discovery
             
         Returns:
             BatchSearchResult with tools and guidance
         """
         logger.info(f"🔍 [BATCH_SEARCH] Starting batch search...")
-        logger.info(f"📝 [BATCH_SEARCH] FULL Prompt being sent to Composio:\n{user_prompt}")
         
         # ===== STEP 1: BUILD BATCH PAYLOAD =====
-        logger.info("📤 [STEP 1] Sending full prompt to Composio (let Composio decompose)...")
-        
-        # Send the FULL user prompt directly to Composio
-        # Let Composio's AI handle decomposition - it has better context!
-        queries = [{
-            'use_case': user_prompt,
-            'known_fields': '',
-            'index': 1
-        }]
+        if structured_steps:
+            # ✅ NEW: Targeted mode - send separate query per agent_with_tools step
+            logger.info(f"🎯 [STEP 1] TARGETED MODE: Sending {len(structured_steps)} separate queries for agent_with_tools steps...")
+            queries = []
+            for step in structured_steps:
+                queries.append({
+                    'use_case': step['description'],
+                    'known_fields': '',
+                    'index': step['index']
+                })
+                logger.info(f"   Query {step['index']} (Step {step['step_num']}): {step['description'][:80]}")
+        else:
+            # Legacy mode - send full prompt (let Composio decompose)
+            logger.info("📤 [STEP 1] LEGACY MODE: Sending full prompt to Composio (let Composio decompose)...")
+            logger.info(f"📝 [BATCH_SEARCH] FULL Prompt being sent to Composio:\n{user_prompt}")
+            queries = [{
+                'use_case': user_prompt,
+                'known_fields': '',
+                'index': 1
+            }]
         
         logger.info(f"[DEBUG_PAYLOAD] Queries being sent: {queries}")
         

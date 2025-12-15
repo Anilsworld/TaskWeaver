@@ -120,13 +120,10 @@ class WorkflowSchemaBuilder:
                 "  ✅ Did I generate sensible defaults for missing but required fields?\n"
                 "  ✅ Did I use 'hitl' (NOT 'form') for ALL approval/review steps?\n\n"
                 "If ANY answer is NO, you MUST fix it before returning!\n\n"
-                "🔗 WORKFLOW CONNECTIVITY (CRITICAL!):\n"
-                "- ALL workflows MUST have 'edges' array to connect nodes\n"
-                "- For N nodes, you need at least (N-1) edges\n"
-                "- Edge format: {'type': 'sequential', 'from': 'node_a', 'to': 'node_b'}\n"
-                "- Start nodes: No incoming edges\n"
-                "- End nodes: No outgoing edges\n"
-                "- Missing edges = disconnected workflow = FAILURE!\n\n"
+                "🔗 WORKFLOW CONNECTIVITY:\n"
+                "- Edges will be auto-generated based on step order from the plan\n"
+                "- You only need to generate the NODES (one per step)\n"
+                "- Sequential connections are handled automatically\n\n"
                 "📤 CODE NODES:\n"
                 "- Use ONLY response fields from tool schemas (see 'Returns:' above)\n"
                 "- Access: node_id.field_name\n"
@@ -224,7 +221,7 @@ class WorkflowSchemaBuilder:
                                 }
                             }
                     },
-                "required": ["nodes", "edges", "triggers"],
+                "required": ["nodes", "triggers"],
                 "additionalProperties": False
             }
         }

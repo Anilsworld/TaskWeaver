@@ -240,11 +240,10 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
     
     # Phase 2: WorkflowIR validation (DAG logic)
     try:
-        print(f"[WORKFLOW_SCHEMA] 🔍 Starting WorkflowIR validation for {len(workflow.nodes)} nodes...")
+        logger.info(f"[WORKFLOW_SCHEMA] Starting WorkflowIR validation for {len(workflow.nodes)} nodes...")
         workflow_ir = workflow.to_ir()
         edge_count = len(workflow_ir.edges) if hasattr(workflow_ir, 'edges') else 0
-        print(f"[WORKFLOW_SCHEMA] ✅ WorkflowIR validation PASSED: {len(workflow.nodes)} nodes, {edge_count} edges")
-        logger.info(f"✅ WorkflowIR validation passed: {len(workflow.nodes)} nodes, {edge_count} edges")
+        logger.info(f"[WORKFLOW_SCHEMA] WorkflowIR validation PASSED: {len(workflow.nodes)} nodes, {edge_count} edges")
         
         # ✅ SINGLE SOURCE OF TRUTH: Export WorkflowIR's complete edges back to workflow dict
         # This includes auto-added parallel edges, so downstream consumers get the full edge list
@@ -260,12 +259,12 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
         
     except ValueError as e:
         # WorkflowIR raises ValueError for cycles or invalid DAG structure
-        print(f"[WORKFLOW_SCHEMA] ❌ WorkflowIR DAG validation FAILED: {str(e)}")
+        logger.error(f"[WORKFLOW_SCHEMA] WorkflowIR DAG validation FAILED: {str(e)}")
         error_messages.append(f"[!] Workflow DAG validation failed: {str(e)}")
         return False, None, error_messages
     except Exception as e:
         # Unexpected errors during IR conversion
-        print(f"[WORKFLOW_SCHEMA] ❌ WorkflowIR conversion ERROR: {str(e)}")
+        logger.error(f"[WORKFLOW_SCHEMA] WorkflowIR conversion ERROR: {str(e)}")
         error_messages.append(f"[!] WorkflowIR conversion failed: {str(e)}")
         logger.error(f"WorkflowIR conversion error: {e}", exc_info=True)
         return False, None, error_messages

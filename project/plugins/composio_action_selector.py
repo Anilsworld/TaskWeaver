@@ -15,7 +15,7 @@ import logging
 import hashlib
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -432,8 +432,8 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
         "",
         "⚠️ CRITICAL RULES:",
         "1. You MUST ONLY use action IDs from the numbered list below",
-        "2. DO NOT invent action names based on patterns (e.g., INSTAGRAM_FETCH_MESSAGES does NOT exist)",
-        "3. DO NOT extrapolate from similar names (GMAIL_FETCH_EMAILS ≠ OUTLOOK_FETCH_MESSAGES)",
+        "2. DO NOT invent action names based on patterns",
+        "3. DO NOT extrapolate from similar app names (APP1_ACTION ≠ APP2_ACTION)",
         "4. If you use an action NOT in this list, your code will FAIL at runtime",
         "5. Copy the EXACT action_id shown below - character-for-character",
         "",
@@ -630,7 +630,11 @@ def format_actions_for_prompt(actions: List[Dict], top_k: int = 5) -> str:
         
         # Format: - ACTION_ID (app: app_name): description | Params: x: type, y: type | Returns: structure
         # ✅ FIX: Include app_name so LLM uses correct app in workflow nodes
-        line = f"- {action_id} (app: {app_name}): {desc}{params_str}{response_hint}"
+        # ✅ NEW: Include step_index for targeted tool mapping (if present)
+        step_index_hint = ""
+        if 'step_index' in action:
+            step_index_hint = f" [step_index: {action['step_index']}]"
+        line = f"- {action_id} (app: {app_name}): {desc}{params_str}{response_hint}{step_index_hint}"
         
         # ✅ CRITICAL: Error handling pattern for placeholder detection (mock mode only)
         # Successful responses are unwrapped data dicts (NO 'success' field).
@@ -710,14 +714,15 @@ def select_composio_actions(
     top_k: int = 5,
     context: Optional[str] = None,
     adaptive_top_k: bool = True,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    structured_steps: Optional[List[Dict[str, Any]]] = None
 ) -> str:
     """
     ⚡ Main entry point - Get relevant Composio actions for a query.
     
     ✅ HYBRID APPROACH (Option 2):
-    - user_query: Step-specific task for INTENT matching ("Fetch emails from Outlook")
-    - context: Full user request for DOMAIN keywords ("read emails... send responses")
+    - user_query: Step-specific task for INTENT matching ("Fetch data from platform")
+    - context: Full user request for DOMAIN keywords ("read data... send responses")
     
     ✅ ADAPTIVE TOP_K (NEW):
     - Single platform: top_k=7 (fast)
@@ -798,10 +803,11 @@ def select_composio_actions(
             composio_api = AIBatchSearch()
             search_result = loop.run_until_complete(
                 composio_api.search_batch(
-                    user_prompt=context,  # Full workflow prompt
+                    user_prompt=context,  # Full workflow prompt (used if structured_steps is None)
                     entity_id=entity_id,  # ✅ Use actual user's entity (not hardcoded)
                     session_id=composio_session_id,  # ✅ Pass session to avoid namespace error
-                    timeout=10  # 10 seconds for batch
+                    timeout=10,  # 10 seconds for batch
+                    structured_steps=structured_steps  # ✅ NEW: Per-step targeted tool discovery
                 )
             )
             
@@ -812,67 +818,104 @@ def select_composio_actions(
                 
                 _BATCH_CACHE[session_id] = {}
                 
-                for sub_task_result in search_result.sub_task_results:
-                    step_query = sub_task_result.use_case
-                    tools = sub_task_result.tools
-                    
-                    # Convert to action_dicts format
-                    # ✅ Preserve execution_order from Composio's validated plan
-                    action_dicts = []
-                    for tool in tools[:top_k]:
-                        action_dicts.append({
-                            'action_id': tool.get('tool_id', tool.get('action_id', 'UNKNOWN')),
-                            'action_name': tool.get('name', tool.get('action_name', '')),
-                            'app_name': tool.get('app_name', ''),
-                            'app_display_name': tool.get('app_display_name', tool.get('app_name', '')),
-                            'description': tool.get('description', ''),
-                            'parameters': tool.get('parameters', {}),
-                            'response': tool.get('response', {}),
-                            'execution_order': tool.get('execution_order', 0),  # ✅ Preserve Composio's sequence
-                        })
-                    
-                    _BATCH_CACHE[session_id][step_query] = action_dicts
-                    logger.info(f"[BATCH_API] Cached {len(action_dicts)} tools for: {step_query[:60]}...")
+                # ✅ NEW: Track if this is a structured_steps response (indexed mode)
+                is_structured_mode = structured_steps is not None
                 
-                # Find matching step for current query
-                cached_steps = list(_BATCH_CACHE[session_id].keys())
-                matched_step = _fuzzy_match_step(user_query, cached_steps)
-                
-                if matched_step:
-                    logger.info(f"✅ [BATCH_API] Returning tools for current step")
-                    action_dicts = _BATCH_CACHE[session_id][matched_step]
-                    return format_actions_for_prompt(action_dicts, top_k)
-                else:
-                    # ✅ FALLBACK: Use best partial match or first cached result
-                    logger.warning(f"⚠️  [BATCH_API] No fuzzy match found for '{user_query[:60]}...'")
+                if is_structured_mode:
+                    # ✅ TARGETED MODE: Index-based mapping (no fuzzy matching needed!)
+                    logger.info("🎯 [BATCH_API] TARGETED MODE: Using index-based tool mapping")
+                    all_action_dicts = []
                     
-                    # Try to find the best partial match (even below threshold)
-                    query_words = set(user_query.lower().split())
-                    best_match = None
-                    best_score = 0
-                    
-                    for cached_step in cached_steps:
-                        cached_words = set(cached_step.lower().split())
-                        overlap = len(query_words & cached_words)
-                        total = len(query_words | cached_words)
-                        score = overlap / total if total > 0 else 0
+                    for sub_task_result in search_result.sub_task_results:
+                        step_index = sub_task_result.index
+                        tools = sub_task_result.tools
                         
-                        if score > best_score:
-                            best_score = score
-                            best_match = cached_step
+                        # ✅ Get the FIRST (best-ranked) tool for this step
+                        # Composio ranks tools best-first, so trust their ranking
+                        if tools:
+                            tool = tools[0]  # Primary (best) tool for this step
+                            action_dict = {
+                                'action_id': tool.get('tool_id', tool.get('action_id', 'UNKNOWN')),
+                                'action_name': tool.get('name', tool.get('action_name', '')),
+                                'app_name': tool.get('app_name', ''),
+                                'app_display_name': tool.get('app_display_name', tool.get('app_name', '')),
+                                'description': tool.get('description', ''),
+                                'parameters': tool.get('parameters', {}),
+                                'response': tool.get('response', {}),
+                                'step_index': step_index,  # ✅ Preserve index for mapping
+                                'execution_order': tool.get('execution_order', 0),
+                            }
+                            all_action_dicts.append(action_dict)
+                            logger.info(f"   [INDEX {step_index}] → {action_dict['action_id']} ({action_dict['app_name']})")
                     
-                    # ✅ CRITICAL FIX: Always prefer Composio's validated tools!
-                    # Lower threshold to 15% to ensure we use Composio's batch results
-                    # Composio's AI already validated these tools - trust it!
-                    if best_match and best_score > 0.15:
-                        logger.info(f"✅ [BATCH_API] Using best partial match (score={best_score:.2f}): '{best_match[:60]}...'")
-                        logger.info(f"   ✅ Preferring Composio's validated tools over pgvector to avoid hallucinations")
-                        action_dicts = _BATCH_CACHE[session_id][best_match]
+                    # Return best tool per step (1:1 mapping)
+                    logger.info(f"✅ [BATCH_API] Returning {len(all_action_dicts)} indexed tools (1 per step)")
+                    return format_actions_for_prompt(all_action_dicts, len(all_action_dicts))
+                
+                else:
+                    # ✅ LEGACY MODE: Fuzzy matching (for non-structured queries)
+                    logger.info("📝 [BATCH_API] LEGACY MODE: Using fuzzy matching")
+                    for sub_task_result in search_result.sub_task_results:
+                        step_query = sub_task_result.use_case
+                        tools = sub_task_result.tools
+                        
+                        # Convert to action_dicts format
+                        # ✅ Preserve execution_order from Composio's validated plan
+                        action_dicts = []
+                        for tool in tools[:top_k]:
+                            action_dicts.append({
+                                'action_id': tool.get('tool_id', tool.get('action_id', 'UNKNOWN')),
+                                'action_name': tool.get('name', tool.get('action_name', '')),
+                                'app_name': tool.get('app_name', ''),
+                                'app_display_name': tool.get('app_display_name', tool.get('app_name', '')),
+                                'description': tool.get('description', ''),
+                                'parameters': tool.get('parameters', {}),
+                                'response': tool.get('response', {}),
+                                'execution_order': tool.get('execution_order', 0),  # ✅ Preserve Composio's sequence
+                            })
+                        
+                        _BATCH_CACHE[session_id][step_query] = action_dicts
+                        logger.info(f"[BATCH_API] Cached {len(action_dicts)} tools for: {step_query[:60]}...")
+                    
+                    # Find matching step for current query
+                    cached_steps = list(_BATCH_CACHE[session_id].keys())
+                    matched_step = _fuzzy_match_step(user_query, cached_steps)
+                    
+                    if matched_step:
+                        logger.info(f"✅ [BATCH_API] Returning tools for current step")
+                        action_dicts = _BATCH_CACHE[session_id][matched_step]
                         return format_actions_for_prompt(action_dicts, top_k)
-                    
-                    logger.warning(f"⚠️  [BATCH_API] Match score very low ({best_score:.2f}), falling back to pgvector")
-                    logger.warning(f"   ⚠️  Risk of tool hallucination! Consider improving fuzzy matching.")
-                    _log_to_debug_file("[BATCH_API] All matches too weak, using pgvector fallback")
+                    else:
+                        # ✅ FALLBACK: Use best partial match or first cached result
+                        logger.warning(f"⚠️  [BATCH_API] No fuzzy match found for '{user_query[:60]}...'")
+                        
+                        # Try to find the best partial match (even below threshold)
+                        query_words = set(user_query.lower().split())
+                        best_match = None
+                        best_score = 0
+                        
+                        for cached_step in cached_steps:
+                            cached_words = set(cached_step.lower().split())
+                            overlap = len(query_words & cached_words)
+                            total = len(query_words | cached_words)
+                            score = overlap / total if total > 0 else 0
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_match = cached_step
+                        
+                        # ✅ CRITICAL FIX: Always prefer Composio's validated tools!
+                        # Lower threshold to 15% to ensure we use Composio's batch results
+                        # Composio's AI already validated these tools - trust it!
+                        if best_match and best_score > 0.15:
+                            logger.info(f"✅ [BATCH_API] Using best partial match (score={best_score:.2f}): '{best_match[:60]}...'")
+                            logger.info(f"   ✅ Preferring Composio's validated tools over pgvector to avoid hallucinations")
+                            action_dicts = _BATCH_CACHE[session_id][best_match]
+                            return format_actions_for_prompt(action_dicts, top_k)
+                        
+                        logger.warning(f"⚠️  [BATCH_API] Match score very low ({best_score:.2f}), falling back to pgvector")
+                        logger.warning(f"   ⚠️  Risk of tool hallucination! Consider improving fuzzy matching.")
+                        _log_to_debug_file("[BATCH_API] All matches too weak, using pgvector fallback")
             else:
                 logger.info("⚠️  [BATCH_API] No sub-task results, using pgvector fallback")
                 _log_to_debug_file("[BATCH_API] No results from batch call")
@@ -892,7 +935,7 @@ def select_composio_actions(
     # No keyword matching, no hardcoding - pure AI-first pgvector search!
     # action_matcher.py will:
     # 1. Use app_embedding semantic search to find relevant apps
-    # 2. Re-rank with default_app_preferences (gmail > outlook for "email")
+    # 2. Re-rank with default_app_preferences (user's connected apps prioritized)
     # 3. Search actions only in the best-matched apps
     _log_to_debug_file(f"[APP_DETECTION] Delegating to action_matcher.py for semantic app search")
     logger.info(f"[APP_DETECTION] Using semantic search (no keyword hints) for scalability")

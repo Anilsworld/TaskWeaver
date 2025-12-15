@@ -180,81 +180,158 @@ class CodeGenerator(Role):
         
         Input format:
         "Available Composio Actions:
-         - GMAIL_GET_MAIL_V2 (app: gmail): Fetch emails
-         - SLACKBOT_SEND_MESSAGE (app: slack): Send message"
+         - APP1_ACTION_NAME (app: app1): Description [step_index: 1]
+         - APP2_ACTION_NAME (app: app2): Description [step_index: 2]"
         
-        Output: ["GMAIL_GET_MAIL_V2", "SLACKBOT_SEND_MESSAGE"]
+        Output: ["APP1_ACTION_NAME", "APP2_ACTION_NAME"]
         
         🔑 CRITICAL: This creates the filtered enum (5-50 tools, not 17k!)
         
-        ✅ HIERARCHICAL MAPPING (Alternative 2):
-        - Parse init_plan into hierarchical structure (handles 2.1, 2.2 sub-steps)
-        - Map tools to <agent_with_tools> steps in sequential order
-        - Returns only tools that match agent_with_tools steps
+        ✅ INDEX-BASED MAPPING (NEW):
+        - When [step_index: N] is present, tools are already mapped by Composio
+        - Extract tools in step_index order (explicit 1:1 correspondence)
+        - No fuzzy matching needed - direct index-based mapping!
+        
+        ✅ FALLBACK (Legacy):
+        - If no step_index, return all tools (let LLM decide)
         """
         import re
-        # ✅ FIX: Match format "- ACTION_ID (app: ...)" or "- ACTION_ID:"
-        all_tool_ids = re.findall(r'^\s*-\s*([A-Z][A-Z0-9_]+)\s*(?:\(app:|:)', composio_actions, re.MULTILINE)
         
-        self.logger.info(f"[FUNCTION_CALLING] _extract_tool_ids_from_actions called with init_plan length: {len(init_plan)}")
-        self.logger.info(f"[FUNCTION_CALLING] Composio returned {len(all_tool_ids)} tools: {all_tool_ids}")
+        # ✅ NEW: Check if this is index-based response (targeted mode)
+        has_step_indices = '[step_index:' in composio_actions
         
-        if not init_plan:
-            self.logger.warning(f"[FUNCTION_CALLING] No init_plan provided - returning all tools")
-            return all_tool_ids
-        
-        # ✅ HIERARCHICAL: Parse init_plan into structured steps (handles 2.1, 2.2 correctly)
-        self.logger.info(f"[FUNCTION_CALLING] Parsing init_plan hierarchically...")
-        steps = []
-        for line in init_plan.split('\n'):
-            # Match both top-level (1.) and nested (2.1.) step numbers
-            match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+(.+?)\s*<([\w_]+)>', line)
-            if match:
-                step_num, description, step_type = match.groups()
-                steps.append({
-                    'num': step_num,
-                    'desc': description.strip(),
-                    'type': step_type,
-                    'needs_tool': step_type == 'agent_with_tools'
-                })
-                self.logger.info(
-                    f"[FUNCTION_CALLING] Step {step_num}: '{description[:50]}' <{step_type}> "
-                    f"(needs_tool={step_type == 'agent_with_tools'})"
-                )
-        
-        # Filter to only agent_with_tools steps (in order)
-        agent_steps = [s for s in steps if s['needs_tool']]
-        self.logger.info(
-            f"[FUNCTION_CALLING] Found {len(agent_steps)} agent_with_tools steps: "
-            f"{[s['num'] for s in agent_steps]}"
-        )
-        
-        # ✅ EXPLICIT MAPPING: Map tools to agent_with_tools steps (1:1 in order)
-        # Composio returns tools in execution order matching the agent_with_tools steps
-        tool_mapping = {}
-        for idx, step in enumerate(agent_steps):
-            if idx < len(all_tool_ids):
-                tool_mapping[step['num']] = all_tool_ids[idx]
-                self.logger.info(
-                    f"[MAPPING] Step {step['num']} ('{step['desc'][:40]}') → {all_tool_ids[idx]}"
-                )
+        if has_step_indices:
+            # ✅ INDEX-BASED MODE: Parse tool_id and step_index together
+            self.logger.info(f"[FUNCTION_CALLING] 🎯 TARGETED MODE: Parsing index-based tool mapping...")
+            
+            # Match format: "- ACTION_ID (app: ...) ... [step_index: N]"
+            pattern = r'^\s*-\s*([A-Z][A-Z0-9_]+)\s*\(app:.*?\).*?\[step_index:\s*(\d+)\]'
+            matches = re.findall(pattern, composio_actions, re.MULTILINE)
+            
+            if matches:
+                # Sort by step_index to preserve order
+                indexed_tools = [(tool_id, int(index)) for tool_id, index in matches]
+                indexed_tools.sort(key=lambda x: x[1])  # Sort by index
+                
+                tool_ids = [tool_id for tool_id, _ in indexed_tools]
+                
+                self.logger.info(f"[FUNCTION_CALLING] ✅ Extracted {len(tool_ids)} indexed tools:")
+                for tool_id, index in indexed_tools:
+                    self.logger.info(f"   [INDEX {index}] → {tool_id}")
+                
+                return tool_ids
             else:
                 self.logger.warning(
-                    f"[MAPPING] No tool available for step {step['num']} - "
-                    f"Composio returned {len(all_tool_ids)} tools but need {len(agent_steps)}"
+                    "[FUNCTION_CALLING] ⚠️ step_index found but failed to parse - "
+                    "falling back to simple extraction"
                 )
         
-        # Return only tools that were mapped to agent_with_tools steps
-        filtered_tool_ids = list(tool_mapping.values())
+        # ✅ LEGACY/FALLBACK MODE: Simple extraction (no filtering)
+        self.logger.info(f"[FUNCTION_CALLING] 📝 LEGACY MODE: Extracting all tools (let LLM decide)")
         
-        if len(filtered_tool_ids) < len(all_tool_ids):
-            removed = len(all_tool_ids) - len(filtered_tool_ids)
-            self.logger.info(
-                f"[FUNCTION_CALLING] Filtered out {removed} tools (not needed for agent_with_tools steps)"
-            )
+        # Match format "- ACTION_ID (app: ...)" or "- ACTION_ID:"
+        all_tool_ids = re.findall(r'^\s*-\s*([A-Z][A-Z0-9_]+)\s*(?:\(app:|:)', composio_actions, re.MULTILINE)
         
-        self.logger.info(f"[FUNCTION_CALLING] Extracted {len(filtered_tool_ids)} tool IDs for enum (after hierarchical mapping)")
-        return filtered_tool_ids
+        self.logger.info(f"[FUNCTION_CALLING] Extracted {len(all_tool_ids)} tools: {all_tool_ids}")
+        
+        return all_tool_ids
+
+    def _parse_init_plan_structure(self, init_plan: str) -> List[Dict[str, Any]]:
+        """
+        Parse init_plan to extract deterministic step structure.
+        
+        Input format:
+        1. Step description <type>
+        2. Parent step <parallel>
+           2.1. Child step <agent_with_tools>
+           2.2. Child step <agent_with_tools>
+        3. Next step <agent_only>
+        
+        Output: List of step info dicts with step_num, parent, type, etc.
+        """
+        import re
+        
+        steps = []
+        for line in init_plan.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Match "1. Description <type>" or "2.1. Description <type>"
+            match = re.match(r'^(\d+(?:\.\d+)?)\.\s+([^<]+)(?:<([^>]+)>)?', line)
+            if match:
+                step_num = match.group(1)
+                description = match.group(2).strip()
+                step_type = match.group(3).strip() if match.group(3) else "agent_only"
+                
+                # Determine parent (for sub-steps like 2.1, parent is 2)
+                parent = None
+                if '.' in step_num:
+                    parent = step_num.split('.')[0]
+                
+                steps.append({
+                    'step_num': step_num,
+                    'description': description,
+                    'type': step_type,
+                    'parent': parent
+                })
+        
+        self.logger.info(f"[EDGE_GEN] Parsed {len(steps)} steps from init_plan")
+        for step in steps:
+            self.logger.info(f"[EDGE_GEN]   Step {step['step_num']}: {step['description'][:50]} ({step['type']})")
+        
+        return steps
+    
+    def _generate_deterministic_edges(self, steps: List[Dict[str, Any]], nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Generate edges deterministically based on step structure.
+        
+        Strategy: Map steps to nodes by POSITION (index), not by ID matching.
+        The LLM generates nodes in the same order as steps in init_plan.
+        
+        Rules:
+        1. Sequential top-level steps connect in order: step1 → step2 → step3
+        2. Sub-steps (2.1, 2.2) are children of parent (2) - skip in sequential chain
+        3. First step connects from 'start'
+        """
+        edges = []
+        
+        self.logger.info(f"[EDGE_GEN] Generating deterministic edges for {len(steps)} steps and {len(nodes)} nodes")
+        self.logger.info(f"[EDGE_GEN] Available node IDs: {[n['id'] for n in nodes]}")
+        
+        # Build index-based mapping: step[i] → nodes[i]
+        if len(steps) != len(nodes):
+            self.logger.warning(f"[EDGE_GEN] ⚠️ Step count ({len(steps)}) != node count ({len(nodes)}) - may have misalignment")
+        
+        step_to_node_id = {}
+        for i, step in enumerate(steps):
+            if i < len(nodes):
+                step_to_node_id[step['step_num']] = nodes[i]['id']
+                self.logger.info(f"[EDGE_GEN] Mapped step {step['step_num']} → node {nodes[i]['id']}")
+        
+        # Get top-level steps (not sub-steps like 2.1, 2.2)
+        top_level_steps = [s for s in steps if s['parent'] is None]
+        
+        self.logger.info(f"[EDGE_GEN] Found {len(top_level_steps)} top-level steps")
+        
+        # Connect sequential top-level steps
+        prev_id = 'start'
+        for step in top_level_steps:
+            node_id = step_to_node_id.get(step['step_num'])
+            
+            if node_id:
+                edges.append({
+                    'type': 'sequential',
+                    'from': prev_id,
+                    'to': node_id
+                })
+                self.logger.info(f"[EDGE_GEN] Added edge: {prev_id} → {node_id}")
+                prev_id = node_id
+            else:
+                self.logger.warning(f"[EDGE_GEN] ⚠️ Step {step['step_num']} has no mapped node")
+        
+        self.logger.info(f"[EDGE_GEN] Generated {len(edges)} deterministic edges")
+        return edges
 
 
     def _build_workflow_function_schema(self, tool_ids: List[str]) -> dict:
@@ -506,6 +583,32 @@ class CodeGenerator(Role):
                 # This ensures cache lookup matches the cached key from first attempt
                 query_for_composio = original_user_query if "failed" in query.lower() or "error" in query.lower() else query
                 
+                # ✅ NEW: Extract agent_with_tools steps from init_plan for targeted tool discovery
+                structured_steps = None
+                if init_plan_with_markers:
+                    import re
+                    structured_steps = []
+                    for line in init_plan_with_markers.split('\n'):
+                        # Match both top-level (1.) and nested (2.1.) step numbers
+                        match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+(.+?)\s*<([\w_]+)>', line)
+                        if match:
+                            step_num, description, step_type = match.groups()
+                            if step_type == 'agent_with_tools':
+                                structured_steps.append({
+                                    'step_num': step_num,
+                                    'description': description.strip(),
+                                    'index': len(structured_steps) + 1  # 1-indexed for Composio
+                                })
+                    
+                    if structured_steps:
+                        self.logger.info(
+                            f"[COMPOSIO_CALL] 🎯 Extracted {len(structured_steps)} agent_with_tools steps "
+                            f"for targeted tool discovery: {[s['step_num'] for s in structured_steps]}"
+                        )
+                    else:
+                        self.logger.warning("[COMPOSIO_CALL] ⚠️ No agent_with_tools steps found in init_plan")
+                        structured_steps = None  # Fall back to full prompt
+                
                 # ✅ DEBUG: Log what's being sent to Composio
                 self.logger.info(f"[COMPOSIO_CALL] user_query param: {query_for_composio[:150]}")
                 self.logger.info(f"[COMPOSIO_CALL] context param (sent to batch API): {original_user_query[:150]}")
@@ -516,7 +619,8 @@ class CodeGenerator(Role):
                     context=original_user_query,  # Full query for domain/app discovery
                     top_k=10,  # Balanced - enough for both read and write actions
                     adaptive_top_k=True,  # Enable automatic scaling based on detected apps
-                    session_id=session_id  # ✅ Enable batch API caching per session
+                    session_id=session_id,  # ✅ Enable batch API caching per session
+                    structured_steps=structured_steps  # ✅ NEW: Per-step tool discovery
                 )
                 if composio_actions:
                     enrichment_contents.append(composio_actions)
@@ -614,10 +718,17 @@ class CodeGenerator(Role):
                 
                 # ✅ FIX 6: MINIMAL prompt (let schema do enforcement)
                 # Don't reuse compose_prompt() - it's too heavy with JSON schema examples
-                plan = next(
+                # ✅ CRITICAL: Use init_plan_with_markers (detailed), not Planner's condensed plan!
+                # The Planner's "plan" is a 3-step summary, but init_plan has all 6+ detailed steps
+                plan = init_plan_with_markers if init_plan_with_markers else next(
                     (e for e in enrichment_contents if "Plan" in e or "plan" in e.lower()),
                     "No plan provided"
                 )
+                
+                # ✅ DEBUG: Log what plan is being used
+                plan_source = "init_plan_with_markers" if init_plan_with_markers else "enrichment_contents"
+                self.logger.info(f"[PROMPT_BUILD] Using plan from: {plan_source}, length: {len(plan)} chars")
+                self.logger.info(f"[PROMPT_BUILD] Plan preview (first 300 chars): {plan[:300]}")
                 
                 # ✅ SKIP EXAMPLES for function calling - schema is already very detailed
                 # Loading 4 examples adds ~10K tokens and causes function calling issues
@@ -632,8 +743,8 @@ class CodeGenerator(Role):
                     import re
                     step_hints = []
                     for line in init_plan_with_markers.split('\n'):
-                        # Match "1. Description <interactive dependency>"
-                        match = re.match(r'^\s*(\d+)\.\s+([^<]+)(?:<([^>]+)>)?', line)
+                        # Match "1. Description <dependency>" or "   2.1. Description <dependency>"
+                        match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+([^<]+)(?:<([^>]+)>)?', line)
                         if match:
                             step_num = match.group(1)
                             step_desc = match.group(2).strip()
@@ -641,22 +752,36 @@ class CodeGenerator(Role):
                             
                             self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, dependency: {dependency}")
                             
-                            if "interactive" in dependency:
-                                # Check if it's a form (initial input) or hitl (approval/review)
-                                # ⚠️ IMPORTANT: Check approval keywords FIRST (before 'collect')
-                                # Because "Collect approval" contains both "collect" and "approval"
-                                if any(keyword in step_desc.lower() for keyword in ['approve', 'approval', 'review', 'authorize', 'validate', 'confirm', 'verify']):
-                                    hint = f"Step {step_num} ({step_desc}): Use native 'hitl' node (NOT external tools)"
-                                elif any(keyword in step_desc.lower() for keyword in ['collect', 'gather', 'get', 'input', 'details', 'form', 'enter']):
-                                    hint = f"Step {step_num} ({step_desc}): Use native 'form' node (NOT external tools)"
-                                else:
-                                    # Default to form for interactive
-                                    hint = f"Step {step_num} ({step_desc}): Use native 'form' or 'hitl' node (NOT external tools)"
+                            # Map specific dependency markers to node types
+                            if dependency == "form":
+                                hint = f"Step {step_num}: type='form' with fields (NO tool_id)"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif dependency == "hitl":
+                                hint = f"Step {step_num}: type='hitl' for approval/review (NO tool_id)"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif dependency == "agent_with_tools":
+                                hint = f"Step {step_num}: type='agent_with_tools' WITH tool_id from available tools"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif dependency == "agent_only":
+                                hint = f"Step {step_num}: type='agent_only' for analysis/processing (NO tool_id)"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif dependency == "parallel":
+                                hint = f"Step {step_num}: type='parallel' with parallel_nodes list containing child node IDs"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif dependency == "loop":
+                                hint = f"Step {step_num}: type='loop' with items and loop_node_id"
                                 step_hints.append(hint)
                                 self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
                     
                     if step_hints:
-                        step_guidance = "\n\n**STEP-SPECIFIC GUIDANCE:**\n" + "\n".join(f"- {h}" for h in step_hints)
+                        num_steps = len(step_hints)
+                        step_guidance = f"\n\n**GENERATE ALL {num_steps} NODES:**\n" + "\n".join(f"- {h}" for h in step_hints)
+                        step_guidance += f"\n\n⚠️ Generate a node for EVERY step above (ALL {num_steps} nodes required)!"
                         self.logger.info(f"[STEP_GUIDANCE] Generated {len(step_hints)} step hints")
                     else:
                         self.logger.warning(f"[STEP_GUIDANCE] ⚠️ No step hints generated!")
@@ -665,8 +790,9 @@ class CodeGenerator(Role):
                     {
                         "role": "system",
                         "content": (
-                            "You are a workflow compiler. Generate workflows via function calls ONLY. "
+                            "You are a workflow compiler. Generate workflow NODES via function calls (edges will be auto-generated).\n\n"
                             "Rules:\n"
+                            "- Generate a node for EVERY step in the plan\n"
                             "- Use ONLY tool_id values from the Available Composio Actions list\n"
                             "- All placeholders use ${{...}} with VALID patterns:\n"
                             "  • ${{EXTRACT:param_name}} - Extract from user query\n"
@@ -681,8 +807,7 @@ class CodeGenerator(Role):
                             "**PARALLEL EXECUTION:**\n"
                             "- For SIMULTANEOUS tasks, use type='parallel' with parallel_nodes list\n"
                             "- Example: {{'id': 'search_all', 'type': 'parallel', 'parallel_nodes': ['search_a', 'search_b', 'search_c']}}\n"
-                            "- Then define each child: {{'id': 'search_a', 'type': 'agent_with_tools', ...}}\n"
-                            "- Edges connect to PARENT: ('start', 'search_all'), ('search_all', 'process_results')\n\n"
+                            "- Then define each child: {{'id': 'search_a', 'type': 'agent_with_tools', ...}}\n\n"
                             f"{example_context}\n"
                             f"{yaml_examples}"
                         )
@@ -692,12 +817,18 @@ class CodeGenerator(Role):
                         "content": (
                             f"Plan:\n{plan}\n\n"
                             f"{composio_actions}{step_guidance}\n\n"
-                            f"Generate complete workflow for: {original_user_query}"
+                            f"Generate nodes for: {original_user_query}"
                         )
                     }
                 ]
                 
                 self.logger.info(f"[PROMPT_BUILD] Final prompt length: {len(minimal_prompt[0]['content'])} chars (system) + {len(minimal_prompt[1]['content'])} chars (user)")
+                
+                # ✅ DEBUG: Log the FULL user prompt content
+                user_prompt_content = minimal_prompt[1]['content']
+                self.logger.info(f"[PROMPT_FULL] ===== FULL USER PROMPT =====")
+                self.logger.info(f"[PROMPT_FULL] {user_prompt_content}")
+                self.logger.info(f"[PROMPT_FULL] ===== END USER PROMPT =====")
                 
                 # ✅ DEBUG: Log if parallel is mentioned in prompt
                 full_prompt_text = minimal_prompt[0]['content'] + minimal_prompt[1]['content']
@@ -731,20 +862,37 @@ class CodeGenerator(Role):
                         raise ValueError(error_msg)
                     
                     # ✅ COMPATIBILITY: Accept both flat structure and wrapped structure
-                    # Flat: {"arguments": {"triggers": [], "nodes": [], "edges": []}}
-                    # Wrapped: {"arguments": {"workflow": {"triggers": [], "nodes": [], "edges": []}}}
+                    # Flat: {"arguments": {"triggers": [], "nodes": []}} - edges auto-generated
+                    # Wrapped: {"arguments": {"workflow": {"triggers": [], "nodes": []}}}
                     arguments = result["arguments"]
                     if "workflow" in arguments:
                         # Old wrapped format
                         workflow_json = arguments["workflow"]
-                    elif "nodes" in arguments and "edges" in arguments:
-                        # New flat format (Azure OpenAI prefers this)
+                    elif "nodes" in arguments:
+                        # New flat format - edges will be auto-generated
                         workflow_json = arguments
+                        
+                        # Set defaults
+                        if "triggers" not in workflow_json:
+                            workflow_json["triggers"] = []
+                        
+                        # 🎯 DETERMINISTIC EDGE GENERATION
+                        if "edges" not in workflow_json or not workflow_json["edges"]:
+                            self.logger.info(f"[EDGE_GEN] LLM returned {len(workflow_json['nodes'])} nodes without edges - generating deterministically...")
+                            
+                            # Parse init_plan structure
+                            steps = self._parse_init_plan_structure(init_plan_with_markers)
+                            
+                            # Generate edges based on step structure
+                            edges = self._generate_deterministic_edges(steps, workflow_json['nodes'])
+                            workflow_json['edges'] = edges
+                            
+                            self.logger.info(f"[EDGE_GEN] ✅ Injected {len(edges)} deterministic edges")
                     else:
                         error_msg = (
                             f"[FUNCTION_CALLING] Function call missing workflow structure. "
                             f"Arguments received: {list(arguments.keys())}. "
-                            f"Expected either 'workflow' wrapper or 'nodes'+'edges' directly. "
+                            f"Expected either 'workflow' wrapper or 'nodes' field. "
                             f"Full result: {json.dumps(result, indent=2)}"
                         )
                         self.logger.error(error_msg)
