@@ -122,7 +122,8 @@ class WorkflowDefinition(BaseModel):
                 if isinstance(edge, dict):
                     source = edge.get('source') or edge.get('from')
                     target = edge.get('target') or edge.get('to')
-                    if source and source not in node_ids:
+                    # Allow "start" as a special sentinel node for workflow entry point
+                    if source and source != 'start' and source not in node_ids:
                         raise ValueError(f"Edge references non-existent node: '{source}'. Available nodes: {', '.join(sorted(node_ids))}")
                     if target and target not in node_ids:
                         raise ValueError(f"Edge references non-existent node: '{target}'. Available nodes: {', '.join(sorted(node_ids))}")
