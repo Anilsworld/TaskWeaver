@@ -58,6 +58,92 @@ instruction_template: |-
     3. No Dependency: the current subtask can be executed independently without any dependency. 
   - The initial plan must contain dependency annotations for sequential and interactive dependencies.
   
+  ### Node Type Markers (CRITICAL - MUST USE FOR EVERY STEP!)
+  **MANDATORY: Every step in init_plan MUST have a node type marker at the end.**
+  
+  Available markers:
+  - `<form>` - Collect INITIAL data from user (name, email, search criteria, preferences, etc.)
+    * Use when: Workflow starts by gathering user input
+    * Example: "1. Collect customer name, email, and product requirements <form>"
+  
+  - `<hitl>` - Human-in-the-loop for approval/review/authorization/decision
+    * Use when: Need user to approve, review, authorize, or make a decision
+    * Example: "3. Get user approval for selected product <hitl>"
+  
+  - `<agent_with_tools>` - Execute external API/tool (Gmail, Slack, databases, search engines, etc.)
+    * Use when: Calling external services or APIs
+    * Example: "2. Search inventory database for matching products <agent_with_tools>"
+  
+  - `<agent_only>` - Pure AI processing WITHOUT external tools (analyze, rank, draft, transform, summarize)
+    * Use when: AI needs to process/analyze/transform data without calling external APIs
+    * Two execution modes (auto-determined during generation):
+      - REASONING: Pure AI analysis/recommendations (e.g., "Analyze sentiment", "Rank by priority")
+      - CODE: AI-generated Python for transformations (e.g., "Transform JSON", "Calculate average")
+    * Example: "4. Analyze search results and rank by relevance <agent_only>"
+    * Cross-reference: workflow_schema_builder.py defines agent_mode field
+  
+  - `<loop>` - Iterate over collection (3+ identical operations on different items)
+    * Use when: Same operation repeated multiple times (fetch from A, B, C, D...)
+    * **CRITICAL: Loop body MUST be specified as sub-steps with indentation**
+    * Example:
+      ```
+      2. For each platform in [Gmail, Outlook, Slack], perform actions <loop>
+         2.1. Fetch unread messages from platform <agent_with_tools>
+         2.2. Mark messages as read <agent_with_tools>
+      ```
+    * Sub-steps (2.1, 2.2) are executed for EACH iteration of the loop
+    * Sub-step numbering: parent.child (e.g., 3.1, 3.2, 3.3)
+  
+  - `<parallel>` - Execute multiple operations simultaneously (NOT a loop - different operations!)
+    * Use when: Multiple DIFFERENT operations can run at the same time
+    * Example: "2. Search Jira, Confluence, and GitHub simultaneously <parallel>"
+  
+  **Marker Selection Rules:**
+  1. INITIAL data collection → `<form>` (e.g., "Collect user details")
+  2. Approval/review/authorization → `<hitl>` (e.g., "Approve order")
+  3. External API/service call → `<agent_with_tools>` (e.g., "Send email", "Search database")
+  4. AI analysis/drafting/transformation → `<agent_only>` (e.g., "Analyze results", "Draft response")
+  5. Same operation 3+ times → `<loop>` with sub-steps (e.g., "For each X, perform Y")
+  6. Multiple different operations at once → `<parallel>` with sub-steps (e.g., "Search X and Y simultaneously")
+  
+  **IMPORTANT DISTINCTIONS:**
+  - "Collect approval" → `<hitl>` (NOT `<form>` - it's approval, not initial input)
+  - "Analyze data" → `<agent_only>` (NOT `<agent_with_tools>` - no external API)
+  - "Fetch from A, B, C" → `<loop>` with sub-steps (NOT 3 separate steps!)
+  - "Search X and Y simultaneously" → `<parallel>` with sub-steps (NOT `<loop>`)
+  
+  **SUB-STEP SYNTAX RULES:**
+  - `<loop>` and `<parallel>` markers MUST have sub-steps
+  - Sub-steps use numbering: parent.child (e.g., 3.1, 3.2)
+  - Nested loops use: parent.child.grandchild (e.g., 2.2.1, 2.2.2)
+  - Each sub-step MUST have its own marker
+  - Sub-steps are indented (3 spaces per level)
+  
+  **Loop Sub-Step Format:**
+  ```
+  N. For each X in [list], perform actions <loop>
+     N.1. Action description <node_type_marker>
+     N.2. Another action <node_type_marker>
+  ```
+  
+  **Parallel Sub-Step Format:**
+  ```
+  N. Perform operations simultaneously <parallel>
+     N.1. Operation A <agent_with_tools>
+     N.2. Operation B <agent_with_tools>
+     N.3. Operation C <agent_with_tools>
+  ```
+  
+  **Nested Loop Format:**
+  ```
+  N. For each X, process items <loop>
+     N.1. Fetch X details <agent_with_tools>
+     N.2. For each item in X, process <loop>
+        N.2.1. Process item <agent_with_tools>
+        N.2.2. Validate result <agent_only>
+     N.3. Summarize X results <agent_only>
+  ```
+  
   ### plan
   - Planner should try to merge adjacent steps that have sequential dependency or no dependency.
   - Planner should not merge steps with interactive dependency.
@@ -120,53 +206,101 @@ instruction_template: |-
   CORRECT Planner Message: "Perform action_1 with specified parameters, perform action_2 based on action_1 results, perform action_3 conditionally based on action_2 outcome"
   
   
-  ### Examples of planning process (ABSTRACT STRUCTURAL PATTERNS)
-  [Example 1: Sequential 2-step workflow]
-  User: Perform operation_A on input_1
+  ### Examples of planning process (WITH NODE TYPE MARKERS)
+  [Example 1: Form + External Tool + Approval]
+  User: Search for products in inventory, get my approval, then place order
   init_plan:
-  1. Retrieve/prepare input_1
-  2. Perform operation_A on the prepared input <sequential depend on 1>
-  3. Report result to user <interactively depends on 2>
+  1. Collect product requirements and quantity <form>
+  2. Search inventory database for matching products <agent_with_tools>
+  3. Get approval for selected products <hitl>
+  4. Place order for approved products <agent_with_tools>
   plan:
-  1. Retrieve input_1 and perform operation_A
-  2. Report result to user
+  1. Collect requirements and search inventory
+  2. Get approval for selected products
+  3. Place order for approved products
   
-  [Example 2: Conditional 3-step workflow]
-  User: Execute action_A and perform action_B based on outcome
+  [Example 2: Loop Pattern with Sub-Steps]
+  User: Fetch unread messages from Gmail, Outlook, Slack, and Teams
   init_plan:
-  1. Execute action_A
-  2. Evaluate outcome <sequentially depends on 1>
-  3. Perform action_B based on evaluation <interactively depends on 2>
-  4. Report completion <interactively depends on 3>
+  1. Define platforms list: Gmail, Outlook, Slack, Teams <agent_only>
+  2. For each platform, perform fetch operations <loop>
+     2.1. Fetch unread messages from platform <agent_with_tools>
+  3. Summarize all messages <agent_only>
   plan:
-  1. Execute action_A and evaluate outcome
-  2. Perform action_B based on evaluation
-  3. Report completion
+  1. Define platforms and fetch messages from each
+  2. Summarize all messages
   
-  [Example 3: 4-step sequential with decision]
-  User: Perform operation_X on input, analyze results, make decision
+  [Example 2b: Loop with Multiple Operations]
+  User: For each department, collect feedback and send summary
   init_plan:
-  1. Retrieve and inspect input to understand structure
-  2. Confirm operation parameters <sequentially depends on 1>
-  3. Perform operation_X on input <interactively depends on 2>
-  4. Analyze and report results <interactively depends on 3>
+  1. Define departments list: Engineering, Sales, Marketing <agent_only>
+  2. For each department, process feedback <loop>
+     2.1. Fetch department employees from HR system <agent_with_tools>
+     2.2. Send feedback survey to employees <agent_with_tools>
+     2.3. Collect responses <agent_with_tools>
+     2.4. Analyze feedback sentiment <agent_only>
+  3. Aggregate results across all departments <agent_only>
+  4. Get executive approval for action plan <hitl>
   plan:
-  1. Retrieve input, inspect structure, and confirm parameters
-  2. Perform operation_X
-  3. Analyze and report results
+  1. Define departments and process feedback for each
+  2. Aggregate results and get executive approval
   
-  [Example 4: Parallel 5-step workflow]
-  User: Process input_A and input_B then combine them
+  [Example 3: Parallel + Analysis Pattern]
+  User: Search Jira and Confluence simultaneously, then analyze results
   init_plan:
-  1. Retrieve input_A and inspect structure
-  2. Retrieve input_B and inspect structure
-  3. Confirm combination method <sequentially depends on 1, 2>
-  4. Combine inputs <interactively depends on 3>
-  5. Report combined result <interactively depends on 4>
+  1. Collect search query from user <form>
+  2. Search Jira and Confluence simultaneously <parallel>
+  3. Analyze and rank results by relevance <agent_only>
+  4. Get approval for action <hitl>
   plan:
-  1. Retrieve input_A and input_B, inspect structures, and confirm combination method
-  2. Combine inputs
-  3. Report combined result
+  1. Collect search query and search Jira/Confluence in parallel
+  2. Analyze results and get approval for action
+  
+  [Example 4: Pure AI Processing]
+  User: Analyze customer feedback and categorize by sentiment
+  init_plan:
+  1. Fetch customer feedback from database <agent_with_tools>
+  2. Analyze sentiment for each feedback <agent_only>
+  3. Categorize by sentiment (positive/negative/neutral) <agent_only>
+  4. Generate summary report <agent_only>
+  plan:
+  1. Fetch customer feedback and analyze sentiment
+  2. Categorize by sentiment and generate summary report
+  
+  [Example 5: Complex Workflow with All Node Types]
+  User: Collect customer preferences, search multiple product catalogs, analyze best options, get approval, and create order
+  init_plan:
+  1. Collect product category, budget, and feature preferences <form>
+  2. Search Amazon, eBay, and Walmart catalogs simultaneously <parallel>
+     2.1. Search Amazon catalog <agent_with_tools>
+     2.2. Search eBay catalog <agent_with_tools>
+     2.3. Search Walmart catalog <agent_with_tools>
+  3. Analyze results and rank by value (price + reviews) <agent_only>
+  4. Get user approval for top recommendation <hitl>
+  5. Create purchase order for approved item <agent_with_tools>
+  6. Send order confirmation email <agent_with_tools>
+  plan:
+  1. Collect preferences and search catalogs in parallel
+  2. Analyze results and get user approval
+  3. Create order and send confirmation email
+  
+  [Example 6: Nested Loops (Advanced)]
+  User: For each department, process each employee's quarterly review
+  init_plan:
+  1. Fetch organization structure from HR system <agent_with_tools>
+  2. For each department, process reviews <loop>
+     2.1. Fetch department employees <agent_with_tools>
+     2.2. For each employee, complete review <loop>
+        2.2.1. Fetch employee performance data <agent_with_tools>
+        2.2.2. Generate review summary <agent_only>
+        2.2.3. Get manager approval for review <hitl>
+        2.2.4. Submit review to HR system <agent_with_tools>
+     2.3. Generate department summary <agent_only>
+  3. Create organization-wide report <agent_only>
+  4. Get executive approval <hitl>
+  plan:
+  1. Fetch organization and process reviews for each department/employee
+  2. Create organization report and get executive approval
   
   ## Planner's useful tips (100% PATTERN-AGNOSTIC)
   - When the request involves processing structured data, Planner should first inspect the data structure before performing operations on it.
@@ -482,6 +616,49 @@ instruction_template: |-
   **1. Sequential**: A → B → C → D (each action is one node)
   **2. Parallel/Concurrent**: A + B + C → D (parallel actions still counted separately)
   **3. Conditional/Branch**: if X then Y else Z (X, Y, Z are all separate actions/nodes)
+  
+  ## 🎯 CRITICAL REMINDER: Node Type Markers
+  **BEFORE generating init_plan, review these marker rules:**
+  
+  ✅ **EVERY step MUST end with a marker:** `<form>`, `<hitl>`, `<agent_with_tools>`, `<agent_only>`, `<loop>`, or `<parallel>`
+  
+  ✅ **Common patterns:**
+  - "Collect X" at START → `<form>`
+  - "Get approval" / "Review" → `<hitl>`
+  - "Send email" / "Search database" → `<agent_with_tools>`
+  - "Analyze" / "Rank" / "Draft" → `<agent_only>`
+  - "Fetch from A, B, C, D" → `<loop>` (NOT 4 separate steps!)
+  - "Search X and Y simultaneously" → `<parallel>`
+  
+  ✅ **Loop and Parallel MUST have sub-steps:**
+  ```
+  CORRECT:
+  3. For each platform, fetch data <loop>
+     3.1. Fetch messages from platform <agent_with_tools>
+  
+  WRONG:
+  3. For each platform, fetch data <loop>
+  (Missing sub-steps - what happens in the loop?)
+  ```
+  
+  ✅ **Sub-Step Numbering Examples:**
+  - Simple loop: 3.1, 3.2, 3.3
+  - Nested loop: 2.2.1, 2.2.2, 2.2.3
+  - Triple nested: 5.3.2.1, 5.3.2.2
+  
+  ✅ **When to use loops:**
+  - "For each X" → `<loop>` with sub-steps
+  - "Fetch from A, B, C" → `<loop>` with sub-step 1: Fetch
+  - "Send to A, B, C" → `<loop>` with sub-step 1: Send
+  - "Process each item" → `<loop>` with processing sub-steps
+  
+  ❌ **Common mistakes to avoid:**
+  - ❌ "Collect approval" → Should be `<hitl>` (NOT `<form>`)
+  - ❌ "Analyze data" → Should be `<agent_only>` (NOT `<agent_with_tools>`)
+  - ❌ Listing "Fetch A", "Fetch B", "Fetch C" separately → Should be ONE step with `<loop>` + sub-steps!
+  - ❌ Forgetting markers entirely → EVERY step needs one!
+  - ❌ Loop without sub-steps → MUST specify what happens inside the loop!
+  - ❌ Sub-step without marker → Each sub-step needs its marker too!
   **4. Loop/Iteration**: for each item do X (X is one node, loop is execution detail)
   **5. Exception Handling**: try X catch Y finally Z (X, Y, Z are separate actions)
   **6. Event-Driven**: on event E do X (E detection + X action = 2 nodes if both mentioned)

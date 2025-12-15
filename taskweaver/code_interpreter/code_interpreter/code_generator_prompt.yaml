@@ -405,13 +405,21 @@ content: |-
       * Behavior: Executes external action, returns API response
       * Example: "Fetch Gmail messages", "Send Slack message", "Search hotels"
       
-      **"agent_only"** (Pure AI Processing):
+      **"agent_only"** (Pure AI Processing - Two Modes):
       * Use when: Need AI to analyze, transform, draft, or process data WITHOUT calling external APIs
       * Has NO tool_id: Pure AI reasoning/generation
-      * Behavior: AI processes input, generates output (text, analysis, transformation)
+      * **TWO EXECUTION MODES** (decided during generation):
+        1. REASONING mode: Pure LLM call for subjective analysis
+           - Use for: "Which option is better?", "Analyze sentiment", "Provide recommendation"
+           - No code generated - LLM provides analysis at runtime
+        2. CODE mode: TaskWeaver-generated Python for transformations
+           - Use for: "Transform JSON", "Calculate average", "Parse data"
+           - Code generated during workflow creation, executed at runtime
       * Example: "Prepare draft responses", "Analyze sentiment", "Transform data format"
       * **CRITICAL - Write DEFENSIVE code for agent_only nodes:**
         - Use .get() for dict access: `data.get('field', default_value)`
+      * Cross-reference: workflow_schema_builder.py defines agent_mode field
+      * Cross-reference: langgraph_adapter._build_agent_node() handles both modes
         - Check types: `if isinstance(value, expected_type):`
         - Handle None/empty: `if value and len(value) > 0:`
         - Graceful fallbacks: `result = value if value else default`

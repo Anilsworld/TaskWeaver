@@ -420,6 +420,9 @@ class WorkflowSchemaBuilder:
         # ===================================================================
         # agent_with_tools - WITH DYNAMIC TOOL PARAMETER SCHEMAS
         # ===================================================================
+        # Cross-reference: planner_prompt.yaml defines <agent_with_tools> marker
+        # Cross-reference: code_generator_prompt.yaml explains tool execution patterns
+        # Cross-reference: langgraph_adapter.py._build_composio_tool_node() handles execution
         # Build a description that includes ALL tool parameter schemas
         tool_param_descriptions = []
         for tool_id in tool_ids[:20]:  # Limit to 20 to avoid token explosion
@@ -517,8 +520,10 @@ class WorkflowSchemaBuilder:
         })
         
         # ===================================================================
-        # code_execution - Python code node
+        # code_execution - DEPRECATED: Use agent_only with agent_mode='code' instead
         # ===================================================================
+        # This node type is redundant with agent_only (agent_mode='code')
+        # Kept for backward compatibility only
         # Build code generation guidance from actual response schemas
         code_guidance = (
             "Python code to execute. Access previous nodes AND create variables for downstream use.\n\n"
@@ -549,49 +554,102 @@ class WorkflowSchemaBuilder:
             "  email_body = f\"Best price: ${best_price}\"  # Create variable for next node"
         )
         
-        node_schemas.append({
-            "type": "object",
-            "description": "Python code execution node",
-            "properties": {
-                "id": {"type": "string"},
-                "type": {"type": "string", "enum": ["code_execution"]},
-                "code": {
-                    "type": "string",
-                    "description": code_guidance
-                },
-                "description": {"type": "string"}
-            },
-            "required": ["id", "type", "code"],
-            "additionalProperties": False
-        })
+        # SCHEMA REMOVED - use agent_only with agent_mode='code' instead
+        # (code_execution type is no longer exposed to LLMs)
         
         # ===================================================================
-        # agent_only - Deprecated, but keep for compatibility
+        # agent_only - Pure AI processing (UNIFIED: reasoning + code)
         # ===================================================================
+        # Cross-reference: planner_prompt.yaml defines <agent_only> marker
+        # Cross-reference: code_generator_prompt.yaml explains when to use
+        # Cross-reference: langgraph_adapter.py._build_agent_node() handles execution
         node_schemas.append({
             "type": "object",
-            "description": "Agent-only node (deprecated, use code_execution)",
+            "description": (
+                "Agent-only node for AI processing WITHOUT external tools. "
+                "🎯 TWO MODES (pick ONE):\n"
+                "1. REASONING (agent_mode='reasoning'): Pure LLM analysis - NO code field\n"
+                "   - Use for: 'Analyze sentiment', 'Which is better?', 'Recommend option'\n"
+                "   - LLM provides analysis at runtime\n"
+                "   - ❌ DO NOT include 'code' field\n"
+                "2. CODE (agent_mode='code'): Execute Python code\n"
+                "   - Use for: 'Calculate average', 'Transform JSON', 'Parse data'\n"
+                "   - ✅ MUST provide 'code' field with Python code\n"
+                "   - For deterministic operations (math, data manipulation)\n\n"
+                "⚠️ IMPORTANT: If agent_mode='reasoning', omit the 'code' field entirely!"
+            ),
             "properties": {
                 "id": {"type": "string"},
                 "type": {"type": "string", "enum": ["agent_only"]},
-                "code": {"type": "string"},
+                "agent_mode": {
+                    "type": "string",
+                    "enum": ["reasoning", "code"],
+                    "description": (
+                        "⚠️ CRITICAL CHOICE:\n"
+                        "'reasoning' = Pure LLM analysis (omit 'code' field)\n"
+                        "'code' = Python execution (include 'code' field)"
+                    )
+                },
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Python code to execute.\n"
+                        "⚠️ ONLY include if agent_mode='code'\n"
+                        "❌ OMIT if agent_mode='reasoning'"
+                    )
+                },
                 "description": {"type": "string"}
             },
-            "required": ["id", "type", "code"],
+            "required": ["id", "type"],
             "additionalProperties": False
         })
         
         # ===================================================================
         # form - User input collection ONLY (NOT for approvals!)
         # ===================================================================
+        # Build form guidance with downstream tool requirements
+        form_field_requirements = []
+        for tool_id in tool_ids[:10]:  # Check up to 10 tools
+            tool_schema = tool_schemas.get(tool_id) if tool_schemas else None
+            if not tool_schema:
+                continue
+            
+            params_schema = tool_schema.get('parameters_schema', {})
+            required_params = params_schema.get('required', [])
+            
+            if required_params:
+                # Extract params that look like user inputs (not IDs/technical fields)
+                user_input_params = [
+                    p for p in required_params 
+                    if any(hint in p.lower() for hint in ['email', 'name', 'phone', 'address', 'message', 'title', 'description', 'subject', 'recipient'])
+                ]
+                
+                if user_input_params:
+                    form_field_requirements.append(
+                        f"   • If using {tool_id}, form should collect: {', '.join(user_input_params[:3])}"
+                    )
+        
+        form_guidance = (
+            "Form node for collecting INITIAL data from users (e.g., search criteria, contact details, preferences). "
+            "⚠️ DO NOT USE for approval/review/authorization steps - use 'hitl' type instead! "
+            "Use 'form' only when: (1) Starting a workflow with user input, (2) Collecting data BEFORE any processing, "
+            "(3) User is PROVIDING information (not reviewing/approving results).\n\n"
+            "🎯 CRITICAL FORM DESIGN RULES:\n"
+            "1. Analyze ALL downstream agent_with_tools nodes in your workflow\n"
+            "2. Check what parameters those tools require (see tool requirements above)\n"
+            "3. For any parameter that will be filled from form data (e.g., recipient_email, user_name), "
+            "the form MUST include a corresponding field\n"
+            "4. Form field 'name' should match the parameter name you'll reference later\n"
+            "5. Example: If you plan to use '${{form_node.email}}' in a downstream node, "
+            "the form MUST have a field with name='email'\n\n"
+        )
+        
+        if form_field_requirements:
+            form_guidance += "💡 Based on available tools, consider these fields:\n" + "\n".join(form_field_requirements[:5])
+        
         node_schemas.append({
             "type": "object",
-            "description": (
-                "Form node for collecting INITIAL data from users (e.g., search criteria, contact details, preferences). "
-                "⚠️ DO NOT USE for approval/review/authorization steps - use 'hitl' type instead! "
-                "Use 'form' only when: (1) Starting a workflow with user input, (2) Collecting data BEFORE any processing, "
-                "(3) User is PROVIDING information (not reviewing/approving results)."
-            ),
+            "description": form_guidance,
             "properties": {
                 "id": {"type": "string"},
                 "type": {"type": "string", "enum": ["form"]},
@@ -616,6 +674,9 @@ class WorkflowSchemaBuilder:
         # ===================================================================
         # hitl - Human-in-the-loop for ALL approvals/reviews
         # ===================================================================
+        # Cross-reference: planner_prompt.yaml defines <hitl> marker
+        # Cross-reference: code_generator_prompt.yaml explains approval patterns
+        # Cross-reference: langgraph_adapter.py._build_form_node() handles execution
         node_schemas.append({
             "type": "object",
             "description": (
@@ -641,6 +702,9 @@ class WorkflowSchemaBuilder:
         # ===================================================================
         # parallel - Parallel execution group
         # ===================================================================
+        # Cross-reference: planner_prompt.yaml defines <parallel> marker with sub-steps
+        # Cross-reference: code_generator_prompt.yaml explains parallel patterns
+        # Cross-reference: langgraph_adapter.py._build_parallel_node() handles execution
         node_schemas.append({
             "type": "object",
             "description": (
@@ -659,6 +723,74 @@ class WorkflowSchemaBuilder:
                 "description": {"type": "string"}
             },
             "required": ["id", "type", "parallel_nodes"],
+            "additionalProperties": False
+        })
+        
+        # ===================================================================
+        # loop - Iteration/Loop execution (CRITICAL for token savings!)
+        # ===================================================================
+        # Cross-reference: planner_prompt.yaml defines <loop> marker with sub-steps (e.g., 2.1, 2.2)
+        # Cross-reference: code_generator_prompt.yaml explains loop patterns and loop_body
+        # Cross-reference: langgraph_adapter.py.loop_executor handles execution
+        node_schemas.append({
+            "type": "object",
+            "description": (
+                "Loop node for iterating over arrays/collections. "
+                "🎯 USE THIS when same operation repeats 3+ times with different inputs. "
+                "💡 BENEFITS: 90% token savings vs separate nodes! "
+                "Example: 'Fetch from Gmail, Outlook, Slack, Teams' → ONE loop node (not 4 separate nodes). "
+                "\n\n"
+                "WHEN TO USE:\n"
+                "- Same tool_id repeated multiple times\n"
+                "- User says 'fetch from A, B, C, D' or 'send to A, B, C'\n"
+                "- Multiple items with identical operation\n"
+                "\n"
+                "HOW IT WORKS:\n"
+                "1. Loop iterates over array (e.g., ['gmail', 'outlook', 'slack'])\n"
+                "2. For each item, executes child nodes in loop_body\n"
+                "3. Results auto-aggregated and available via '${{loop_id.results}}'\n"
+                "\n"
+                "EXAMPLE:\n"
+                "{\n"
+                "  'id': 'fetch_loop',\n"
+                "  'type': 'loop',\n"
+                "  'loop_over': '${{platforms.items}}',  # Array to iterate\n"
+                "  'loop_body': ['fetch_message'],        # Child node IDs\n"
+                "  'exit_condition': 'optional_early_exit'\n"
+                "}\n"
+                "Child node uses '${{loop_item}}' to access current item."
+            ),
+            "properties": {
+                "id": {"type": "string"},
+                "type": {"type": "string", "enum": ["loop"]},
+                "loop_over": {
+                    "type": "string",
+                    "description": (
+                        "Array to iterate over. Can be:\n"
+                        "- Direct reference: '${{node_id.field}}' (e.g., '${{platforms.items}}')\n"
+                        "- Static array: ['item1', 'item2', 'item3']\n"
+                        "- Range: 'range(10)' for numeric iteration"
+                    )
+                },
+                "loop_body": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of node IDs to execute for each iteration. "
+                        "These nodes must be defined elsewhere in the workflow. "
+                        "Use '${{loop_item}}' in child node params to access current iteration value."
+                    )
+                },
+                "exit_condition": {
+                    "type": "string",
+                    "description": (
+                        "Optional condition to break loop early. "
+                        "Example: '${{loop_item.status}} == \"complete\"'"
+                    )
+                },
+                "description": {"type": "string"}
+            },
+            "required": ["id", "type", "loop_over", "loop_body"],
             "additionalProperties": False
         })
         

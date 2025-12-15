@@ -149,7 +149,91 @@ class CodeGenerator(Role):
 
         return f"- Current time: {current_time}"
 
-    def _extract_tool_ids_from_actions(self, composio_actions: str) -> List[str]:
+    def _validate_parameter_references(self, workflow_json: dict) -> List[str]:
+        """
+        Validate that all parameter references point to existing fields in source nodes.
+        
+        Args:
+            workflow_json: Generated workflow dictionary
+            
+        Returns:
+            List of validation errors/warnings
+        """
+        import re
+        warnings = []
+        
+        nodes = workflow_json.get('nodes', [])
+        node_map = {node['id']: node for node in nodes}
+        
+        # Pattern to match: ${{node_id.field_name}} or ${node_id.field_name}
+        param_ref_pattern = r'\$\{\{?([a-zA-Z_][a-zA-Z0-9_]*?)\.([a-zA-Z_][a-zA-Z0-9_]*?)\}?\}'
+        
+        for node in nodes:
+            node_id = node.get('id', '?')
+            node_type = node.get('type', '?')
+            
+            # Check params field for parameter references
+            params = node.get('params', {})
+            if not params:
+                continue
+            
+            for param_name, param_value in params.items():
+                if not isinstance(param_value, str):
+                    continue
+                
+                # Find all references in this parameter value
+                matches = re.findall(param_ref_pattern, param_value)
+                
+                for source_node_id, field_name in matches:
+                    # Check if source node exists
+                    if source_node_id not in node_map:
+                        warnings.append(
+                            f"[ERROR] Node '{node_id}' references non-existent node '{source_node_id}' in param '{param_name}'"
+                        )
+                        continue
+                    
+                    source_node = node_map[source_node_id]
+                    source_type = source_node.get('type', '?')
+                    
+                    # Validate field exists in source node based on its type
+                    if source_type == 'form':
+                        # Check if field exists in form fields
+                        form_fields = source_node.get('fields', [])
+                        field_names = [f.get('name') for f in form_fields if isinstance(f, dict)]
+                        
+                        if field_name not in field_names:
+                            warnings.append(
+                                f"[ERROR] Node '{node_id}' ({node_type}) references field '{field_name}' from form node '{source_node_id}', "
+                                f"but form only has fields: {field_names}. "
+                                f"💡 Form must collect '{field_name}' field for downstream use!"
+                            )
+                    
+                    elif source_type == 'hitl':
+                        # HITL nodes expose approval status and collected data
+                        # We'll trust the LLM and log for debugging
+                        self.logger.info(
+                            f"[PARAM_REF] Node '{node_id}' references '{source_node_id}.{field_name}' "
+                            f"(source type: {source_type})"
+                        )
+                    
+                    elif source_type in ['agent_with_tools', 'code_execution']:
+                        # These expose their response data - harder to validate without schema
+                        # We'll trust the LLM here but log for debugging
+                        self.logger.info(
+                            f"[PARAM_REF] Node '{node_id}' references '{source_node_id}.{field_name}' "
+                            f"(source type: {source_type})"
+                        )
+        
+        if warnings:
+            self.logger.warning(f"[PARAM_VALIDATION] Found {len(warnings)} parameter reference issues")
+            for warning in warnings:
+                self.logger.warning(f"  {warning}")
+        else:
+            self.logger.info(f"[PARAM_VALIDATION] ✅ All parameter references are valid")
+        
+        return warnings
+    
+    def _extract_tool_ids_from_actions(self, composio_actions: str, init_plan: str = "") -> List[str]:
         """
         Extract tool IDs from select_composio_actions() formatted output.
         
@@ -161,12 +245,50 @@ class CodeGenerator(Role):
         Output: ["GMAIL_GET_MAIL_V2", "SLACKBOT_SEND_MESSAGE"]
         
         🔑 CRITICAL: This creates the filtered enum (5-50 tools, not 17k!)
+        
+        ✅ DETERMINISTIC FILTERING: Uses step numbers from init_plan
+        - Parse init_plan → Get step numbers with <interactive dependency>
+        - Remove tools at those positions (by list order)
+        - LLM only sees tools for non-interactive steps
+        - LLM naturally uses native form/hitl for interactive steps
         """
         import re
         # ✅ FIX: Match format "- ACTION_ID (app: ...)" or "- ACTION_ID:"
-        tool_ids = re.findall(r'^\s*-\s*([A-Z][A-Z0-9_]+)\s*(?:\(app:|:)', composio_actions, re.MULTILINE)
-        self.logger.info(f"[FUNCTION_CALLING] Extracted {len(tool_ids)} tool IDs for enum")
-        return tool_ids
+        all_tool_ids = re.findall(r'^\s*-\s*([A-Z][A-Z0-9_]+)\s*(?:\(app:|:)', composio_actions, re.MULTILINE)
+        
+        # ✅ DETERMINISTIC: Parse init_plan to find interactive step positions
+        self.logger.info(f"[FUNCTION_CALLING] _extract_tool_ids_from_actions called with init_plan length: {len(init_plan)}")
+        interactive_step_nums = set()
+        if init_plan:
+            self.logger.info(f"[FUNCTION_CALLING] Parsing init_plan for interactive steps...")
+            for line in init_plan.split('\n'):
+                self.logger.info(f"[FUNCTION_CALLING] Checking line: {line[:100]}")
+                # Match "1. Description <interactive dependency>" OR "3. Description <interactive dependency on 2>"
+                match = re.match(r'^\s*(\d+)\.\s+.*<interactive dependency(?:\s+on\s+\d+)?>', line)
+                if match:
+                    step_num = int(match.group(1))
+                    interactive_step_nums.add(step_num)
+                    self.logger.info(f"[FUNCTION_CALLING] Found interactive step: {step_num}")
+            
+            if interactive_step_nums:
+                self.logger.info(f"[FUNCTION_CALLING] Interactive steps detected: {sorted(interactive_step_nums)}")
+            else:
+                self.logger.warning(f"[FUNCTION_CALLING] ⚠️ No interactive steps found in init_plan!")
+        
+        # Remove tools at interactive step positions (1-indexed)
+        filtered_tool_ids = []
+        for idx, tool_id in enumerate(all_tool_ids, start=1):
+            if idx in interactive_step_nums:
+                self.logger.info(f"[FUNCTION_CALLING] Skipping tool at position {idx}: {tool_id} (interactive step)")
+            else:
+                filtered_tool_ids.append(tool_id)
+        
+        if len(filtered_tool_ids) < len(all_tool_ids):
+            removed = len(all_tool_ids) - len(filtered_tool_ids)
+            self.logger.info(f"[FUNCTION_CALLING] Filtered out {removed} tools for interactive steps")
+        
+        self.logger.info(f"[FUNCTION_CALLING] Extracted {len(filtered_tool_ids)} tool IDs for enum (after filtering)")
+        return filtered_tool_ids
 
 
     def _build_workflow_function_schema(self, tool_ids: List[str]) -> dict:
@@ -499,6 +621,20 @@ class CodeGenerator(Role):
             self.logger.warning(f"[EXAMPLE_LOADING] ⚠️  NO EXAMPLES LOADED!")
 
         planning_enrichments = memory.get_shared_memory_entries(entry_type="plan")
+        
+        # ✅ Extract init_plan from Planner's attachments (has <interactive dependency> markers)
+        init_plan_with_markers = ""
+        for conversation_round in rounds:
+            for post in conversation_round.post_list:
+                if post.send_from == "Planner":
+                    for attachment in post.attachment_list:
+                        if attachment.type == AttachmentType.init_plan:
+                            init_plan_with_markers = attachment.content
+                            self.logger.info(f"[INIT_PLAN] Found init_plan with dependency markers: {init_plan_with_markers[:200]}")
+                            break
+        
+        if not init_plan_with_markers:
+            self.logger.warning(f"[INIT_PLAN] ⚠️ No init_plan attachment found in rounds")
 
         # =====================================================================
         # COMPOSIO ACTION INJECTION (arch-31)
@@ -535,24 +671,16 @@ class CodeGenerator(Role):
                 # Dynamic import - same pattern as code_verification.py
                 from TaskWeaver.project.plugins.composio_action_selector import select_composio_actions
                 
-                # ✅ SCALABLE: action_matcher.py now handles ALL app detection semantically
-                # No more keyword matching or hardcoded app lists
-                # The select_composio_actions() function will auto-detect apps using pgvector embeddings
-                
-                # ✅ ADAPTIVE APPROACH:
-                # - query: Step-specific intent from Planner ("Fetch emails from Outlook")
-                # - context: Full user request for domain/app discovery ("read emails... send responses")
-                # - adaptive_top_k=True: Auto-scales based on detected apps
-                #
-                # ✅ COMPLETE WORKFLOW INJECTION:
-                # For multi-platform workflows (3+ apps), the action selector will set intent="both"
-                # This ensures BOTH read (fetch/list) AND write (send/reply) actions are available
                 # Get session ID from environment (set by eclipse_adapter.py)
                 import os
                 session_id = os.environ.get('TASKWEAVER_SESSION_ID', None)
                 
+                # ✅ On retry (when query is "Failed to generate code..."), use original_user_query
+                # This ensures cache lookup matches the cached key from first attempt
+                query_for_composio = original_user_query if "failed" in query.lower() or "error" in query.lower() else query
+                
                 composio_actions = select_composio_actions(
-                    user_query=query,  # Step query - action selector detects multi-platform and sets intent="both"
+                    user_query=query_for_composio,  # Use original query on retry for cache hit
                     context=original_user_query,  # Full query for domain/app discovery
                     top_k=10,  # Balanced - enough for both read and write actions
                     adaptive_top_k=True,  # Enable automatic scaling based on detected apps
@@ -602,7 +730,9 @@ class CodeGenerator(Role):
                 (e for e in enrichment_contents if "Available Composio Actions" in e),
                 ""
             )
-            tool_ids = self._extract_tool_ids_from_actions(composio_actions)
+            
+            # Use init_plan extracted from Planner's attachments
+            tool_ids = self._extract_tool_ids_from_actions(composio_actions, init_plan_with_markers)
             
             if not tool_ids:
                 self.logger.warning(
@@ -663,6 +793,42 @@ class CodeGenerator(Role):
                 example_context = ""
                 yaml_examples = ""
                 
+                # ✅ Build step guidance: Map init_plan steps to node types
+                step_guidance = ""
+                self.logger.info(f"[STEP_GUIDANCE] Building step guidance, init_plan length: {len(init_plan_with_markers)}")
+                if init_plan_with_markers:
+                    import re
+                    step_hints = []
+                    for line in init_plan_with_markers.split('\n'):
+                        # Match "1. Description <interactive dependency>"
+                        match = re.match(r'^\s*(\d+)\.\s+([^<]+)(?:<([^>]+)>)?', line)
+                        if match:
+                            step_num = match.group(1)
+                            step_desc = match.group(2).strip()
+                            dependency = match.group(3).strip() if match.group(3) else ""
+                            
+                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, dependency: {dependency}")
+                            
+                            if "interactive" in dependency:
+                                # Check if it's a form (initial input) or hitl (approval/review)
+                                # ⚠️ IMPORTANT: Check approval keywords FIRST (before 'collect')
+                                # Because "Collect approval" contains both "collect" and "approval"
+                                if any(keyword in step_desc.lower() for keyword in ['approve', 'approval', 'review', 'authorize', 'validate', 'confirm', 'verify']):
+                                    hint = f"Step {step_num} ({step_desc}): Use native 'hitl' node (NOT external tools)"
+                                elif any(keyword in step_desc.lower() for keyword in ['collect', 'gather', 'get', 'input', 'details', 'form', 'enter']):
+                                    hint = f"Step {step_num} ({step_desc}): Use native 'form' node (NOT external tools)"
+                                else:
+                                    # Default to form for interactive
+                                    hint = f"Step {step_num} ({step_desc}): Use native 'form' or 'hitl' node (NOT external tools)"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                    
+                    if step_hints:
+                        step_guidance = "\n\n**STEP-SPECIFIC GUIDANCE:**\n" + "\n".join(f"- {h}" for h in step_hints)
+                        self.logger.info(f"[STEP_GUIDANCE] Generated {len(step_hints)} step hints")
+                    else:
+                        self.logger.warning(f"[STEP_GUIDANCE] ⚠️ No step hints generated!")
+                
                 minimal_prompt = [
                     {
                         "role": "system",
@@ -687,7 +853,7 @@ class CodeGenerator(Role):
                         "role": "user",
                         "content": (
                             f"Plan:\n{plan}\n\n"
-                            f"{composio_actions}\n\n"
+                            f"{composio_actions}{step_guidance}\n\n"
                             f"Generate complete workflow for: {original_user_query}"
                         )
                     }
@@ -728,9 +894,8 @@ class CodeGenerator(Role):
                     # json is already imported at top of file
                     self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
                     
-                    # ✅ VALIDATION: Skip dynamic model validator (module removed)
-                    # Workflow schema validation already done by OpenAI function calling
-                    param_warnings = []
+                    # ✅ VALIDATION: Validate all parameter references have valid source fields
+                    param_warnings = self._validate_parameter_references(workflow_json)
                     
                     if param_warnings:
                         # Check if any are errors (not just warnings)
@@ -742,16 +907,12 @@ class CodeGenerator(Role):
                             
                             # ⚠️ VALIDATION ERRORS: Send back to Planner for retry with hints
                             error_summary = "\n".join(errors[:10])  # Top 10 errors
+                            
+                            # Build a completely dynamic error message based on actual errors
                             error_message = (
-                                f"⚠️ Workflow validation failed with {len(errors)} parameter errors:\n\n"
+                                f"⚠️ Workflow validation failed with {len(errors)} parameter reference errors:\n\n"
                                 f"{error_summary}\n\n"
-                                f"💡 HINTS:\n"
-                                f"1. READ the user's request carefully and extract ALL mentioned values\n"
-                                f"2. For agent_with_tools nodes, populate the 'params' field with extracted values\n"
-                                f"3. Required parameters MUST have values (never null/empty)\n"
-                                f"4. Use parameter examples from tool schemas for correct formatting\n"
-                                f"5. For dates without year, use current year (e.g., 'Dec 25' → '2025-12-25')\n\n"
-                                f"Please regenerate the workflow with ALL required parameters extracted."
+                                f"💡 Fix these issues and regenerate the workflow."
                             )
                             post_proxy.update_attachment(error_message, AttachmentType.revise_message)
                             post_proxy.update_send_to("Planner")
