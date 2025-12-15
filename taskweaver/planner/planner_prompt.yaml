@@ -63,8 +63,22 @@ instruction_template: |-
   
   Available markers:
   - `<form>` - Collect INITIAL data from user (name, email, search criteria, preferences, etc.)
-    * Use when: Workflow starts by gathering user input
+    * Use when: Workflow needs user input that is NOT already in the prompt
     * Example: "1. Collect customer name, email, and product requirements <form>"
+    * ⚠️ CRITICAL RULES (DETERMINISTIC - MUST FOLLOW):
+      1. Integration auth/permissions → NEVER use `<form>` (OAuth handles this automatically)
+         ❌ WRONG: "Collect Slack credentials <form>"
+         ✅ RIGHT: Just use the tool directly - auth is automatic
+      2. Value already in prompt → NEVER ask again via `<form>`
+         ❌ WRONG: User says "last 20 emails" → Don't create form asking for count
+         ✅ RIGHT: Use the specified value directly in tool params
+      3. "my", "my account", "my messages" → Use authenticated user (NO form needed)
+         ❌ WRONG: "Collect user ID <form>"
+         ✅ RIGHT: Use authenticated user automatically
+      4. ONLY use `<form>` when:
+         - Workflow needs input NOT mentioned in prompt
+         - Input is subjective/unknown (preferences, criteria, search terms)
+         - NOT for auth, NOT for values user already provided
   
   - `<hitl>` - Human-in-the-loop for approval/review/authorization/decision
     * Use when: Need user to approve, review, authorize, or make a decision
@@ -98,8 +112,11 @@ instruction_template: |-
     * Use when: Multiple DIFFERENT operations can run at the same time
     * Example: "2. Search Jira, Confluence, and GitHub simultaneously <parallel>"
   
-  **Marker Selection Rules:**
-  1. INITIAL data collection → `<form>` (e.g., "Collect user details")
+  **Marker Selection Rules (DETERMINISTIC):**
+  1. INITIAL data collection (ONLY if NOT in prompt) → `<form>` 
+     ✅ "Collect product preferences" (not specified)
+     ❌ "Collect Slack permissions" (auth, not user input)
+     ❌ "Get count" when user said "last 20" (already specified)
   2. Approval/review/authorization → `<hitl>` (e.g., "Approve order")
   3. External API/service call → `<agent_with_tools>` (e.g., "Send email", "Search database")
   4. AI analysis/drafting/transformation → `<agent_only>` (e.g., "Analyze results", "Draft response")
@@ -108,6 +125,9 @@ instruction_template: |-
   
   **IMPORTANT DISTINCTIONS:**
   - "Collect approval" → `<hitl>` (NOT `<form>` - it's approval, not initial input)
+  - "Get my emails" → `<agent_with_tools>` (NOT `<form>` - no user input needed, "my" = authenticated user)
+  - "Last 20 messages" → `<agent_with_tools>` with limit=20 (NOT `<form>` - count already specified!)
+  - "Access Slack" → `<agent_with_tools>` (NOT `<form>` - OAuth handles auth automatically)
   - "Analyze data" → `<agent_only>` (NOT `<agent_with_tools>` - no external API)
   - "Fetch from A, B, C" → `<loop>` with sub-steps (NOT 3 separate steps!)
   - "Search X and Y simultaneously" → `<parallel>` with sub-steps (NOT `<loop>`)
@@ -219,7 +239,19 @@ instruction_template: |-
   2. Get approval for selected products
   3. Place order for approved products
   
-  [Example 2: Loop Pattern with Sub-Steps]
+  [Example 2: NO Form - Values Already Specified]
+  User: Get my last 30 GitHub commits and calculate which day I commit most
+  init_plan:
+  1. Fetch last 30 commits from GitHub <agent_with_tools>
+  2. Calculate commit frequency by day <agent_only>
+  3. Identify most active day <agent_only>
+  plan:
+  1. Fetch GitHub commits and analyze commit patterns
+  ❌ WRONG: "1. Ask for GitHub credentials <form>" - OAuth handles this!
+  ❌ WRONG: "1. Collect commit count <form>" - User said "30"!
+  ✅ CORRECT: No form needed, start with tool using limit=30
+  
+  [Example 2b: Loop Pattern with Sub-Steps]
   User: Fetch unread messages from Gmail, Outlook, Slack, and Teams
   init_plan:
   1. Define platforms list: Gmail, Outlook, Slack, Teams <agent_only>

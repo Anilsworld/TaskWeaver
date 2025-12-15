@@ -153,6 +153,10 @@ class CodeGenerator(Role):
         """
         Validate that all parameter references point to existing fields in source nodes.
         
+        Checks:
+        1. Node references (${{node.field}}) point to valid nodes and fields
+        2. Simple placeholders (${{xyz}}) use valid prefixes (EXTRACT:, from_step:, etc.)
+        
         Args:
             workflow_json: Generated workflow dictionary
             
@@ -165,8 +169,14 @@ class CodeGenerator(Role):
         nodes = workflow_json.get('nodes', [])
         node_map = {node['id']: node for node in nodes}
         
-        # Pattern to match: ${{node_id.field_name}} or ${node_id.field_name}
+        # Pattern 1: Node references with dot - ${{node_id.field_name}} or ${node_id.field_name}
         param_ref_pattern = r'\$\{\{?([a-zA-Z_][a-zA-Z0-9_]*?)\.([a-zA-Z_][a-zA-Z0-9_]*?)\}?\}'
+        
+        # Pattern 2: Simple placeholders (no dot) - ${{something}}
+        simple_placeholder_pattern = r'\$\{\{([a-zA-Z_][a-zA-Z0-9_:.\[\]]*?)\}\}'
+        
+        # Valid prefixes for simple placeholders (from code_generator_prompt.yaml line 227)
+        valid_prefixes = ['EXTRACT:', 'from_step:', 'from_loop:', 'aggregate:', 'loop_item']
         
         for node in nodes:
             node_id = node.get('id', '?')
@@ -181,7 +191,28 @@ class CodeGenerator(Role):
                 if not isinstance(param_value, str):
                     continue
                 
-                # Find all references in this parameter value
+                # ✅ CHECK 1: Detect invalid simple placeholders (e.g., ${{channel_id}})
+                # Extract ALL ${{...}} patterns first
+                all_placeholders = re.findall(simple_placeholder_pattern, param_value)
+                
+                for placeholder_content in all_placeholders:
+                    # Check if it has a dot (node reference) or valid prefix
+                    has_dot = '.' in placeholder_content
+                    has_valid_prefix = any(placeholder_content.startswith(prefix) for prefix in valid_prefixes)
+                    
+                    # If no dot AND no valid prefix, it's INVALID
+                    if not has_dot and not has_valid_prefix:
+                        warnings.append(
+                            f"[ERROR] Invalid placeholder '${{{{{placeholder_content}}}}}' in node '{node_id}' param '{param_name}'. "
+                            f"Use one of:\n"
+                            f"  • ${{{{EXTRACT:{placeholder_content}}}}} - Extract from user query\n"
+                            f"  • ${{{{from_step:node_id.{placeholder_content}}}}} - Reference previous node field\n"
+                            f"  • Static value: \"{placeholder_content}\" (without ${{{{...}}}})\n"
+                            f"💡 Common fix: If '{placeholder_content}' should come from a form, "
+                            f"add a form node with field name='{placeholder_content}', then use ${{{{from_step:form_node.{placeholder_content}}}}}"
+                        )
+                
+                # ✅ CHECK 2: Validate node.field references point to valid sources
                 matches = re.findall(param_ref_pattern, param_value)
                 
                 for source_node_id, field_name in matches:
@@ -361,6 +392,22 @@ class CodeGenerator(Role):
         )
         
         return example_text
+
+    def _auto_correct_workflow(
+        self,
+        workflow_json: dict,
+        user_prompt: str,
+        init_plan: str
+    ) -> dict:
+        """
+        Phase 3: Auto-correction delegated to WorkflowAutoCorrector.
+        
+        Cross-reference: workflow_auto_corrector.py for implementation details
+        """
+        from taskweaver.code_interpreter.code_interpreter.workflow_auto_corrector import get_auto_corrector
+        
+        corrector = get_auto_corrector(logger=self.logger)
+        return corrector.auto_correct(workflow_json, user_prompt, init_plan)
 
     def _convert_workflow_json_to_python(self, workflow_json: dict) -> str:
         """
@@ -753,8 +800,8 @@ class CodeGenerator(Role):
                     
                     # Navigate to node schemas
                     params = function_schema.get('parameters', {})
-                    workflow_prop = params.get('properties', {}).get('workflow', {})
-                    nodes_prop = workflow_prop.get('properties', {}).get('nodes', {})
+                    # Schema is now flat (no 'workflow' wrapper)
+                    nodes_prop = params.get('properties', {}).get('nodes', {})
                     node_items = nodes_prop.get('items', {})
                     node_schemas = node_items.get('oneOf', [])
                     
@@ -836,7 +883,13 @@ class CodeGenerator(Role):
                             "You are a workflow compiler. Generate workflows via function calls ONLY. "
                             "Rules:\n"
                             "- Use ONLY tool_id values from the Available Composio Actions list\n"
-                            "- All placeholders MUST use ${{...}} syntax\n"
+                            "- All placeholders use ${{...}} with VALID patterns:\n"
+                            "  • ${{EXTRACT:param_name}} - Extract from user query\n"
+                            "  • ${{from_step:node_id.field}} - Reference previous node\n"
+                            "  • ${{from_loop:loop_id.results}} - Access loop results\n"
+                            "  • ${{loop_item}} - Current iteration item\n"
+                            "  • Static values - Use directly without brackets\n"
+                            "  NEVER: ${{bare_name}}, ${{user.*}}, ${{context.*}}\n"
                             "- Node types are mutually exclusive\n"
                             "- agent_with_tools REQUIRES tool_id\n"
                             "- agent_only, form, hitl do NOT have tool_id\n\n"
@@ -882,8 +935,35 @@ class CodeGenerator(Role):
                         temperature=0.0
                     )
                     
-                    # Extract workflow JSON
-                    workflow_json = result["arguments"]["workflow"]
+                    # Extract workflow JSON with error handling
+                    if "arguments" not in result:
+                        error_msg = (
+                            f"[FUNCTION_CALLING] LLM did not call function correctly. "
+                            f"Response keys: {list(result.keys())}. "
+                            f"This usually means the LLM returned text instead of a function call."
+                        )
+                        self.logger.error(error_msg)
+                        raise ValueError(error_msg)
+                    
+                    # ✅ COMPATIBILITY: Accept both flat structure and wrapped structure
+                    # Flat: {"arguments": {"triggers": [], "nodes": [], "edges": []}}
+                    # Wrapped: {"arguments": {"workflow": {"triggers": [], "nodes": [], "edges": []}}}
+                    arguments = result["arguments"]
+                    if "workflow" in arguments:
+                        # Old wrapped format
+                        workflow_json = arguments["workflow"]
+                    elif "nodes" in arguments and "edges" in arguments:
+                        # New flat format (Azure OpenAI prefers this)
+                        workflow_json = arguments
+                    else:
+                        error_msg = (
+                            f"[FUNCTION_CALLING] Function call missing workflow structure. "
+                            f"Arguments received: {list(arguments.keys())}. "
+                            f"Expected either 'workflow' wrapper or 'nodes'+'edges' directly. "
+                            f"Full result: {json.dumps(result, indent=2)}"
+                        )
+                        self.logger.error(error_msg)
+                        raise ValueError(error_msg)
                     self.logger.info(
                         f"[FUNCTION_CALLING] Got workflow: "
                         f"{len(workflow_json.get('nodes', []))} nodes, "
@@ -894,7 +974,24 @@ class CodeGenerator(Role):
                     # json is already imported at top of file
                     self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
                     
+                    # ⚡ PHASE 3: AUTO-CORRECTION (Forms + HITL + Invalid Params)
+                    # Run BEFORE validation so corrections can fix issues
+                    original_node_count = len(workflow_json.get('nodes', []))
+                    workflow_json = self._auto_correct_workflow(
+                        workflow_json=workflow_json,
+                        user_prompt=query,
+                        init_plan=init_plan_with_markers
+                    )
+                    corrected_node_count = len(workflow_json.get('nodes', []))
+                    
+                    if corrected_node_count != original_node_count:
+                        self.logger.info(
+                            f"[AUTO_CORRECT] Phase 3 corrections applied: "
+                            f"{original_node_count} → {corrected_node_count} nodes"
+                        )
+                    
                     # ✅ VALIDATION: Validate all parameter references have valid source fields
+                    # (After auto-correction fixes invalid references)
                     param_warnings = self._validate_parameter_references(workflow_json)
                     
                     if param_warnings:
@@ -915,7 +1012,7 @@ class CodeGenerator(Role):
                                 f"💡 Fix these issues and regenerate the workflow."
                             )
                             post_proxy.update_attachment(error_message, AttachmentType.revise_message)
-                            post_proxy.update_send_to("Planner")
+                            post_proxy.update_send_to("CodeInterpreter")  # ✅ Send to self for retry with error feedback
                             return post_proxy.end()
                         else:
                             self.logger.warning(f"[DYNAMIC_VAL] {len(param_warnings)} param warnings")

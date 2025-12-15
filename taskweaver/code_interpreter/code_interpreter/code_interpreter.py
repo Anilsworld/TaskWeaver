@@ -170,11 +170,24 @@ class CodeInterpreter(Role, Interpreter):
             )
             post_proxy.update_message("Failed to generate code.")
             if self.retry_count < self.config.max_retry_count:
-                error_message = self.generator.format_output_revision_message()
-                post_proxy.update_attachment(
-                    error_message,
-                    AttachmentType.revise_message,
+                # ✅ Check if code_generator already provided specific validation error
+                # Don't overwrite detailed error messages with generic ones
+                existing_error = next(
+                    (a for a in post_proxy.post.attachment_list if a.type == AttachmentType.revise_message),
+                    None
                 )
+                
+                if not existing_error:
+                    # No specific error exists, add generic format error message
+                    error_message = self.generator.format_output_revision_message()
+                    post_proxy.update_attachment(
+                        error_message,
+                        AttachmentType.revise_message,
+                    )
+                else:
+                    # Specific validation error already exists, preserve it
+                    self.logger.info(f"[RETRY] Preserving specific error message: {existing_error.content[:100]}...")
+                
                 post_proxy.update_send_to("CodeInterpreter")
                 self.retry_count += 1
             else:

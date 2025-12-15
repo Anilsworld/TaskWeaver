@@ -134,23 +134,20 @@ class WorkflowSchemaBuilder:
             ),
             "parameters": {
                 "type": "object",
+                "description": (
+                    "Workflow Intermediate Representation (IR)\n\n"
+                    "⚠️ BEFORE RETURNING THIS WORKFLOW, VERIFY:\n"
+                    "1. Every agent_with_tools node HAS a 'params' field with extracted values\n"
+                    "2. All REQUIRED parameters (see tool schemas above) have non-null values\n"
+                    "3. Dates are in YYYY-MM-DD format with current year\n"
+                    "4. If user says 'my messages/emails/account', DO NOT create form nodes - use authenticated context\n\n"
+                    "DO NOT return empty params! Extract values from user request!"
+                ),
                 "properties": {
-                    "workflow": {
-                        "type": "object",
-                        "description": (
-                            "Workflow Intermediate Representation (IR)\n\n"
-                            "⚠️ BEFORE RETURNING THIS WORKFLOW, VERIFY:\n"
-                            "1. Every agent_with_tools node HAS a 'params' field with extracted values\n"
-                            "2. All REQUIRED parameters (see tool schemas above) have non-null values\n"
-                            "3. Dates are in YYYY-MM-DD format with current year\n"
-                            "4. All nodes (except start) have 'depends_on' field\n\n"
-                            "DO NOT return empty params! Extract values from user request!"
-                        ),
-                        "properties": {
-                            # ============================================================
-                            # 1️⃣ TRIGGERS
-                            # ============================================================
-                            "triggers": {
+                    # ============================================================
+                    # 1️⃣ TRIGGERS
+                    # ============================================================
+                    "triggers": {
                                 "type": "array",
                                 "description": "Workflow entry points (time-based or event-based)",
                                 "items": {
@@ -226,12 +223,8 @@ class WorkflowSchemaBuilder:
                                     ]
                                 }
                             }
-                        },
-                        "required": ["nodes", "edges", "triggers"],
-                        "additionalProperties": False
-                    }
-                },
-                "required": ["workflow"],
+                    },
+                "required": ["nodes", "edges", "triggers"],
                 "additionalProperties": False
             }
         }
@@ -794,6 +787,7 @@ class WorkflowSchemaBuilder:
             "additionalProperties": False
         })
         
+        logger.info(f"[SCHEMA_BUILDER] Built {len(node_schemas)} node schema variants")
         return node_schemas
 
 
