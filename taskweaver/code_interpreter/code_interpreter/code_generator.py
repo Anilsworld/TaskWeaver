@@ -640,59 +640,71 @@ class CodeGenerator(Role):
                         after_deps = []
                         if 'after' in full_line:
                             after_clause = full_line.split('after', 1)[1]
-                            after_matches = re.findall(r'\$(\d+)', after_clause)
+                            # 🎯 UPDATED: Support hierarchical steps (e.g., $2.1, $2.2.3)
+                            after_matches = re.findall(r'\$(\d+(?:\.\d+)*)', after_clause)
                             if after_matches:
-                                after_deps = [int(d) for d in after_matches]
+                                after_deps = after_matches  # Keep as strings: ['2', '2.1']
                                 self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'after' control deps: {after_deps}")
                         
                         # Pattern: Find ALL $X references after "from" keyword
                         # Handles: "from $1", "from $2 and $3", "from $1, $2, and $3"
+                        # 🎯 UPDATED: Supports hierarchical steps like "from $2, $2.1"
                         from_deps = []
                         if 'from' in full_line:
                             from_clause = full_line.split('from', 1)[1]
                             if 'after' in from_clause:
                                 from_clause = from_clause.split('after', 1)[0]  # Stop at "after"
-                            from_matches = re.findall(r'\$(\d+)', from_clause)
+                            # 🎯 UPDATED: Support hierarchical steps (e.g., $2.1, $2.2.3)
+                            from_matches = re.findall(r'\$(\d+(?:\.\d+)*)', from_clause)
                             if from_matches:
-                                from_deps = [int(d) for d in from_matches]
+                                from_deps = from_matches  # Keep as strings: ['2', '2.1']
                                 self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'from' data deps: {from_deps}")
                         
                         # Pattern: Find ALL $X references after "in"/"over" keyword (for loops)
                         # Uses precise regex to avoid false matches like "included", "within"
+                        # 🎯 UPDATED: Supports hierarchical steps
                         in_deps = []
                         if not from_deps:  # Only check 'in'/'over' if 'from' wasn't found
-                            in_pattern = r'\b(?:in|over)\s+\$(\d+)'
+                            in_pattern = r'\b(?:in|over)\s+\$(\d+(?:\.\d+)*)'
                             in_matches = re.findall(in_pattern, full_line)
                             if in_matches:
-                                in_deps = [int(d) for d in in_matches]
+                                in_deps = in_matches  # Keep as strings
                                 self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop): {in_deps}")
                             # Also check for comma-separated items: "in $1, $2, and $3"
-                            elif re.search(r'\b(?:in|over)\s+\$\d+', full_line):
+                            # 🎯 UPDATED: Support hierarchical steps (e.g., "in $2.1")
+                            elif re.search(r'\b(?:in|over)\s+\$\d+(?:\.\d+)*', full_line):
                                 match_in = re.search(r'\b(?:in|over)\s+(.+?)(?:\s+(?:after|<)|$)', full_line)
                                 if match_in:
                                     in_clause = match_in.group(1)
-                                    in_matches = re.findall(r'\$(\d+)', in_clause)
+                                    # 🎯 UPDATED: Support hierarchical steps
+                                    in_matches = re.findall(r'\$(\d+(?:\.\d+)*)', in_clause)
                                     if in_matches:
-                                        in_deps = [int(d) for d in in_matches]
+                                        in_deps = in_matches  # Keep as strings
                                         self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop, multi): {in_deps}")
                         
                         # 🎯 UNIVERSAL DEPENDENCY LOGIC:
                         # Combine ALL dependencies from 'from', 'after', and 'in/over' clauses
                         # If step says "from $3 after $2" → dependencies = [2, 3] (BOTH!)
+                        # If step says "from $2, $2.1" → dependencies = ['2', '2.1'] (hierarchical)
                         all_deps = set()
                         all_deps.update(from_deps)
                         all_deps.update(after_deps)
                         all_deps.update(in_deps)
-                        control_deps = sorted(list(all_deps)) if all_deps else []
+                        
+                        # Natural sort for hierarchical steps (e.g., '2' < '2.1' < '10')
+                        def natural_sort_key(step_str):
+                            """Convert '2.1.3' to [2, 1, 3] for natural sorting"""
+                            return [int(x) for x in step_str.split('.')]
+                        
+                        control_deps = sorted(list(all_deps), key=natural_sort_key) if all_deps else []
                         
                         # 🎯 BUILD HINT: Show node IDs (not integers) to guide LLM
                         # The hint tells the LLM what to generate in the workflow JSON
+                        # Map step numbers to node IDs: "2" → "node_2", "2.1" → "node_2_1"
                         deps_hint = ""
                         if control_deps:
-                            # Map step numbers to expected node IDs
-                            # For now, assume sequential: step 1 = node_1, step 2 = node_2
-                            # TODO: Handle nested steps properly (2.1 → node_2_1)
-                            node_id_deps = [f"'node_{d}'" for d in sorted(set(control_deps))]
+                            # ✅ FIXED: Handle hierarchical steps properly (2.1 → node_2_1)
+                            node_id_deps = [f"'node_{d.replace('.', '_')}'" for d in sorted(set(control_deps))]
                             deps_hint = f", dependencies=[{', '.join(node_id_deps)}]"
                         else:
                             deps_hint = f", dependencies=[]"
@@ -895,8 +907,20 @@ class CodeGenerator(Role):
                                     )
                                     continue
                                 
+                                # 🎯 DETERMINISTIC FIX: Auto-remove self-dependencies
+                                # Filter out self-dependencies before processing
+                                valid_dependencies = [dep for dep in dependencies if dep != node_id]
+                                
+                                if len(valid_dependencies) < len(dependencies):
+                                    removed_self_deps = [dep for dep in dependencies if dep == node_id]
+                                    self.logger.warning(
+                                        f"[EDGE_GEN] ⚠️ Auto-fixed: Node '{node_id}' had self-dependency {removed_self_deps} - removed automatically"
+                                    )
+                                    # Update the node's dependencies in the workflow JSON
+                                    node['dependencies'] = valid_dependencies
+                                
                                 # Create edges from each dependency to this node
-                                for dep_node_id in dependencies:
+                                for dep_node_id in valid_dependencies:
                                     # Validate dependency is a string (node ID)
                                     if not isinstance(dep_node_id, str):
                                         validation_errors.append(
@@ -909,13 +933,6 @@ class CodeGenerator(Role):
                                     if dep_node_id not in all_node_ids:
                                         validation_errors.append(
                                             f"Node '{node_id}' depends on non-existent node: '{dep_node_id}'"
-                                        )
-                                        continue
-                                    
-                                    # Prevent self-loops
-                                    if dep_node_id == node_id:
-                                        validation_errors.append(
-                                            f"Node '{node_id}' cannot depend on itself"
                                         )
                                         continue
                                     

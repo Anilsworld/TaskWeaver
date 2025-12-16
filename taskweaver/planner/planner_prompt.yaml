@@ -122,11 +122,13 @@ instruction_template: |-
   ❌ Only listing the FIRST step when you need INTERMEDIATE results
   ❌ Only listing DATA sources and ignoring CONTROL flow (approvals, decisions)
   ❌ Assuming data "flows through" automatically (it doesn't - be explicit!)
+  ❌ Self-dependencies: NEVER write `from $X` when the current step IS X (e.g., step 3.1 cannot have `from $3.1`)
   
   **Self-check questions:**
   1. "Does this step read/use the output from step X?" → Add `from $X`
   2. "Must this step wait for step Y to complete first?" → Add `after $Y`
   3. "Did I list EVERY step this one depends on?" → Review and add missing ones
+  4. "Am I referencing the CURRENT step in its own dependencies?" → ❌ REMOVE IT (self-dependency is invalid!)
   
   This rule covers ALL patterns: sequential, parallel, fork-join, conditional, loops, etc.
 
@@ -143,6 +145,9 @@ instruction_template: |-
   N+1. For each item, perform actions <loop> from $N
      N+1.1. Process item <node_type> from $N+1
      N+1.2. Send result <node_type> from $N+1, $N+1.1
+  
+  ❌ WRONG: N+1.2. Send result <node_type> from $N+1, $N+1.2  (self-dependency!)
+  ✅ RIGHT: N+1.2. Send result <node_type> from $N+1, $N+1.1  (depends on PREVIOUS step)
   
   Examples:
   1. Search Jira tickets <agent_with_tools>
