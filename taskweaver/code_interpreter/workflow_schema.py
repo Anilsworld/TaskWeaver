@@ -156,6 +156,10 @@ class WorkflowDefinition(BaseModel):
                     'blocking': node.blocking,
                     'form_schema': node.form_schema,
                     'metadata': node.metadata,
+                    # Loop-specific fields (preserved from extra fields via Pydantic Config)
+                    'loop_body': getattr(node, 'loop_body', None),
+                    'loop_over': getattr(node, 'loop_over', None),
+                    'nodes': getattr(node, 'nodes', None),  # For parallel groups
                 }
                 for node in self.nodes
             ],

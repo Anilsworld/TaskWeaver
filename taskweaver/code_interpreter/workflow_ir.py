@@ -307,22 +307,47 @@ class WorkflowIR:
         if len(self.nodes) > 1:  # Only check if multiple nodes
             # Identify nested nodes (children of loop/parallel nodes)
             nested_node_ids = set()
+            
+            # DEBUG: Log raw_dict structure (using INFO so it's visible)
+            logger.info(f"[NESTED_DEBUG] raw_dict has {len(self.raw_dict.get('nodes', []))} nodes")
+            
             for node_dict in self.raw_dict.get("nodes", []):
-                # Check loop_body
+                node_id = node_dict.get("id", "unknown")
+                node_type = node_dict.get("type", "unknown")
+                
+                # DEBUG: Show ALL keys in this node
+                logger.info(f"[NESTED_DEBUG] Node '{node_id}' (type={node_type}) has keys: {list(node_dict.keys())}")
+                
+                # Check loop_body in multiple locations
                 loop_body = node_dict.get("loop_body", [])
+                if not loop_body:
+                    # Check if loop_body is in metadata (handle None case)
+                    metadata = node_dict.get("metadata") or {}
+                    if isinstance(metadata, dict) and metadata:
+                        logger.info(f"[NESTED_DEBUG] Node '{node_id}' metadata keys: {list(metadata.keys())}")
+                        loop_body = metadata.get("loop_body", [])
+                        if loop_body:
+                            logger.info(f"[NESTED_DEBUG] Found loop_body in metadata: {loop_body}")
+                
                 if loop_body:
+                    logger.info(f"[NESTED_DEBUG] Node '{node_id}' (type={node_type}) has loop_body: {loop_body}")
                     nested_node_ids.update(
                         item for item in loop_body 
                         if isinstance(item, str)
                     )
+                else:
+                    logger.info(f"[NESTED_DEBUG] Node '{node_id}' has NO loop_body anywhere")
                 # Check nodes array
                 nested_nodes = node_dict.get("nodes", [])
                 if nested_nodes:
+                    logger.info(f"[NESTED_DEBUG] Node '{node_id}' (type={node_type}) has nodes array: {nested_nodes}")
                     nested_node_ids.update(
                         node.get("id") if isinstance(node, dict) else node 
                         for node in nested_nodes
                         if (isinstance(node, dict) and node.get("id")) or isinstance(node, str)
                     )
+            
+            logger.info(f"[NESTED_DEBUG] Found {len(nested_node_ids)} nested nodes: {nested_node_ids}")
             
             # Check connectivity only for non-nested nodes
             undirected = self.dag.to_undirected()
