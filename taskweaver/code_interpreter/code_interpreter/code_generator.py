@@ -615,101 +615,105 @@ class CodeGenerator(Role):
                     import re
                     step_hints = []
                     
-                    for line in init_plan_with_markers.split('\n'):
-                        # Match "1. Description <dependency>" or "   2.1. Description <dependency>"
-                        match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+([^<]+)(?:<([^>]+)>)?', line)
-                        if match:
-                            step_num = match.group(1)
-                            step_desc = match.group(2).strip()
-                            node_type_marker = match.group(3).strip() if match.group(3) else ""
-                            
-                            # 🎯 UNIVERSAL DEPENDENCY EXTRACTION (works for ANY workflow pattern)
-                            # Extract control dependencies from 'after $X' clause
-                            # Extract data dependencies from 'from $X' or 'in $X' clause (informational, for validation)
-                            
-                            # Pattern: Find ALL $X references after "after" keyword
-                            # Handles: "after $1", "after $2 and $3", "after $1, $2, and $3", "after $1, $2, $3, $4"
-                            after_deps = []
-                            if 'after' in step_desc:
-                                # Extract everything after the "after" keyword, then find all $X patterns
-                                after_clause = step_desc.split('after', 1)[1] if 'after' in step_desc else ""
-                                after_matches = re.findall(r'\$(\d+)', after_clause)
-                                if after_matches:
-                                    after_deps = [int(d) for d in after_matches]
-                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'after' control deps: {after_deps}")
-                            
-                            # Pattern: Find ALL $X references after "from" keyword
-                            # Handles: "from $1", "from $2 and $3", "from $1, $2, and $3", "from $1, $2, $3, and $4"
-                            from_deps = []
-                            if 'from' in step_desc:
-                                # Extract everything after the "from" keyword (but before "after" if present)
-                                from_clause = step_desc.split('from', 1)[1]
-                                if 'after' in from_clause:
-                                    from_clause = from_clause.split('after', 1)[0]  # Stop at "after"
-                                from_matches = re.findall(r'\$(\d+)', from_clause)
-                                if from_matches:
-                                    from_deps = [int(d) for d in from_matches]
-                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'from' data deps: {from_deps}")
-                            
-                            # Pattern: Find ALL $X references after "in" keyword (for loops)
-                            # Handles: "in $1", "For each item in $1", "over $1", "Loop over items in $2"
-                            # Uses precise regex to avoid false matches like "included", "within", "in Gmail"
-                            in_deps = []
-                            if not from_deps:  # Only check 'in'/'over' if 'from' wasn't found
-                                # Look for patterns like "in $X", "over $X" with word boundaries
-                                # This avoids matching "included in $1" or "within $1"
-                                in_pattern = r'\b(?:in|over)\s+\$(\d+)'
-                                in_matches = re.findall(in_pattern, step_desc)
-                                if in_matches:
-                                    in_deps = [int(d) for d in in_matches]
-                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop): {in_deps}")
-                                # Also check for comma-separated items: "in $1, $2, and $3"
-                                elif re.search(r'\b(?:in|over)\s+\$\d+', step_desc):
-                                    # Extract all $X after the first "in/over $X" match
-                                    match = re.search(r'\b(?:in|over)\s+(.+?)(?:\s+(?:after|<)|$)', step_desc)
-                                    if match:
-                                        in_clause = match.group(1)
-                                        in_matches = re.findall(r'\$(\d+)', in_clause)
-                                        if in_matches:
-                                            in_deps = [int(d) for d in in_matches]
-                                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop, multi): {in_deps}")
-                            
-                            # 🎯 CONTROL DEPENDENCY LOGIC (UNIVERSAL):
-                            # 1. If 'after' clause present → Use those for control deps
-                            # 2. Else if 'from' clause present → Use 'from' as control deps (shorthand)
-                            # 3. Else if 'in/over' clause present → Use 'in/over' as control deps (for loops)
-                            # 4. Else → No control deps (independent/parallel)
-                            control_deps = after_deps if after_deps else (from_deps if from_deps else in_deps)
-                            
-                            deps_hint = ""
-                            if control_deps:
-                                deps_hint = f", dependencies={control_deps}"
-                            else:
-                                deps_hint = f", dependencies=[] (independent)"
-                            
-                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, type: {node_type_marker}{deps_hint}")
-                            
-                            # Map specific node type markers to hints
-                            if node_type_marker == "form":
-                                hint = f"Step {step_num}: type='form' with fields{deps_hint}"
-                                step_hints.append(hint)
-                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif node_type_marker == "hitl":
-                                hint = f"Step {step_num}: type='hitl' for approval/review{deps_hint}"
-                                step_hints.append(hint)
-                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif node_type_marker == "agent_with_tools":
-                                hint = f"Step {step_num}: type='agent_with_tools' WITH tool_id{deps_hint}"
-                                step_hints.append(hint)
-                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif node_type_marker == "agent_only":
-                                hint = f"Step {step_num}: type='agent_only' for analysis{deps_hint}"
-                                step_hints.append(hint)
-                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif node_type_marker == "loop":
-                                hint = f"Step {step_num}: type='loop' with items{deps_hint}"
-                                step_hints.append(hint)
-                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                for line in init_plan_with_markers.split('\n'):
+                    # 🎯 UNIVERSAL REGEX: Capture ENTIRE line after step number
+                    # Handles ANY order: "1. Desc <marker> from $X" OR "1. Desc from $X <marker>"
+                    match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+(.+)', line)
+                    if match:
+                        step_num = match.group(1)
+                        full_line = match.group(2).strip()  # Full line after step number
+                        
+                        # Extract marker from anywhere in the line
+                        marker_match = re.search(r'<([^>]+)>', full_line)
+                        node_type_marker = marker_match.group(1).strip() if marker_match else ""
+                        
+                        # Extract description (everything before first marker, or full line if no marker)
+                        step_desc = full_line.split('<')[0].strip() if '<' in full_line else full_line
+                        
+                        # 🎯 UNIVERSAL DEPENDENCY EXTRACTION (works for ANY workflow pattern, ANY order)
+                        # Search in FULL LINE (not just description) to handle both:
+                        #   - "1. Desc from $X <marker>"  (old order)
+                        #   - "1. Desc <marker> from $X"  (new order)
+                        
+                        # Pattern: Find ALL $X references after "after" keyword
+                        # Handles: "after $1", "after $2 and $3", "after $1, $2, and $3"
+                        after_deps = []
+                        if 'after' in full_line:
+                            after_clause = full_line.split('after', 1)[1]
+                            after_matches = re.findall(r'\$(\d+)', after_clause)
+                            if after_matches:
+                                after_deps = [int(d) for d in after_matches]
+                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'after' control deps: {after_deps}")
+                        
+                        # Pattern: Find ALL $X references after "from" keyword
+                        # Handles: "from $1", "from $2 and $3", "from $1, $2, and $3"
+                        from_deps = []
+                        if 'from' in full_line:
+                            from_clause = full_line.split('from', 1)[1]
+                            if 'after' in from_clause:
+                                from_clause = from_clause.split('after', 1)[0]  # Stop at "after"
+                            from_matches = re.findall(r'\$(\d+)', from_clause)
+                            if from_matches:
+                                from_deps = [int(d) for d in from_matches]
+                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'from' data deps: {from_deps}")
+                        
+                        # Pattern: Find ALL $X references after "in"/"over" keyword (for loops)
+                        # Uses precise regex to avoid false matches like "included", "within"
+                        in_deps = []
+                        if not from_deps:  # Only check 'in'/'over' if 'from' wasn't found
+                            in_pattern = r'\b(?:in|over)\s+\$(\d+)'
+                            in_matches = re.findall(in_pattern, full_line)
+                            if in_matches:
+                                in_deps = [int(d) for d in in_matches]
+                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop): {in_deps}")
+                            # Also check for comma-separated items: "in $1, $2, and $3"
+                            elif re.search(r'\b(?:in|over)\s+\$\d+', full_line):
+                                match_in = re.search(r'\b(?:in|over)\s+(.+?)(?:\s+(?:after|<)|$)', full_line)
+                                if match_in:
+                                    in_clause = match_in.group(1)
+                                    in_matches = re.findall(r'\$(\d+)', in_clause)
+                                    if in_matches:
+                                        in_deps = [int(d) for d in in_matches]
+                                        self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop, multi): {in_deps}")
+                        
+                        # 🎯 UNIVERSAL DEPENDENCY LOGIC:
+                        # Combine ALL dependencies from 'from', 'after', and 'in/over' clauses
+                        # If step says "from $3 after $2" → dependencies = [2, 3] (BOTH!)
+                        all_deps = set()
+                        all_deps.update(from_deps)
+                        all_deps.update(after_deps)
+                        all_deps.update(in_deps)
+                        control_deps = sorted(list(all_deps)) if all_deps else []
+                        
+                        deps_hint = ""
+                        if control_deps:
+                            deps_hint = f", dependencies={control_deps}"
+                        else:
+                            deps_hint = f", dependencies=[] (independent)"
+                        
+                        self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, type: {node_type_marker}{deps_hint}")
+                        
+                        # Map specific node type markers to hints
+                        if node_type_marker == "form":
+                            hint = f"Step {step_num}: type='form' with fields{deps_hint}"
+                            step_hints.append(hint)
+                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                        elif node_type_marker == "hitl":
+                            hint = f"Step {step_num}: type='hitl' for approval/review{deps_hint}"
+                            step_hints.append(hint)
+                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                        elif node_type_marker == "agent_with_tools":
+                            hint = f"Step {step_num}: type='agent_with_tools' WITH tool_id{deps_hint}"
+                            step_hints.append(hint)
+                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                        elif node_type_marker == "agent_only":
+                            hint = f"Step {step_num}: type='agent_only' for analysis{deps_hint}"
+                            step_hints.append(hint)
+                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                        elif node_type_marker == "loop":
+                            hint = f"Step {step_num}: type='loop' with items{deps_hint}"
+                            step_hints.append(hint)
+                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
                     
                     if step_hints:
                         num_steps = len(step_hints)

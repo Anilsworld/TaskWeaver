@@ -127,6 +127,12 @@ class WorkflowIR:
         self._parse_nodes()
         self._parse_conditional_edges()
         self._build_dag()
+        
+        # ✅ AUTO-FIX: Detect and fix fork-join patterns (Sim.ai-style)
+        fixed_count = self.infer_missing_fork_join_dependencies()
+        if fixed_count > 0:
+            logger.info(f"[FORK-JOIN] ✅ Auto-fixed {fixed_count} dependencies using NetworkX")
+        
         self._validate_dag()
     
     def _parse_nodes(self):
@@ -407,6 +413,79 @@ class WorkflowIR:
         if node_id not in self.dag:
             return []
         return list(self.dag.successors(node_id))
+    
+    def infer_missing_fork_join_dependencies(self) -> int:
+        """
+        Auto-detect and fix fork-join patterns using NetworkX (Sim.ai-style).
+        
+        Algorithm:
+        1. Get parallel execution layers using nx.topological_generations()
+        2. For each layer with 2+ parallel nodes (fork), check next layer
+        3. If next layer node only depends on fork's INPUT, add ALL fork outputs
+        
+        Returns:
+            Number of dependencies added
+        
+        Example:
+            Before: [1] → [2, 3, 4] → [5]
+            Dependencies: 5 depends on [1] ❌ (missing 2, 3, 4)
+            After: 5 depends on [1, 2, 3, 4] ✅
+        """
+        added_count = 0
+        
+        # Get execution layers (parallel groups)
+        layers = list(nx.topological_generations(self.dag))
+        
+        for i in range(len(layers) - 1):
+            current_layer = layers[i]
+            next_layer = layers[i + 1]
+            
+            # Check if current layer has parallel execution (fork)
+            if len(current_layer) <= 1:
+                continue  # No fork, skip
+            
+            logger.info(f"[FORK-JOIN] Detected parallel layer: {current_layer}")
+            
+            # Find the common input to the parallel layer (fork source)
+            fork_inputs = set()
+            for node_id in current_layer:
+                predecessors = list(self.dag.predecessors(node_id))
+                fork_inputs.update(predecessors)
+            
+            # For each node in next layer, check if it's a join point
+            for next_node_id in next_layer:
+                current_deps = set(self.dag.predecessors(next_node_id))
+                
+                # Check if this node only depends on fork inputs (not fork outputs)
+                depends_on_fork_input = bool(fork_inputs & current_deps)
+                depends_on_fork_outputs = bool(set(current_layer) & current_deps)
+                
+                if depends_on_fork_input and not depends_on_fork_outputs:
+                    # This is a join point missing fork output dependencies!
+                    logger.warning(
+                        f"[FORK-JOIN] Node {next_node_id} depends on fork input {fork_inputs} "
+                        f"but missing fork outputs {current_layer}"
+                    )
+                    
+                    # Add missing dependencies from ALL parallel nodes
+                    for parallel_node_id in current_layer:
+                        if not self.dag.has_edge(parallel_node_id, next_node_id):
+                            self.dag.add_edge(parallel_node_id, next_node_id, edge_type=EdgeType.DATA_FLOW)
+                            edge = IREdge(
+                                source=parallel_node_id,
+                                target=next_node_id,
+                                type=EdgeType.DATA_FLOW
+                            )
+                            self.edges.append(edge)
+                            added_count += 1
+                            logger.info(
+                                f"[FORK-JOIN] ✅ Auto-added edge: {parallel_node_id} → {next_node_id}"
+                            )
+        
+        if added_count > 0:
+            logger.info(f"[FORK-JOIN] Auto-fixed {added_count} missing fork-join dependencies")
+        
+        return added_count
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert IR back to dict representation."""
