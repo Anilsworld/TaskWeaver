@@ -480,19 +480,21 @@ class WorkflowSchemaBuilder:
                 },
                 "dependencies": {
                     "type": "array",
-                    "items": {"type": "integer"},
+                    "items": {"type": "string"},
                     "description": (
-                        "🎯 EXPLICIT DEPENDENCIES (LLMCompiler-style - HIGHEST PRIORITY!):\n"
-                        "List of step indices this node depends on (1-based, matching plan step numbers).\n\n"
+                        "🎯 EXPLICIT DEPENDENCIES (Node IDs - HIGHEST PRIORITY!):\n"
+                        "List of node IDs this node depends on.\n\n"
                         "✅ WHEN TO USE:\n"
-                        "- Step 2 processes data from Step 1 → dependencies: [1]\n"
-                        "- Step 4 needs results from Steps 2 & 3 → dependencies: [2, 3]\n"
-                        "- Step 1 is independent (fetches new data) → dependencies: [] or omit\n\n"
-                        "📊 WHY EXPLICIT IS BETTER:\n"
-                        "- 100% deterministic execution order (no guessing!)\n"
-                        "- Clearer than inferring from description text\n"
-                        "- Prevents workflow disconnection bugs\n\n"
-                        "⚠️ FALLBACK: If omitted, dependencies inferred from $id in description/params"
+                        "- node_2 processes data from node_1 → dependencies: ['node_1']\n"
+                        "- node_4 needs results from node_2 & node_3 → dependencies: ['node_2', 'node_3']\n"
+                        "- node_2_1 (nested) depends on loop node_2 → dependencies: ['node_2']\n"
+                        "- node_2_2 depends on loop node_2 AND node_2_1 → dependencies: ['node_2', 'node_2_1']\n"
+                        "- node_1 is independent (fetches new data) → dependencies: []\n\n"
+                        "📊 WHY NODE IDs:\n"
+                        "- Can reference ANY node (nested, parallel, etc.)\n"
+                        "- Works with LangGraph/NetworkX out-of-the-box\n"
+                        "- 100% deterministic execution order\n\n"
+                        "⚠️ CRITICAL: Use exact node IDs like 'node_1', 'node_2', 'node_2_1'"
                     )
                 },
                 "description": {"type": "string", "description": "Clear description of what this node does (taken from plan step)"}
@@ -582,15 +584,15 @@ class WorkflowSchemaBuilder:
                 },
                 "dependencies": {
                     "type": "array",
-                    "items": {"type": "integer"},
+                    "items": {"type": "string"},
                     "description": (
-                        "🎯 EXPLICIT DEPENDENCIES (LLMCompiler-style - HIGHEST PRIORITY!):\n"
-                        "List of step indices this node depends on (1-based, matching plan step numbers).\n\n"
+                        "🎯 EXPLICIT DEPENDENCIES (Node IDs - HIGHEST PRIORITY!):\n"
+                        "List of node IDs this node depends on.\n\n"
                         "✅ EXAMPLES:\n"
-                        "- Step 2 'Calculate from $1' → dependencies: [1]\n"
-                        "- Step 3 'Analyze $2' → dependencies: [2]\n"
-                        "- Step 4 'Report on $3' → dependencies: [3]\n"
-                        "- Independent analysis → dependencies: [] or omit\n\n"
+                        "- node_2 'Calculate from node_1' → dependencies: ['node_1']\n"
+                        "- node_3 'Analyze node_2' → dependencies: ['node_2']\n"
+                        "- node_2_1 (nested in loop) → dependencies: ['node_2']\n"
+                        "- Independent analysis → dependencies: []\n\n"
                         "⚠️ CRITICAL FOR REASONING NODES:\n"
                         "Even if agent_mode='reasoning', if the analysis uses data from previous steps,\n"
                         "you MUST specify dependencies! This prevents disconnected workflow components.\n\n"
@@ -668,8 +670,8 @@ class WorkflowSchemaBuilder:
                 },
                 "dependencies": {
                     "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "Usually empty [] for forms (typically first step). Specify if form uses previous node data."
+                    "items": {"type": "string"},
+                    "description": "Usually empty [] for forms (typically first step). Specify node IDs if form uses previous node data (e.g., ['node_1'])."
                 }
             },
             "required": ["id", "type", "fields"],
@@ -701,8 +703,8 @@ class WorkflowSchemaBuilder:
                 },
                 "dependencies": {
                     "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "Step indices whose results need approval. HITL nodes typically depend on previous processing steps."
+                    "items": {"type": "string"},
+                    "description": "Node IDs whose results need approval (e.g., ['node_2', 'node_3']). HITL nodes typically depend on previous processing steps."
                 }
             },
             "required": ["id", "type", "approval_type"],
@@ -788,8 +790,8 @@ class WorkflowSchemaBuilder:
                 },
                 "dependencies": {
                     "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "Step indices that must complete before loop starts (e.g., fetching the array to loop over)."
+                    "items": {"type": "string"},
+                    "description": "Node IDs that must complete before loop starts (e.g., ['node_1'] - the node that fetches the array to loop over)."
                 },
                 "description": {"type": "string", "description": "Clear description of what this loop does (taken from plan step)"}
             },

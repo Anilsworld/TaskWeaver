@@ -67,7 +67,7 @@ class IRNode:
     app_name: Optional[str] = None
     params: Dict[str, Any] = field(default_factory=dict)
     description: Optional[str] = None
-    dependencies: List[int] = field(default_factory=list)  # Step indices this node depends on
+    dependencies: List[str] = field(default_factory=list)  # Node IDs this node depends on (e.g., ['node_1', 'node_2'])
     code: Optional[str] = None  # For code_execution type nodes
     metadata: Dict[str, Any] = field(default_factory=dict)
     

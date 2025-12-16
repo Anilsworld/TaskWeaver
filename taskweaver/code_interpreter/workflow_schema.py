@@ -42,9 +42,9 @@ class WorkflowNode(BaseModel):
     description: Optional[str] = Field(None, description="Node description")
     
     # ✅ REQUIRED: Explicit dependency declaration (single source of truth)
-    dependencies: List[int] = Field(
+    dependencies: List[str] = Field(
         default_factory=list,
-        description="REQUIRED: List of 1-based step indices this node depends on. Use [] for independent/first nodes."
+        description="REQUIRED: List of node IDs this node depends on (e.g., ['node_1', 'node_2']). Use [] for independent/first nodes."
     )
     
     # Advanced fields
