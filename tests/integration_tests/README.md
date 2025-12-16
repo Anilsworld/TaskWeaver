@@ -181,3 +181,4 @@ def test_my_new_integration(self):
 - [Unit Tests](../unit_tests/test_workflow_function_calling.py) - Mock-based tests (no API calls)
 - [Implementation](../../taskweaver/code_interpreter/code_interpreter/code_generator.py) - CodeGenerator with function calling
 - [OpenAI Function Calling Docs](https://platform.openai.com/docs/guides/function-calling)
+

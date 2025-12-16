@@ -41,11 +41,13 @@ class WorkflowNode(BaseModel):
     params: Union[Dict[str, Any], WorkflowParams] = Field(default_factory=dict, description="Tool parameters")
     description: Optional[str] = Field(None, description="Node description")
     
-    # Parallel execution field
-    parallel_nodes: Optional[List[str]] = Field(None, description="Node IDs to execute in parallel (for parallel type)")
+    # ✅ REQUIRED: Explicit dependency declaration (single source of truth)
+    dependencies: List[int] = Field(
+        default_factory=list,
+        description="REQUIRED: List of 1-based step indices this node depends on. Use [] for independent/first nodes."
+    )
     
     # Advanced fields
-    parallel_group: Optional[int] = Field(None, description="Parallel execution group")
     decision: Optional[str] = Field(None, description="HITL decision field")
     blocking: Optional[bool] = Field(None, description="Blocks workflow until completion")
     form_schema: Optional[Dict[str, Any]] = Field(None, description="Form schema for input nodes")
@@ -149,9 +151,7 @@ class WorkflowDefinition(BaseModel):
                     'app_name': node.app_name,
                     'params': node.params if isinstance(node.params, dict) else node.params.dict(),
                     'description': node.description,
-                    'parallel_group': node.parallel_group,
-                    'parallel_nodes': node.parallel_nodes,  # ✅ CRITICAL: Pass parallel_nodes to WorkflowIR!
-                    'code': node.code,  # ✅ For code_execution nodes
+                    'code': node.code,  # For code_execution nodes
                     'decision': node.decision,
                     'blocking': node.blocking,
                     'form_schema': node.form_schema,
@@ -219,9 +219,8 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
                         if '.' in actual_value or 'tool_use' in actual_value:
                             error_messages.append(
                                 f"[!] INVALID NODE TYPE at {loc}: '{actual_value}' is not valid.\n"
-                                f"    ✅ CORRECT: Use type='parallel' with parallel_nodes=['child1', 'child2', ...]\n"
-                                f"    📚 See example: Check stock prices from 3 financial APIs\n"
-                                f"    ℹ️  Valid types: agent_with_tools, agent_only, code_execution, form, hitl, loop, parallel"
+                                f"    ℹ️  Valid types: agent_with_tools, agent_only, code_execution, form, hitl, loop\n"
+                                f"    💡 For parallel execution: Use dependencies field (nodes with same dependencies run in parallel)"
                             )
                             continue
                     except:

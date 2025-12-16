@@ -170,21 +170,20 @@ content: |-
       WORKFLOW = {{
         "nodes": [
           {{"id": "get_ticket_info", "type": "form", "form_id": "ticket_form", "title": "Support Ticket", "fields": [{{"name": "title", "label": "Issue Title", "required": True}}, {{"name": "priority", "type": "select", "options": ["High", "Low"], "required": True}}], "description": "Collect ticket details"}},
-          {{"id": "search_all_docs", "type": "parallel", "parallel_nodes": ["search_tool_a", "search_tool_b"], "description": "Search documentation in parallel"}},
           {{"id": "search_tool_a", "type": "agent_with_tools", "tool_id": "TOOLA_SEARCH", "app_name": "toola", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Tool A"}},
           {{"id": "search_tool_b", "type": "agent_with_tools", "tool_id": "TOOLB_SEARCH", "app_name": "toolb", "params": {{"query": "${{get_ticket_info.title}}"}}, "description": "Search Tool B"}},
-          {{"id": "analyze_results", "type": "agent_only", "description": "Analyze search results", "params": {{"toola_results": "${{search_tool_a.issues}}", "toolb_results": "${{search_tool_b.pages}}"}}}},
-          {{"id": "approve_solution", "type": "hitl", "form_id": "approval_form", "title": "Approve Solution", "fields": [{{"name": "decision", "type": "select", "options": ["Create Ticket", "Mark Resolved"], "required": True}}], "description": "Approve action"}},
-          {{"id": "create_ticket", "type": "agent_with_tools", "tool_id": "TOOLA_CREATE", "app_name": "toola", "params": {{"summary": "${{get_ticket_info.title}}", "priority": "${{get_ticket_info.priority}}"}}, "description": "Create ticket"}}
+          {{"id": "analyze_results", "type": "agent_only", "description": "Analyze search results from ${{search_tool_a}} and ${{search_tool_b}}", "params": {{"toola_results": "${{search_tool_a.issues}}", "toolb_results": "${{search_tool_b.pages}}"}}}},
+          {{"id": "approve_solution", "type": "hitl", "form_id": "approval_form", "title": "Approve Solution", "fields": [{{"name": "decision", "type": "select", "options": ["Create Ticket", "Mark Resolved"], "required": True}}], "description": "Approve action based on ${{analyze_results}}"}},
+          {{"id": "create_ticket", "type": "agent_with_tools", "tool_id": "TOOLA_CREATE", "app_name": "toola", "params": {{"summary": "${{get_ticket_info.title}}", "priority": "${{get_ticket_info.priority}}"}}, "description": "Create ticket using ${{approve_solution}}"}}
         ],
-        "edges": [
-          {{"source": "get_ticket_info", "target": "search_all_docs"}},
-          {{"source": "search_all_docs", "target": "analyze_results"}},
-          {{"source": "analyze_results", "target": "approve_solution"}},
-          {{"source": "approve_solution", "target": "create_ticket", "condition": "${{approve_solution.decision}} == 'Create Ticket'"}}
-        ]
+        "edges": []
       }}
       result = WORKFLOW
+      # NOTE: Edges are automatically inferred from ${{...}} references in descriptions and params!
+      # search_tool_a and search_tool_b execute in PARALLEL (no dependencies)
+      # analyze_results waits for both (depends on search_tool_a and search_tool_b)
+      # approve_solution waits for analyze_results
+      # create_ticket waits for approve_solution
       ```
     
     - **BOOLEAN VALUES** (CRITICAL):
@@ -331,13 +330,16 @@ content: |-
     - Runtime executes it 4x with different ${{{{loop_item}}}} values
     - Results auto-aggregated via ${{{{from_loop:loop_id.field}}}}
     
-    **WHEN TO USE PARALLEL NODES**:
+    **WHEN TO USE SEPARATE INDEPENDENT NODES (Automatic Parallel Execution)**:
     - Each item needs DIFFERENT tool_id
     - Operations are heterogeneous (search docs AND check issues AND query database)
     - User explicitly says "different" or "specific" for each item
     - Example: "Search multiple knowledge bases simultaneously"
-      ✅ USE: {{"id": "search_all", "type": "parallel", "parallel_nodes": ["search_tool_a", "search_tool_b", "search_tool_c"]}}
+      ✅ USE: List as separate nodes without dependencies (they'll execute in parallel automatically!)
+      {{"id": "search_tool_a", ...}}, {{"id": "search_tool_b", ...}}, {{"id": "search_tool_c", ...}}
+      Then: {{"id": "analyze", "description": "Analyze results from ${{search_tool_a}}, ${{search_tool_b}}, ${{search_tool_c}}", ...}}
       ❌ DON'T: Loop (can't use different tool_ids in loop body)
+      ✅ DO: Use explicit dependencies - nodes with same dependencies run in parallel automatically!
     
     **DECISION FLOWCHART**:
     1. Is the operation THE SAME for all items? → YES: **USE LOOP**
@@ -346,14 +348,14 @@ content: |-
     4. Are operations DIFFERENT (fetch AND send AND process)? → YES: **USE PARALLEL NODES**
     5. Are tool_ids DIFFERENT per item? → YES: **USE PARALLEL NODES**
     
-    - WORKFLOW PATTERNS (ALL supported):
-      1. Sequential: Connect nodes with edges
-      2. Parallel: Create parent node with type="parallel" and parallel_nodes=["child1", "child2", ...]
-      3. Conditional: Use edges with condition field for if/else branching
-      4. Fan-out/Fan-in: Parallel node executes multiple children, then converges at next node
-      5. Loops: Use loops array with iterate_over and exit_condition (PREFERRED for repetitive operations!)
-      6. Nested: Combine patterns (parallel inside conditional, loops with approvals, etc.)
-      7. Multi-dimensional: Multiple parallel nodes, multiple conditional branches, complex dependencies
+    - WORKFLOW PATTERNS (ALL supported - using dependency-based orchestration):
+      1. Sequential: Node B depends on Node A (e.g., "Process results from ${{nodeA}}")
+      2. Parallel: List independent nodes without dependencies (automatic parallel execution!)
+      3. Conditional: Use node descriptions with conditional logic (e.g., "Send if ${{status}} is approved")
+      4. Fan-out/Fan-in: Multiple independent nodes → one node that depends on all (e.g., "Analyze ${{a}}, ${{b}}, ${{c}}")
+      5. Loops: Use type="loop" with loop_over and loop_body (PREFERRED for repetitive operations!)
+      6. Nested: Combine patterns (loops with conditionals, fan-out then fan-in, etc.)
+      7. Multi-dimensional: Any DAG complexity - dependencies determine execution order automatically
     
     - NODE TYPE SELECTION RULES (CRITICAL - choose correct type):
       
@@ -402,34 +404,59 @@ content: |-
       * If NO suitable tools exist for user's request, STOP and explain what's missing
       * Example: "I cannot create this workflow because I don't have access to restaurant booking APIs"
       * Node IDs must be unique across entire workflow
-      * Parallel execution: Create parent node with type="parallel" and parallel_nodes list, then define children
-      * Edges: Connect to parent parallel node, NOT to individual children
-      * Conditional edges: source must be a node that produces the condition field
+      * **Parallel execution**: List independent nodes separately - NO parent/child structure needed!
+      * **Edges**: Leave empty ([]) - they're automatically inferred from ${{...}} references
+      * **Dependencies**: Reference previous nodes in descriptions/params using ${{node_id}} notation
+      * Conditional logic: Include condition in node description (e.g., "Send if ${{status}} == 'approved'")
       * Data flow: use placeholders to reference ANY previous node's output
       * Keep total WORKFLOW under 150 lines (use clear, concise descriptions)
       * System handles ALL parameter resolution at runtime (extraction, data flow, aggregation)
     
-    - EXAMPLES BY COMPLEXITY:
+    - EXAMPLES BY COMPLEXITY (Using Dependency-Based Approach):
       
       **Simple Sequential:**
-      nodes: [fetch_data → process_data → send_result]
-      edges: [{{"source": "fetch_data", "target": "process_data"}}, {{"source": "process_data", "target": "send_result"}}]
+      nodes: [
+        {{"id": "fetch_data", ...}},
+        {{"id": "process_data", "description": "Process results from ${{fetch_data}}", ...}},
+        {{"id": "send_result", "description": "Send processed data from ${{process_data}}", ...}}
+      ]
+      edges: []  # Auto-inferred from ${{...}} references!
       
       **Parallel with Approval:**
-      nodes: [start, search_all_repos (type: parallel, parallel_nodes: [search_github, search_gitlab, search_bitbucket]), search_github, search_gitlab, search_bitbucket, analyze_results, approve_action]
-      edges: [{{"source": "start", "target": "search_all_repos"}}, {{"source": "search_all_repos", "target": "analyze_results"}}, {{"source": "analyze_results", "target": "approve_action"}}]
+      nodes: [
+        {{"id": "search_github", ...}},
+        {{"id": "search_gitlab", ...}},
+        {{"id": "search_bitbucket", ...}},
+        {{"id": "analyze_results", "description": "Analyze ${{search_github}}, ${{search_gitlab}}, ${{search_bitbucket}}", ...}},
+        {{"id": "approve_action", "type": "hitl", "description": "Approve based on ${{analyze_results}}", ...}}
+      ]
+      edges: []  # search_* execute in parallel, analyze waits for all, approve waits for analyze
       
       **Conditional Routing:**
-      nodes: [check_status → process_if_pending, process_if_complete]
-      edges: [{{"source": "check_status", "target": "process_if_pending", "condition": "${{check_status.status}} == 'pending'"}}, {{"source": "check_status", "target": "process_if_complete", "condition": "${{check_status.status}} == 'complete'"}}]
+      nodes: [
+        {{"id": "check_status", ...}},
+        {{"id": "process_if_pending", "description": "Process if ${{check_status.status}} == 'pending'", ...}},
+        {{"id": "process_if_complete", "description": "Process if ${{check_status.status}} == 'complete'", ...}}
+      ]
+      edges: []  # Both branches depend on check_status, workflow engine executes correct branch
       
       **Multi-Platform with Post-Approval Actions:**
-      nodes: [start, fetch_all (type: parallel), [children], hitl_approval, send_all (type: parallel), [children]]
-      Uses: parallel nodes, conditional edges, placeholders for data flow
+      nodes: [
+        {{"id": "fetch_a", ...}}, {{"id": "fetch_b", ...}}, {{"id": "fetch_c", ...}},
+        {{"id": "analyze", "description": "Analyze ${{fetch_a}}, ${{fetch_b}}, ${{fetch_c}}", ...}},
+        {{"id": "approval", "type": "hitl", "description": "Approve ${{analyze}}", ...}},
+        {{"id": "send_a", "description": "Send using ${{approval}}", ...}},
+        {{"id": "send_b", "description": "Send using ${{approval}}", ...}}
+      ]
+      edges: []  # fetch_* parallel → analyze → approval → send_* parallel
       
       **Loop with Processing:**
-      nodes: [get_list] → [loop: process_each_item] → [final_summary]
-      loops: [{{"iterate_over": "${{from_step:get_list.items}}", "loop_body": ["process_item"], "exit_condition": "..."}}]
+      nodes: [
+        {{"id": "get_list", ...}},
+        {{"id": "process_loop", "type": "loop", "loop_over": "${{from_step:get_list.items}}", "loop_body": [...]}},
+        {{"id": "final_summary", "description": "Summarize ${{from_loop:process_loop.results}}", ...}}
+      ]
+      edges: []  # Auto-inferred: get_list → process_loop → final_summary
 
     ## On {ROLE_NAME}'s response format:
     - The response is a JSON object with the following format:

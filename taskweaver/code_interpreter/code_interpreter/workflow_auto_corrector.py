@@ -369,3 +369,4 @@ def get_auto_corrector(logger: logging.Logger = None) -> WorkflowAutoCorrector:
     if _corrector_instance is None:
         _corrector_instance = WorkflowAutoCorrector(logger=logger)
     return _corrector_instance
+

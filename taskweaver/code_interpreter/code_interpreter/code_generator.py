@@ -236,104 +236,6 @@ class CodeGenerator(Role):
         
         return all_tool_ids
 
-    def _parse_init_plan_structure(self, init_plan: str) -> List[Dict[str, Any]]:
-        """
-        Parse init_plan to extract deterministic step structure.
-        
-        Input format:
-        1. Step description <type>
-        2. Parent step <parallel>
-           2.1. Child step <agent_with_tools>
-           2.2. Child step <agent_with_tools>
-        3. Next step <agent_only>
-        
-        Output: List of step info dicts with step_num, parent, type, etc.
-        """
-        import re
-        
-        steps = []
-        for line in init_plan.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            
-            # Match "1. Description <type>" or "2.1. Description <type>"
-            match = re.match(r'^(\d+(?:\.\d+)?)\.\s+([^<]+)(?:<([^>]+)>)?', line)
-            if match:
-                step_num = match.group(1)
-                description = match.group(2).strip()
-                step_type = match.group(3).strip() if match.group(3) else "agent_only"
-                
-                # Determine parent (for sub-steps like 2.1, parent is 2)
-                parent = None
-                if '.' in step_num:
-                    parent = step_num.split('.')[0]
-                
-                steps.append({
-                    'step_num': step_num,
-                    'description': description,
-                    'type': step_type,
-                    'parent': parent
-                })
-        
-        self.logger.info(f"[EDGE_GEN] Parsed {len(steps)} steps from init_plan")
-        for step in steps:
-            self.logger.info(f"[EDGE_GEN]   Step {step['step_num']}: {step['description'][:50]} ({step['type']})")
-        
-        return steps
-    
-    def _generate_deterministic_edges(self, steps: List[Dict[str, Any]], nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Generate edges deterministically based on step structure.
-        
-        Strategy: Map steps to nodes by POSITION (index), not by ID matching.
-        The LLM generates nodes in the same order as steps in init_plan.
-        
-        Rules:
-        1. Sequential top-level steps connect in order: step1 → step2 → step3
-        2. Sub-steps (2.1, 2.2) are children of parent (2) - skip in sequential chain
-        3. First step connects from 'start'
-        """
-        edges = []
-        
-        self.logger.info(f"[EDGE_GEN] Generating deterministic edges for {len(steps)} steps and {len(nodes)} nodes")
-        self.logger.info(f"[EDGE_GEN] Available node IDs: {[n['id'] for n in nodes]}")
-        
-        # Build index-based mapping: step[i] → nodes[i]
-        if len(steps) != len(nodes):
-            self.logger.warning(f"[EDGE_GEN] ⚠️ Step count ({len(steps)}) != node count ({len(nodes)}) - may have misalignment")
-        
-        step_to_node_id = {}
-        for i, step in enumerate(steps):
-            if i < len(nodes):
-                step_to_node_id[step['step_num']] = nodes[i]['id']
-                self.logger.info(f"[EDGE_GEN] Mapped step {step['step_num']} → node {nodes[i]['id']}")
-        
-        # Get top-level steps (not sub-steps like 2.1, 2.2)
-        top_level_steps = [s for s in steps if s['parent'] is None]
-        
-        self.logger.info(f"[EDGE_GEN] Found {len(top_level_steps)} top-level steps")
-        
-        # Connect sequential top-level steps
-        prev_id = 'start'
-        for step in top_level_steps:
-            node_id = step_to_node_id.get(step['step_num'])
-            
-            if node_id:
-                edges.append({
-                    'type': 'sequential',
-                    'from': prev_id,
-                    'to': node_id
-                })
-                self.logger.info(f"[EDGE_GEN] Added edge: {prev_id} → {node_id}")
-                prev_id = node_id
-            else:
-                self.logger.warning(f"[EDGE_GEN] ⚠️ Step {step['step_num']} has no mapped node")
-        
-        self.logger.info(f"[EDGE_GEN] Generated {len(edges)} deterministic edges")
-        return edges
-
-
     def _build_workflow_function_schema(self, tool_ids: List[str]) -> dict:
         """
         Build OpenAI function schema for workflow IR generation.
@@ -366,44 +268,14 @@ class CodeGenerator(Role):
 
     def _format_examples_for_function_calling(self) -> str:
         """
-        Format YAML examples for function calling prompt.
+        DEPRECATED - This method is no longer used.
         
-        Extracts key patterns from loaded examples to show form vs hitl distinction.
-        This was working before function calling - now restoring it!
+        Function calling relies on JSON schema, not conversation examples.
+        Examples are now embedded in the system prompt and planner_prompt.yaml.
         
-        Returns:
-            Formatted example string highlighting form vs hitl usage
+        Keeping this for backwards compatibility but it returns empty string.
         """
-        if not hasattr(self, 'examples') or not self.examples:
-            return ""
-        
-        # Build concise examples showing form vs hitl patterns
-        example_text = (
-            "🎯 CRITICAL EXAMPLES - Study these patterns:\n\n"
-            "EXAMPLE 1 - Form for DATA COLLECTION (user provides info):\n"
-            '{"id": "collect_info", "type": "form", "fields": [{"name": "email", "type": "text"}]}\n'
-            "USE 'form' when: User enters search criteria, contact details, preferences\n\n"
-            
-            "EXAMPLE 2 - HITL for APPROVAL/REVIEW (user makes decision):\n"
-            '{"id": "review_draft", "type": "hitl", "approval_type": "approve_reject"}\n'
-            "USE 'hitl' when: Approving results, reviewing drafts, authorizing actions\n\n"
-            
-            "EXAMPLE 3 - PARALLEL for SIMULTANEOUS EXECUTION:\n"
-            '{"id": "fetch_all", "type": "parallel", "parallel_nodes": ["fetch_a", "fetch_b", "fetch_c"]}\n'
-            '{"id": "fetch_a", "type": "agent_with_tools", "tool_id": "API_A", "params": {...}}\n'
-            '{"id": "fetch_b", "type": "agent_with_tools", "tool_id": "API_B", "params": {...}}\n'
-            '{"id": "fetch_c", "type": "agent_with_tools", "tool_id": "API_C", "params": {...}}\n'
-            "USE 'parallel' when: Multiple independent tasks can run simultaneously\n\n"
-            
-            "EXAMPLE 4 - Complete approval workflow:\n"
-            '1. {"id": "search_data", "type": "agent_with_tools", "tool_id": "...", "params": {...}}\n'
-            '2. {"id": "approve_results", "type": "hitl", "approval_type": "approve_reject"}\n'
-            '3. {"id": "send_email", "type": "agent_with_tools", "tool_id": "..."}\n\n'
-            
-            "⚠️ REMEMBER: 'approve', 'review', 'authorize' → USE 'hitl' (NOT 'form')!\n"
-        )
-        
-        return example_text
+        return ""
 
     def _auto_correct_workflow(
         self,
@@ -769,10 +641,6 @@ class CodeGenerator(Role):
                                 hint = f"Step {step_num}: type='agent_only' for analysis/processing (NO tool_id)"
                                 step_hints.append(hint)
                                 self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif dependency == "parallel":
-                                hint = f"Step {step_num}: type='parallel' with parallel_nodes list containing child node IDs"
-                                step_hints.append(hint)
-                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
                             elif dependency == "loop":
                                 hint = f"Step {step_num}: type='loop' with items and loop_node_id"
                                 step_hints.append(hint)
@@ -790,24 +658,36 @@ class CodeGenerator(Role):
                     {
                         "role": "system",
                         "content": (
-                            "You are a workflow compiler. Generate workflow NODES via function calls (edges will be auto-generated).\n\n"
-                            "Rules:\n"
-                            "- Generate a node for EVERY step in the plan\n"
-                            "- Use ONLY tool_id values from the Available Composio Actions list\n"
-                            "- All placeholders use ${{...}} with VALID patterns:\n"
-                            "  • ${{EXTRACT:param_name}} - Extract from user query\n"
-                            "  • ${{from_step:node_id.field}} - Reference previous node\n"
-                            "  • ${{from_loop:loop_id.results}} - Access loop results\n"
-                            "  • ${{loop_item}} - Current iteration item\n"
-                            "  • Static values - Use directly without brackets\n"
-                            "  NEVER: ${{bare_name}}, ${{user.*}}, ${{context.*}}\n"
-                            "- Node types are mutually exclusive\n"
-                            "- agent_with_tools REQUIRES tool_id\n"
-                            "- agent_only, form, hitl do NOT have tool_id\n\n"
-                            "**PARALLEL EXECUTION:**\n"
-                            "- For SIMULTANEOUS tasks, use type='parallel' with parallel_nodes list\n"
-                            "- Example: {{'id': 'search_all', 'type': 'parallel', 'parallel_nodes': ['search_a', 'search_b', 'search_c']}}\n"
-                            "- Then define each child: {{'id': 'search_a', 'type': 'agent_with_tools', ...}}\n\n"
+                            "You are a workflow compiler. Generate workflow NODES ONLY via function calls.\n\n"
+                            "**CRITICAL RULES:**\n"
+                            "1. Generate a node for EVERY step in the plan\n"
+                            "2. Use ONLY tool_id values from the Available Composio Actions list\n"
+                            "3. All placeholders use ${{...}} with VALID patterns:\n"
+                            "   • ${{EXTRACT:param_name}} - Extract from user query\n"
+                            "   • ${{from_step:node_id.field}} - Reference previous node\n"
+                            "   • ${{from_loop:loop_id.results}} - Access loop results\n"
+                            "   • ${{loop_item}} - Current iteration item\n"
+                            "   • Static values - Use directly without brackets\n"
+                            "   NEVER: ${{bare_name}}, ${{user.*}}, ${{context.*}}\n"
+                            "4. Node types: agent_with_tools (REQUIRES tool_id), agent_only, form, hitl, loop\n\n"
+                            "**DEPENDENCIES FIELD (MANDATORY FOR ALL NODES):**\n"
+                            "⚠️ EVERY node MUST have a 'dependencies' field with step numbers (1-based):\n"
+                            "   • First/independent nodes: dependencies=[]\n"
+                            "   • Sequential nodes: dependencies=[step_number] (e.g., dependencies=[1])\n"
+                            "   • Nodes needing multiple inputs: dependencies=[1,2]\n"
+                            "   • Parallel nodes: Same dependencies = parallel execution\n"
+                            "Examples:\n"
+                            "   Node 1 (first): dependencies=[]\n"
+                            "   Node 2 (needs Node 1): dependencies=[1]\n"
+                            "   Node 3 (needs Nodes 1 & 2): dependencies=[1,2]\n"
+                            "   Nodes 2 & 3 (both need Node 1, run in parallel): both have dependencies=[1]\n\n"
+                            "**DATA FLOW IN PARAMS:**\n"
+                            "Use ${{from_step:node_id.field}} to reference outputs from previous nodes:\n"
+                            "   • params={{'input_data': '${{from_step:node1.output}}'}}\n"
+                            "   • params={{'content': '${{from_step:previous_step.result}}'}}\n"
+                            "   • params={{'items': '${{from_step:fetch_data.items}}'}}\n\n"
+                            "**EDGES:**\n"
+                            "⚠️ DO NOT generate 'edges' field - automatically created from dependencies\n\n"
                             f"{example_context}\n"
                             f"{yaml_examples}"
                         )
@@ -876,18 +756,85 @@ class CodeGenerator(Role):
                         if "triggers" not in workflow_json:
                             workflow_json["triggers"] = []
                         
-                        # 🎯 DETERMINISTIC EDGE GENERATION
+                        # 🎯 SINGLE SOURCE OF TRUTH: Generate edges from explicit dependencies only
                         if "edges" not in workflow_json or not workflow_json["edges"]:
-                            self.logger.info(f"[EDGE_GEN] LLM returned {len(workflow_json['nodes'])} nodes without edges - generating deterministically...")
+                            self.logger.info(f"[EDGE_GEN] Generating edges from explicit dependencies for {len(workflow_json['nodes'])} nodes...")
                             
-                            # Parse init_plan structure
-                            steps = self._parse_init_plan_structure(init_plan_with_markers)
+                            # Build step index to node ID mapping (1-based indexing)
+                            step_to_node = {}
+                            for i, node in enumerate(workflow_json['nodes'], 1):
+                                step_to_node[i] = node['id']
                             
-                            # Generate edges based on step structure
-                            edges = self._generate_deterministic_edges(steps, workflow_json['nodes'])
+                            # Generate edges from dependencies field
+                            edges = []
+                            validation_errors = []
+                            
+                            for i, node in enumerate(workflow_json['nodes'], 1):
+                                node_id = node['id']
+                                dependencies = node.get('dependencies', None)
+                                
+                                # Validate dependencies field exists
+                                if dependencies is None:
+                                    validation_errors.append(
+                                        f"Node '{node_id}' (step {i}) missing REQUIRED 'dependencies' field"
+                                    )
+                                    continue
+                                
+                                # Validate dependencies are valid
+                                if not isinstance(dependencies, list):
+                                    validation_errors.append(
+                                        f"Node '{node_id}' (step {i}) has invalid dependencies: {dependencies} "
+                                        f"(must be list of integers)"
+                                    )
+                                    continue
+                                
+                                # Create edges from each dependency to this node
+                                for dep_idx in dependencies:
+                                    if not isinstance(dep_idx, int):
+                                        validation_errors.append(
+                                            f"Node '{node_id}' (step {i}) has non-integer dependency: {dep_idx}"
+                                        )
+                                        continue
+                                    
+                                    if dep_idx >= i:
+                                        validation_errors.append(
+                                            f"Node '{node_id}' (step {i}) has forward/self dependency: {dep_idx} "
+                                            f"(dependencies must be < {i})"
+                                        )
+                                        continue
+                                    
+                                    if dep_idx not in step_to_node:
+                                        validation_errors.append(
+                                            f"Node '{node_id}' (step {i}) depends on non-existent step {dep_idx}"
+                                        )
+                                        continue
+                                    
+                                    # Valid dependency - create edge
+                                    edges.append({
+                                        'type': 'sequential',
+                                        'from': step_to_node[dep_idx],
+                                        'to': node_id
+                                    })
+                                    self.logger.info(f"[EDGE_GEN] Created edge: {step_to_node[dep_idx]} → {node_id}")
+                            
+                            # FAIL FAST if validation errors found
+                            if validation_errors:
+                                error_msg = (
+                                    f"⚠️ Workflow dependency validation failed:\n\n"
+                                    + "\n".join(f"  • {err}" for err in validation_errors)
+                                    + "\n\n"
+                                    f"💡 FIX: Every node MUST have a 'dependencies' field:\n"
+                                    f"  - First/independent nodes: dependencies=[]\n"
+                                    f"  - Sequential nodes: dependencies=[previous_step_number]\n"
+                                    f"  - Example: Step 2 depends on Step 1 → dependencies=[1]\n"
+                                )
+                                self.logger.error(f"[EDGE_GEN] {error_msg}")
+                                post_proxy.update_attachment(error_msg, AttachmentType.revise_message)
+                                post_proxy.update_send_to("CodeInterpreter")  # Retry with error feedback
+                                return post_proxy.end()
+                            
                             workflow_json['edges'] = edges
-                            
-                            self.logger.info(f"[EDGE_GEN] ✅ Injected {len(edges)} deterministic edges")
+                            self.logger.info(f"[EDGE_GEN] ✅ Generated {len(edges)} edges from explicit dependencies")
                     else:
                         error_msg = (
                             f"[FUNCTION_CALLING] Function call missing workflow structure. "

@@ -30,7 +30,6 @@ class NodeType(Enum):
     HITL = auto()               # Human-in-the-loop approval
     FORM = auto()               # Data collection from user
     CODE_EXECUTION = auto()     # Python code execution
-    PARALLEL = auto()           # Parallel execution group
     
     @classmethod
     def from_string(cls, type_str: str) -> NodeType:
@@ -40,8 +39,7 @@ class NodeType(Enum):
             "agent_only": cls.AGENT_ONLY,
             "hitl": cls.HITL,
             "form": cls.FORM,
-            "code_execution": cls.CODE_EXECUTION,
-            "parallel": cls.PARALLEL
+            "code_execution": cls.CODE_EXECUTION
         }
         return mapping.get(type_str, cls.AGENT_ONLY)
 
@@ -49,11 +47,10 @@ class NodeType(Enum):
 class EdgeType(Enum):
     """Edge types in workflow graph."""
     SEQUENTIAL = auto()      # Explicit sequential execution
-    DATA_FLOW = auto()       # Inferred from ${from_step:...}
-    DEPENDENCY = auto()      # Inferred from depends_on
+    DATA_FLOW = auto()       # Data flow from placeholders (deprecated - use dependencies)
+    DEPENDENCY = auto()      # Inferred from depends_on (deprecated - use dependencies)
     CONDITIONAL_TRUE = auto() # Conditional branch (if_true)
     CONDITIONAL_FALSE = auto() # Conditional branch (if_false)
-    PARALLEL = auto()        # Parallel execution group
 
 
 @dataclass
@@ -65,8 +62,7 @@ class IRNode:
     app_name: Optional[str] = None
     params: Dict[str, Any] = field(default_factory=dict)
     description: Optional[str] = None
-    parallel_group: Optional[int] = None
-    parallel_nodes: Optional[List[str]] = None  # For parallel type nodes
+    dependencies: List[int] = field(default_factory=list)  # Step indices this node depends on
     code: Optional[str] = None  # For code_execution type nodes
     metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -120,12 +116,10 @@ class WorkflowIR:
         self.nodes: Dict[str, IRNode] = {}
         self.edges: List[IREdge] = []
         self.dag: nx.DiGraph = nx.DiGraph()
-        self.parallel_groups: Dict[int, List[str]] = {}
         self.conditional_branches: Dict[str, Dict[str, Any]] = {}
         
         # Build IR
         self._parse_nodes()
-        self._parse_parallel_groups()
         self._parse_conditional_edges()
         self._build_dag()
         self._validate_dag()
@@ -140,24 +134,13 @@ class WorkflowIR:
                 app_name=node_dict.get("app_name"),
                 params=node_dict.get("params", {}),
                 description=node_dict.get("description"),
-                parallel_group=node_dict.get("parallel_group"),
-                parallel_nodes=node_dict.get("parallel_nodes"),
-                code=node_dict.get("code"),  # ✅ For code_execution nodes
+                code=node_dict.get("code"),  # For code_execution nodes
                 metadata={k: v for k, v in node_dict.items() 
                          if k not in ["id", "type", "tool_id", "app_name", "params", 
-                                     "description", "parallel_group", "parallel_nodes", "code"]}
+                                     "description", "code"]}
             )
             self.nodes[node.id] = node
             logger.debug(f"Parsed node: {node.id} (type: {node.type.name})")
-    
-    def _parse_parallel_groups(self):
-        """Parse parallel_groups from workflow dict."""
-        parallel_groups_dict = self.raw_dict.get("parallel_groups", {})
-        for group_name, node_ids in parallel_groups_dict.items():
-            # Extract group number from parallel_group field or use hash
-            group_num = hash(group_name) % 1000
-            self.parallel_groups[group_num] = node_ids
-            logger.debug(f"Parsed parallel group '{group_name}': {node_ids}")
     
     def _parse_conditional_edges(self):
         """Parse conditional_edges from workflow dict."""
@@ -211,7 +194,6 @@ class WorkflowIR:
                 edge_type_map = {
                     'sequential': EdgeType.SEQUENTIAL,
                     'conditional': EdgeType.CONDITIONAL_TRUE,
-                    'parallel': EdgeType.PARALLEL,
                     'data_flow': EdgeType.DATA_FLOW
                 }
                 edge_type = edge_type_map.get(edge_type_str, EdgeType.SEQUENTIAL)
@@ -226,52 +208,7 @@ class WorkflowIR:
                 if target not in self.nodes:
                     logger.warning(f"Edge references non-existent target node: {target}")
         
-        # 1.5. Add implicit edges for parallel nodes (connect parent to children)
-        parallel_node_count = sum(1 for n in self.nodes.values() if n.type == NodeType.PARALLEL)
-        logger.info(f"[WorkflowIR] 🔍 Searching for parallel nodes: {parallel_node_count} found")
-        
-        for node_id, node in self.nodes.items():
-            logger.debug(f"[WorkflowIR] Checking node '{node_id}': type={node.type.name}, parallel_nodes={node.parallel_nodes}")
-            
-            if node.type == NodeType.PARALLEL:
-                # Check both direct field (correct) and params dict (backward compatibility for old workflows)
-                parallel_children = node.parallel_nodes or node.params.get('parallel_nodes', [])
-                
-                logger.info(f"[WorkflowIR] 🎯 Found parallel node '{node_id}': parallel_nodes={parallel_children}")
-                
-                if parallel_children:
-                    logger.info(f"[WorkflowIR] Processing parallel node '{node_id}' with {len(parallel_children)} children")
-                    for child_id in parallel_children:
-                        logger.info(f"[WorkflowIR] Attempting to connect '{node_id}' → '{child_id}'")
-                        if child_id in self.nodes:
-                            # Create PARALLEL edge from parent to each child
-                            if not self.dag.has_edge(node_id, child_id):
-                                edge = IREdge(source=node_id, target=child_id, type=EdgeType.PARALLEL)
-                                self.edges.append(edge)
-                                self.dag.add_edge(node_id, child_id, edge_type=EdgeType.PARALLEL)
-                                logger.info(f"[WorkflowIR] ✅ Auto-added PARALLEL edge: {node_id} → {child_id}")
-                            else:
-                                logger.info(f"[WorkflowIR] ⏭️  Edge already exists: {node_id} → {child_id}")
-                        else:
-                            logger.warning(f"[WorkflowIR] ❌ Parallel node '{node_id}' references non-existent child: {child_id}")
-                else:
-                    logger.warning(f"[WorkflowIR] ⚠️  Parallel node '{node_id}' has NO parallel_children!")
-        
-        # 2. Add data flow edges (SECONDARY - auto-detect from ${...} placeholders)
-        for node_id, node in self.nodes.items():
-            data_deps = self._extract_data_dependencies(node.params)
-            for dep_node_id in data_deps:
-                if dep_node_id in self.nodes:
-                    # Only add if edge doesn't already exist (avoid duplicates)
-                    if not self.dag.has_edge(dep_node_id, node_id):
-                        edge = IREdge(source=dep_node_id, target=node_id, type=EdgeType.DATA_FLOW)
-                        self.edges.append(edge)
-                        self.dag.add_edge(dep_node_id, node_id, edge_type=EdgeType.DATA_FLOW)
-                        logger.debug(f"Auto-inferred DATA_FLOW edge: {dep_node_id} → {node_id}")
-                else:
-                    logger.warning(f"Node {node_id} references non-existent node in data flow: {dep_node_id}")
-        
-        # 3. Add conditional edges (if specified)
+        # 2. Add conditional edges (if specified)
         for source, branches in self.conditional_branches.items():
             if source not in self.nodes:
                 logger.warning(f"Conditional edge source doesn't exist: {source}")
@@ -315,27 +252,7 @@ class WorkflowIR:
                         self.dag.add_edge(source, target, edge_type=EdgeType.SEQUENTIAL)
                         logger.debug(f"Added SEQUENTIAL edge (legacy): {source} → {target}")
         
-        logger.info(f"[WorkflowIR] Built DAG: {len(self.edges)} edges from edges array + data flow inference")
-    
-    def _extract_data_dependencies(self, params: Any) -> Set[str]:
-        """
-        Extract node IDs from ${from_step:node_id.field} references.
-        
-        Args:
-            params: Parameter value (can be dict, list, str, etc.)
-        
-        Returns:
-            Set of node IDs referenced in data flow
-        """
-        dependencies = set()
-        param_str = str(params)
-        
-        # Regex to match ${from_step:node_id.field} or ${from_step:node_id}
-        pattern = r'\$\{from_step:([a-zA-Z0-9_]+)'
-        matches = re.findall(pattern, param_str)
-        dependencies.update(matches)
-        
-        return dependencies
+        logger.info(f"[WorkflowIR] Built DAG: {len(self.edges)} edges from explicit edges array")
     
     def _validate_dag(self):
         """
@@ -406,7 +323,6 @@ class WorkflowIR:
                     "app_name": node.app_name,
                     "params": node.params,
                     "description": node.description,
-                    "parallel_group": node.parallel_group,
                     **node.metadata
                 }
                 for node in self.nodes.values()

@@ -188,38 +188,13 @@ class WorkflowSchemaBuilder:
                                 }
                             },
                             # ============================================================
-                            # 3️⃣ EDGES
+                            # 3️⃣ EDGES - DEPRECATED (Auto-generated from dependencies)
                             # ============================================================
-                            "edges": {
-                                "type": "array",
-                                "items": {
-                                    "oneOf": [
-                                        {
-                                            "type": "object",
-                                            "description": "Sequential edge",
-                                            "properties": {
-                                                "type": {"type": "string", "enum": ["sequential"]},
-                                                "from": {"type": "string"},
-                                                "to": {"type": "string"}
-                                            },
-                                            "required": ["type", "from", "to"],
-                                            "additionalProperties": False
-                                        },
-                                        {
-                                            "type": "object",
-                                            "description": "Conditional edge",
-                                            "properties": {
-                                                "type": {"type": "string", "enum": ["conditional"]},
-                                                "from": {"type": "string"},
-                                                "to": {"type": "string"},
-                                                "condition": {"type": "string"}
-                                            },
-                                            "required": ["type", "from", "to", "condition"],
-                                            "additionalProperties": False
-                                        }
-                                    ]
-                                }
-                            }
+                            # ⚠️ REMOVED: Edges field no longer exposed to LLM
+                            # Edges are automatically inferred from:
+                            # - $id references in plan descriptions (e.g., "Analyze $1 and $2")
+                            # - Data flow in params (e.g., ${{from_step:node1.result}})
+                            # This ensures parallel execution works correctly without manual edge generation
                     },
                 "required": ["nodes", "triggers"],
                 "additionalProperties": False
@@ -503,6 +478,23 @@ class WorkflowSchemaBuilder:
                     ),
                     "additionalProperties": True  # Allow any params (tool-specific)
                 },
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "🎯 EXPLICIT DEPENDENCIES (LLMCompiler-style - HIGHEST PRIORITY!):\n"
+                        "List of step indices this node depends on (1-based, matching plan step numbers).\n\n"
+                        "✅ WHEN TO USE:\n"
+                        "- Step 2 processes data from Step 1 → dependencies: [1]\n"
+                        "- Step 4 needs results from Steps 2 & 3 → dependencies: [2, 3]\n"
+                        "- Step 1 is independent (fetches new data) → dependencies: [] or omit\n\n"
+                        "📊 WHY EXPLICIT IS BETTER:\n"
+                        "- 100% deterministic execution order (no guessing!)\n"
+                        "- Clearer than inferring from description text\n"
+                        "- Prevents workflow disconnection bugs\n\n"
+                        "⚠️ FALLBACK: If omitted, dependencies inferred from $id in description/params"
+                    )
+                },
                 "description": {"type": "string"}
             },
             "required": ["id", "type", "tool_id"],
@@ -588,6 +580,24 @@ class WorkflowSchemaBuilder:
                         "❌ OMIT if agent_mode='reasoning'"
                     )
                 },
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "🎯 EXPLICIT DEPENDENCIES (LLMCompiler-style - HIGHEST PRIORITY!):\n"
+                        "List of step indices this node depends on (1-based, matching plan step numbers).\n\n"
+                        "✅ EXAMPLES:\n"
+                        "- Step 2 'Calculate from $1' → dependencies: [1]\n"
+                        "- Step 3 'Analyze $2' → dependencies: [2]\n"
+                        "- Step 4 'Report on $3' → dependencies: [3]\n"
+                        "- Independent analysis → dependencies: [] or omit\n\n"
+                        "⚠️ CRITICAL FOR REASONING NODES:\n"
+                        "Even if agent_mode='reasoning', if the analysis uses data from previous steps,\n"
+                        "you MUST specify dependencies! This prevents disconnected workflow components.\n\n"
+                        "📊 DETERMINISTIC > INFERENCE:\n"
+                        "Explicit dependencies = 100% accuracy. Don't rely on text inference alone!"
+                    )
+                },
                 "description": {"type": "string"}
             },
             "required": ["id", "type"],
@@ -655,6 +665,11 @@ class WorkflowSchemaBuilder:
                         },
                         "required": ["name", "type", "label"]
                     }
+                },
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Usually empty [] for forms (typically first step). Specify if form uses previous node data."
                 }
             },
             "required": ["id", "type", "fields"],
@@ -683,36 +698,14 @@ class WorkflowSchemaBuilder:
                 "approval_type": {
                     "type": "string",
                     "enum": ["approve_reject", "edit_approve"]
+                },
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Step indices whose results need approval. HITL nodes typically depend on previous processing steps."
                 }
             },
             "required": ["id", "type", "approval_type"],
-            "additionalProperties": False
-        })
-        
-        # ===================================================================
-        # parallel - Parallel execution group
-        # ===================================================================
-        # Cross-reference: planner_prompt.yaml defines <parallel> marker with sub-steps
-        # Cross-reference: code_generator_prompt.yaml explains parallel patterns
-        # Cross-reference: langgraph_adapter.py._build_parallel_node() handles execution
-        node_schemas.append({
-            "type": "object",
-            "description": (
-                "Parallel execution node - executes multiple nodes simultaneously. "
-                "Use this when multiple operations can run independently (e.g., fetching from multiple APIs). "
-                "Example: Fetch data from Platform A, Platform B, Service X, and Service Y at the same time."
-            ),
-            "properties": {
-                "id": {"type": "string"},
-                "type": {"type": "string", "enum": ["parallel"]},
-                "parallel_nodes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "IDs of nodes to execute in parallel (these nodes must be defined elsewhere in the workflow)"
-                },
-                "description": {"type": "string"}
-            },
-            "required": ["id", "type", "parallel_nodes"],
             "additionalProperties": False
         })
         
@@ -777,6 +770,11 @@ class WorkflowSchemaBuilder:
                         "Optional condition to break loop early. "
                         "Example: '${{loop_item.status}} == \"complete\"'"
                     )
+                },
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Step indices that must complete before loop starts (e.g., fetching the array to loop over)."
                 },
                 "description": {"type": "string"}
             },

@@ -31,7 +31,7 @@ class WorkflowGenerationContext(BaseModel):
     """Context information for workflow generation."""
     available_tools: List[str] = Field(
         ...,
-        description="List of available Composio tool IDs (e.g., GMAIL_SEND_EMAIL, SLACK_CHAT_POST_MESSAGE)"
+        description="List of available Composio tool IDs"
     )
     user_request: str = Field(
         ...,
@@ -86,8 +86,8 @@ class EnhancedWorkflowDefinition(WorkflowDefinition):
             "List of workflow nodes. Each node represents a step in the workflow. "
             "IMPORTANT: For agent_with_tools nodes, extract ALL required parameter values "
             "from the user request and populate the 'params' field. "
-            "Example: If user says 'send email to john@example.com with subject Hello', "
-            "extract: params={'to': 'john@example.com', 'subject': 'Hello'}"
+            "Example: If user says 'send message to user@example.com with content Hello', "
+            "extract: params={'to': 'user@example.com', 'content': 'Hello'}"
         )
     )
 
@@ -247,45 +247,49 @@ You have access to the following Composio tool IDs:
 3. **TOOL SELECTION**
    - Use ONLY tool IDs from the available tools list above
    - Each agent_with_tools node MUST have a valid tool_id
-   - Match tools to user intent (e.g., "send email" → GMAIL_SEND_EMAIL)
+   - Match tools to user intent based on action description
 
-4. **PARALLEL EXECUTION**
-   - Use type="parallel" when multiple tasks can run SIMULTANEOUSLY
-   - Parallel nodes MUST have parallel_nodes field listing child node IDs
-   - Example: Fetching from 3 APIs at once
+4. **PARALLEL EXECUTION (Automatic via Dependencies)**
+   - ⚠️ DEPRECATED: Do NOT use type="parallel" anymore
+   - ✅ NEW APPROACH: List independent operations as separate nodes
+   - Parallel execution is AUTOMATIC when nodes have no dependencies
    
-   **PARALLEL NODE STRUCTURE:**
+   **HOW PARALLEL EXECUTION WORKS:**
    ```python
-   # Parent parallel node
-   {{"id": "fetch_all", "type": "parallel", "parallel_nodes": ["fetch_a", "fetch_b", "fetch_c"]}}
+   # If plan says: "1. Fetch A", "2. Fetch B", "3. Analyze $1 and $2"
+   # Generate THREE separate nodes (no parallel wrapper):
    
-   # Child nodes (regular agent_with_tools nodes)
    {{"id": "fetch_a", "type": "agent_with_tools", "tool_id": "API_A_SEARCH", ...}}
    {{"id": "fetch_b", "type": "agent_with_tools", "tool_id": "API_B_SEARCH", ...}}
-   {{"id": "fetch_c", "type": "agent_with_tools", "tool_id": "API_C_SEARCH", ...}}
+   {{"id": "analyze", "type": "agent_only", "description": "Analyze $1 and $2", ...}}
    
-   # Edges connect to PARENT, not children
-   sequential_edges: [("start", "fetch_all"), ("fetch_all", "process_results")]
+   # fetch_a and fetch_b will execute in PARALLEL automatically (no dependencies)
+   # analyze will wait for both (dependencies inferred from "$1 and $2")
    ```
    
-   **WHEN TO USE PARALLEL:**
-   - ✅ Fetching from multiple independent sources (Platform A + Platform B + Platform C)
-   - ✅ Sending to multiple destinations simultaneously
-   - ✅ Independent API calls that don't depend on each other
-   - ❌ NOT for sequential steps (use regular nodes)
-   - ❌ NOT when one task needs another's output (use depends_on)
+   **KEY RULES:**
+   - ✅ If plan step references "$1" or "$2" → Node depends on those steps
+   - ✅ If plan step has NO "$id" references → Node is independent (parallel)
+   - ✅ Use dependencies field to control execution order
+   - ✅ Nodes with same dependencies execute in parallel automatically
 
-5. **NODE DEPENDENCIES AND EDGES**
-   - All nodes (except start/trigger nodes) must have depends_on
-   - depends_on lists node IDs that must complete first
-   - ALSO populate sequential_edges: [(source_id, target_id), ...]
-   - Example: If node B depends_on node A, add edge (A, B) to sequential_edges
-   - Edges ensure correct execution order
+5. **EDGES - DO NOT GENERATE THEM!**
+   - ⚠️ CRITICAL: Leave 'edges' field EMPTY ([])
+   - ⚠️ CRITICAL: Leave 'sequential_edges' field EMPTY ([])
+   - ⚠️ CRITICAL: Leave 'parallel_edges' field EMPTY ([])
+   - ✅ Edges will be automatically inferred from:
+     * $id references in plan descriptions (e.g., "Analyze $1 and $2")
+     * Data flow in params (e.g., params={{"data": "${{step1.result}}"}})
+   - This ensures parallel execution works correctly
+   
+   **WHY NOT GENERATE EDGES:**
+   - Manual edges force sequential execution
+   - Automatic inference enables parallel execution
+   - Dependencies are clearer from $id notation
 
 6. **APP NAME**
    - For agent_with_tools nodes, extract app_name from tool schema
-   - Example: GMAIL_SEND_EMAIL → app_name: "gmail"
-   - Example: COMPOSIO_SEARCH_FLIGHTS → app_name: "composio_search"
+   - Extract from tool ID prefix (e.g., PLATFORM_ACTION → app_name: "platform")
 
 6. **CODE EXECUTION NODES**
    - Use code_execution type for data transformation/formatting
@@ -299,35 +303,34 @@ You have access to the following Composio tool IDs:
    Example 1 - Simple String Result:
    ```python
    # Get data from previous tool node
-   flight_data = '${{search_flights.data.results}}'
+   data = '${{previous_node.data.field}}'
    # Format it
-   formatted_text = f"Flight details: {{flight_data}}"
+   formatted = f"Processed: {{data}}"
    # ✅ MUST assign to 'result'
-   result = formatted_text
+   result = formatted
    ```
    
    Example 2 - Dict Result:
    ```python
    # Process multiple fields
-   name = '${{form_node.name}}'
-   email = '${{form_node.email}}'
+   field_a = '${{node_a.field1}}'
+   field_b = '${{node_b.field2}}'
    # Create structured result
    result = {{
-       'full_name': name,
-       'email_address': email,
-       'timestamp': '2025-12-13'
+       'combined_a': field_a,
+       'combined_b': field_b
    }}
    ```
    
    Example 3 - Calculations:
    ```python
    # Get numeric data
-   price = float('${{search_flights.data.price}}')
-   quantity = 5
+   value = float('${{node_x.data.numeric_field}}')
+   multiplier = 2
    # Calculate
-   total = price * quantity
+   calculated = value * multiplier
    # ✅ Assign to 'result'
-   result = total
+   result = calculated
    ```
    
    **REFERENCING CODE_EXECUTION OUTPUTS:**
@@ -339,8 +342,7 @@ You have access to the following Composio tool IDs:
 7. **PLACEHOLDER SYNTAX**
    - User inputs: '${{user_input.field_name}}'
    - Tool node outputs: Use ACTUAL response fields from tool schemas
-     * COMPOSIO_SEARCH_FLIGHTS: '${{node_id.data.results}}' or '${{node_id.results}}'
-     * GMAIL_SEND_EMAIL: '${{node_id.data.id}}' or '${{node_id.id}}'
+     * Use '${{node_id.data.field}}' or '${{node_id.field}}' based on schema
    - Code execution node outputs:
      * Primitive result (string/number): '${{node_id.execution_result}}'
      * Dict result: '${{node_id.execution_result.field_name}}'
@@ -372,12 +374,12 @@ You have access to the following Composio tool IDs:
             "Generate a complete workflow that accomplishes the user's request. "
             "IMPORTANT:\n"
             "1. Extract ALL parameter values from the user request\n"
-            "2. Set depends_on for each node (except start nodes)\n"
-            "3. Populate sequential_edges as [(source, target), ...] based on depends_on\n"
-            "4. Extract app_name from tool IDs (e.g., GMAIL_* → gmail, SLACK_* → slack)\n"
-            "5. Use actual response field names from tool schemas, not '.response_field'\n"
-            "6. **CRITICAL**: For code_execution nodes, ALL code MUST assign to 'result' variable\n"
-            "7. **CRITICAL**: Reference code_execution outputs as ${node_id.execution_result}, not ${node_id}"
+            "2. **CRITICAL**: Leave 'edges', 'sequential_edges', and 'parallel_edges' EMPTY ([])\n"
+            "3. Extract app_name from tool ID prefix (first part before underscore)\n"
+            "4. Use actual response field names from tool schemas, not '.response_field'\n"
+            "5. **CRITICAL**: For code_execution nodes, ALL code MUST assign to 'result' variable\n"
+            "6. **CRITICAL**: Reference code_execution outputs as ${node_id.execution_result}, not ${node_id}\n"
+            "7. Edges will be automatically inferred from $id references in plan (e.g., 'Analyze $1 and $2')"
         )
         
         return "\n".join(prompt_parts)

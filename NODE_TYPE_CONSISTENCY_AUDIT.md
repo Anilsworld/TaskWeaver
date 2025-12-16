@@ -195,3 +195,4 @@ node_schemas.append({
 - **Lines 192-197:** Node type definitions
 - **Lines 198-370:** Examples and patterns
 - **Lines 408-414:** agent_only documentation
+

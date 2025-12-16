@@ -96,21 +96,267 @@ instruction_template: |-
     * Example: "4. Analyze search results and rank by relevance <agent_only>"
     * Cross-reference: workflow_schema_builder.py defines agent_mode field
   
-  - `<loop>` - Iterate over collection (3+ identical operations on different items)
-    * Use when: Same operation repeated multiple times (fetch from A, B, C, D...)
-    * **CRITICAL: Loop body MUST be specified as sub-steps with indentation**
+  - `<loop>` - Iterate over DYNAMIC/UNKNOWN collection (scalable!)
+    * ✅ Use when: Number of items UNKNOWN ("all platforms", "each customer", "every message")
+    * ❌ DON'T use when: Items are KNOWN ("Platform A, Platform B, Platform C") → use separate parallel nodes
     * Example:
       ```
-      2. For each platform in [Platform A, Platform B, Platform C], perform actions <loop>
-         2.1. Fetch unread messages from platform <agent_with_tools>
-         2.2. Mark messages as read <agent_with_tools>
+      1. Get list of connected platforms <agent_with_tools>
+      2. For each platform in $1, fetch and mark messages <loop>
+      3. Summarize all results from $2 <agent_only>
       ```
-    * Sub-steps (2.1, 2.2) are executed for EACH iteration of the loop
-    * Sub-step numbering: parent.child (e.g., 3.1, 3.2, 3.3)
+    * Loop automatically scales to ANY quantity (2 items or 200 items!)
+    * Loop body executes for EACH item - no manual sub-step numbering needed
   
-  - `<parallel>` - Execute multiple operations simultaneously (NOT a loop - different operations!)
-    * Use when: Multiple DIFFERENT operations can run at the same time
-    * Example: "2. Search Tool A, Tool B, and Tool C simultaneously <parallel>"
+  ## CRITICAL: Dependency-Based Orchestration (Inspired by LLMCompiler)
+  
+  **GOLDEN RULE: Maximize parallelizability by minimizing dependencies!**
+  
+  **Reference previous outputs using `$id` notation:**
+  - Inputs can be constants OR outputs from preceding actions
+  - Use `$1` or `${{1}}` to reference step 1's output
+  - Use `${{2}}.field_name` to reference specific field from step 2
+  - Use `$1, $2, $3` to reference multiple outputs
+  
+  **Automatic Parallel/Sequential Detection:**
+  - Steps WITHOUT `$id` references → Execute in PARALLEL automatically
+  - Steps WITH `$id` references → Wait for dependencies first
+  
+  **🔴 MANDATORY RULE - ALWAYS Use $id When Consuming Previous Outputs:**
+  - If a step uses/processes/analyzes/combines data from previous steps → MUST reference them with `$id`
+  - If a step is independent and generates new data → NO `$id` reference (executes in parallel)
+  
+  **🎯 THINK IN GRAPHS (AutoGen-Inspired):**
+  You are building a WORKFLOW GRAPH where:
+  - Each step = NODE in the graph
+  - Each $id reference = EDGE connecting nodes
+  - Missing $id = DISCONNECTED node = BROKEN workflow!
+  
+  **Examples of REQUIRED $id usage:**
+  ✅ "Analyze results from $1 and $2" (creates edges: 1→this, 2→this)
+  ✅ "Combine outputs from ${{1}}, ${{2}}, ${{3}}" (creates edges: 1→this, 2→this, 3→this)
+  ✅ "Send email with report from $4" (creates edge: 4→this)
+  ✅ "Get approval for recommendation from $5" (creates edge: 5→this)
+  ✅ "Calculate average of $1" (creates edge: 1→this)
+  ✅ "Process data from $1" (creates edge: 1→this)
+  
+  **Examples where $id is NOT needed:**
+  ✅ "Fetch data from external API" (independent, generates new data)
+  ✅ "Search database for products" (independent, generates new data)
+  ✅ "Call external API" (independent, generates new data)
+  
+  **🔍 SELF-CHECK MECHANISM (MANDATORY):**
+  After writing your init_plan, ask yourself for EACH step starting from step 2:
+  
+  Question: "Does this step need output/data/results from ANY previous step?"
+  - If YES → Does the step description contain $id? 
+    → NO? YOU FORGOT! Add it now: "from $X" or "using $Y"
+    → YES? Good! Move to next step.
+  - If NO → This step is independent (fetches NEW data from external source)
+  
+  🚨 WARNING: If your workflow has 3+ steps and NO $id references appear after step 1, you likely forgot them!
+  
+  **📊 WORKFLOW GRAPH PATTERNS (AutoGen-Inspired Mental Models):**
+  
+  Choose the pattern that matches your task:
+  
+  1️⃣ **SEQUENTIAL CHAIN** (A → B → C):
+     Use when: Each step processes results from the previous step
+     ```
+     1. Fetch data from API <agent_with_tools>
+     2. Process data from $1 <agent_only>
+     3. Analyze processed results from $2 <agent_only>
+     4. Generate report from $3 <agent_only>
+     
+     Graph: [1] → [2] → [3] → [4] (each waits for previous)
+     ```
+  
+  2️⃣ **PARALLEL FAN-OUT** ([A, B, C] → D):
+     Use when: Fetch from multiple independent sources, then combine
+     ```
+     1. Fetch from Source A <agent_with_tools>
+     2. Fetch from Source B <agent_with_tools>
+     3. Fetch from Source C <agent_with_tools>
+     4. Combine all data from $1, $2, $3 <agent_only>
+     
+     Graph: [1, 2, 3] all parallel → [4] waits for all
+     ```
+  
+  3️⃣ **FAN-OUT/FAN-IN DIAMOND** (A → [B, C] → D):
+     Use when: Setup → Parallel processing → Merge
+     ```
+     1. Get configuration <agent_with_tools>
+     2. Process batch A using $1 <agent_with_tools>
+     3. Process batch B using $1 <agent_with_tools>
+     4. Merge results from $2, $3 <agent_only>
+     
+     Graph: [1] → [2, 3] parallel → [4] waits for both
+     ```
+  
+  4️⃣ **MULTI-STAGE PIPELINE** (Fetch Parallel → Process → Approve → Send Parallel):
+     Use when: Complex workflows with multiple parallel stages
+     ```
+     1-4. Fetch from multiple sources (parallel)
+     5. Process all fetched data from $1, $2, $3, $4 <agent_only>
+     6. Get approval for $5 <hitl>
+     7-10. Send to multiple destinations using $6 (parallel)
+     
+     Graph: [1,2,3,4] → [5] → [6] → [7,8,9,10]
+     ```
+  
+  **KEY INSIGHT: Just list independent operations as separate steps!**
+  - ❌ DON'T: "Search Tool A and Tool B simultaneously <parallel>"
+  - ✅ DO: List them separately without $id:
+    ```
+    2. Search Tool A <agent_with_tools>
+    3. Search Tool B <agent_with_tools>
+    ```
+  
+  **🎯 COMMON PATTERN: Multi-Platform Data Collection**
+  ```
+  User: "Fetch data from Platform A, Platform B, Platform C, and Platform D, then analyze them"
+  
+  CORRECT init_plan:
+  1. Fetch data from Platform A <agent_with_tools>
+  2. Fetch data from Platform B <agent_with_tools>
+  3. Fetch data from Platform C <agent_with_tools>
+  4. Fetch data from Platform D <agent_with_tools>
+  5. Analyze all data from $1, $2, $3, $4 <agent_only>
+  
+  → Steps 1-4 execute in PARALLEL (no $id, independent fetches)
+  → Step 5 waits for all 4 to complete (has $id references)
+  
+  WRONG init_plan (missing $id):
+  ❌ 1. Fetch data from Platform A <agent_with_tools>
+  ❌ 2. Fetch data from Platform B <agent_with_tools>
+  ❌ 3. Fetch data from Platform C <agent_with_tools>
+  ❌ 4. Fetch data from Platform D <agent_with_tools>
+  ❌ 5. Analyze all data <agent_only>  ← Missing "$1, $2, $3, $4"!
+  
+  → Without $id, step 5 has no dependency info = WRONG execution order!
+  ```
+  
+  **🎯 COMPLETE PATTERN: Fetch → Analyze → Approve → Send to Multiple Platforms**
+  ```
+  User: "Fetch from platforms A, B, C, D, prepare responses, get my approval, then send to each platform"
+  
+  CORRECT init_plan:
+  1. Fetch from Platform A <agent_with_tools>
+  2. Fetch from Platform B <agent_with_tools>
+  3. Fetch from Platform C <agent_with_tools>
+  4. Fetch from Platform D <agent_with_tools>
+  5. Prepare responses for all fetched data from $1, $2, $3, $4 <agent_only>
+  6. Get user approval for responses from $5 <hitl>
+  7. Send to Platform A using $6 <agent_with_tools>
+  8. Send to Platform B using $6 <agent_with_tools>
+  9. Send to Platform C using $6 <agent_with_tools>
+  10. Send to Platform D using $6 <agent_with_tools>
+  
+  KEY POINTS:
+  → Steps 1-4: Parallel (no $id dependencies)
+  → Step 5: Waits for 1,2,3,4 (uses $1, $2, $3, $4)
+  → Step 6: Waits for 5 (uses $5)
+  → Steps 7-10: Parallel (all use $6, no dependencies on each other)
+  
+  WRONG init_plan (missing $id in later steps):
+  ❌ 5. Prepare responses for all fetched data from $1, $2, $3, $4 <agent_only>  ✅ Good!
+  ❌ 6. Get user approval for responses <hitl>  ← Missing "$5"!
+  ❌ 7. Send approved responses <agent_with_tools>  ← Missing "$6" AND only 1 platform!
+  
+  → Without $id in steps 6 & 7, they become disconnected!
+  → Step 7 should be a <loop> to send to ALL platforms!
+  ```
+  
+  **⚠️ MANDATORY RULE: ALWAYS use $id notation for dependent steps!**
+  - If step N uses results from step M → MUST include $M in description
+  - If step N waits for step M to complete → MUST include $M in description
+  - Even for "obvious" dependencies like approval → analysis, MUST use $id!
+  - When sending to multiple platforms, use <loop> with sub-steps, each using $id from approval step!
+  
+  **🎯 UNIVERSAL DEPENDENCY PATTERNS (Works for ANY Workflow):**
+  
+  1. **Sequential Chain**: A → B → C
+     ```
+     1. Action A <type>
+     2. Action B using $1 <type>
+     3. Action C using $2 <type>
+     ```
+  
+  2. **Parallel Fan-Out**: A,B,C → D (all execute simultaneously, D waits for all)
+     ```
+     1. Action A <type>
+     2. Action B <type>
+     3. Action C <type>
+     4. Action D using $1, $2, $3 <type>
+     ```
+  
+  3. **Partial Parallel**: A,B parallel → C,D parallel → E (two waves)
+     ```
+     1. Action A <type>
+     2. Action B <type>
+     3. Action C using $1 <type>
+     4. Action D using $2 <type>
+     5. Action E using $3, $4 <type>
+     ```
+  
+  4. **Conditional (all branches required)**: Check → (Branch A OR Branch B) → Continue
+     ```
+     1. Check condition <type>
+     2. Analyze $1 to determine path <agent_only>
+     3. Branch A if condition X from $2 <type>
+     4. Branch B if condition Y from $2 <type>
+     5. Continue with result from $3 or $4 <type>
+     ```
+  
+  5. **Error Handling**: Try → (Success path OR Fallback) → Continue
+     ```
+     1. Try primary action <type>
+     2. Check if $1 succeeded, fallback if failed <type>
+     3. Process result from $1 or $2 <type>
+     ```
+  
+  6. **Loop with Dependencies (SCALABLE)**: Setup → Loop(each item uses setup) → Summary
+     ```
+     1. Setup/fetch items <type>
+     2. For each item from $1, process <loop>
+     3. Summarize all $2 results <type>
+     ```
+     ⚠️ Use <loop> for DYNAMIC quantities (unknown number of items)
+     ⚠️ Use separate parallel nodes for FIXED quantities (known items like "Platform A, Platform B, Platform C")
+  
+  7. **Nested Loops**: Outer → Loop(Inner → Loop) → Final
+     ```
+     1. Fetch outer items <type>
+     2. For each outer item from $1, get sub-items <loop>
+     3. For each sub-item from $2, process <loop>
+     4. Aggregate all results from $3 <type>
+     ```
+     NOTE: Nested loops rare - most workflows use single loop or parallel patterns
+  
+  8. **Diamond Pattern**: A → (B,C parallel) → D (B and C both use A, D uses both)
+     ```
+     1. Action A <type>
+     2. Action B using $1 <type>
+     3. Action C using $1 <type>
+     4. Action D using $2, $3 <type>
+     ```
+  
+  9. **Multi-Stage Pipeline**: Fetch → Process → Approve → Execute → Notify
+     ```
+     1. Fetch data <type>
+     2. Process $1 <type>
+     3. Get approval for $2 <hitl>
+     4. Execute using $3 <type>
+     5. Notify completion of $4 <type>
+     ```
+  
+  **Key Principles (LLMCompiler-Aligned):**
+  - Dependencies define execution order automatically
+  - No dependencies = parallel execution
+  - Multiple dependencies = wait for all (join node)
+  - Conditional logic is in node description, not in dependencies
+  - EVERY downstream step MUST reference upstream steps with $id
+  - This approach scales to ANY complexity: 5 nodes or 500 nodes!
   
   **Marker Selection Rules (DETERMINISTIC):**
   1. INITIAL data collection (ONLY if NOT in prompt) → `<form>` 
@@ -120,8 +366,8 @@ instruction_template: |-
   2. Approval/review/authorization → `<hitl>` (e.g., "Approve order")
   3. External API/service call → `<agent_with_tools>` (e.g., "Send email", "Search database")
   4. AI analysis/drafting/transformation → `<agent_only>` (e.g., "Analyze results", "Draft response")
-  5. Same operation 3+ times → `<loop>` with sub-steps (e.g., "For each X, perform Y")
-  6. Multiple different operations at once → `<parallel>` with sub-steps (e.g., "Search X and Y simultaneously")
+  5. Same operation 3+ times on SAME collection → `<loop>` with sub-steps (e.g., "For each item in collection, perform Y")
+  6. Multiple INDEPENDENT operations → Separate steps WITHOUT `$id` references (auto-parallel!)
   
   **IMPORTANT DISTINCTIONS:**
   - "Collect approval" → `<hitl>` (NOT `<form>` - it's approval, not initial input)
@@ -129,11 +375,12 @@ instruction_template: |-
   - "Last 20 messages" → `<agent_with_tools>` with limit=20 (NOT `<form>` - count already specified!)
   - "Access platform" → `<agent_with_tools>` (NOT `<form>` - OAuth handles auth automatically)
   - "Analyze data" → `<agent_only>` (NOT `<agent_with_tools>` - no external API)
-  - "Fetch from A, B, C" → `<loop>` with sub-steps (NOT 3 separate steps!)
-  - "Search X and Y simultaneously" → `<parallel>` with sub-steps (NOT `<loop>`)
+  - "Fetch from A, B, C, D" (DIFFERENT platforms) → List as separate steps 1, 2, 3, 4 (auto-parallel!)
+  - "Search X and Y simultaneously" → List as separate steps without dependencies (auto-parallel!)
+  - "Process each item in list" → `<loop>` (SAME collection, repeated operation)
   
   **SUB-STEP SYNTAX RULES:**
-  - `<loop>` and `<parallel>` markers MUST have sub-steps
+  - `<loop>` markers MUST have sub-steps
   - Sub-steps use numbering: parent.child (e.g., 3.1, 3.2)
   - Nested loops use: parent.child.grandchild (e.g., 2.2.1, 2.2.2)
   - Each sub-step MUST have its own marker
@@ -146,12 +393,18 @@ instruction_template: |-
      N.2. Another action <node_type_marker>
   ```
   
-  **Parallel Sub-Step Format:**
+  **Parallel Execution Format (NO `<parallel>` MARKER - Use Dependencies!):**
   ```
+  OLD (❌ Don't use anymore):
   N. Perform operations simultaneously <parallel>
      N.1. Operation A <agent_with_tools>
      N.2. Operation B <agent_with_tools>
-     N.3. Operation C <agent_with_tools>
+  
+  NEW (✅ Use this instead):
+  N. Operation A <agent_with_tools>
+  N+1. Operation B <agent_with_tools>
+  N+2. Combine results from $N and ${{N+1}} <agent_only>
+  → Operations N and N+1 execute in parallel automatically!
   ```
   
   **Nested Loop Format:**
@@ -251,44 +504,149 @@ instruction_template: |-
   ❌ WRONG: "1. Collect commit count <form>" - User said "30"!
   ✅ CORRECT: No form needed, start with tool using limit=30
   
-  [Example 2b: Loop Pattern with Sub-Steps]
-  User: Fetch unread messages from multiple messaging platforms
+  [Example 2b: SCALABLE Loop Pattern]
+  User: Fetch unread messages from all my connected messaging platforms
   init_plan:
-  1. Define platforms list: Platform A, Platform B, Platform C, Platform D <agent_only>
-  2. For each platform, perform fetch operations <loop>
-     2.1. Fetch unread messages from platform <agent_with_tools>
-  3. Summarize all messages <agent_only>
+  1. Get list of connected messaging platforms <agent_with_tools>
+  2. For each platform in $1, fetch unread messages <loop>
+  3. Summarize all messages from $2 <agent_only>
   plan:
-  1. Define platforms and fetch messages from each
+  1. Get connected platforms and fetch messages from each
   2. Summarize all messages
   
-  [Example 2b: Loop with Multiple Operations]
-  User: For each department, collect feedback and send summary
+  KEY: Use loop when platforms are DYNAMIC (user might have 2 or 20 platforms)
+  
+  [Example 2c: SCALABLE Department Feedback Loop]
+  User: For each department, collect feedback and analyze sentiment
   init_plan:
-  1. Define departments list: Engineering, Sales, Marketing <agent_only>
-  2. For each department, process feedback <loop>
-     2.1. Fetch department employees from HR system <agent_with_tools>
-     2.2. Send feedback survey to employees <agent_with_tools>
-     2.3. Collect responses <agent_with_tools>
-     2.4. Analyze feedback sentiment <agent_only>
-  3. Aggregate results across all departments <agent_only>
-  4. Get executive approval for action plan <hitl>
+  1. Fetch all departments from HR system <agent_with_tools>
+  2. For each department in $1, collect and analyze feedback <loop>
+  3. Aggregate results across all departments from $2 <agent_only>
+  4. Get executive approval for action plan based on $3 <hitl>
   plan:
-  1. Define departments and process feedback for each
+  1. Fetch departments and process feedback for each
   2. Aggregate results and get executive approval
   
-  [Example 3: Parallel + Analysis Pattern]
+  KEY: Loop scales to ANY number of departments automatically!
+  
+  [Example 3: Dependency-Based Parallel Pattern - AUTOMATIC PARALLEL EXECUTION]
   User: Search multiple knowledge bases simultaneously, then analyze results
   init_plan:
   1. Collect search query from user <form>
-  2. Search Tool A and Tool B simultaneously <parallel>
-     2.1. Search Tool A <agent_with_tools>
-     2.2. Search Tool B <agent_with_tools>
-  3. Analyze and rank results by relevance <agent_only>
-  4. Get approval for action <hitl>
+  2. Search Tool A knowledge base <agent_with_tools>
+  3. Search Tool B knowledge base <agent_with_tools>
+  4. Search Tool C knowledge base <agent_with_tools>
+  5. Analyze and rank results from $2, $3, and $4 by relevance <agent_only>
+  6. Get approval for action based on analysis from $5 <hitl>
   plan:
-  1. Collect search query and search tools in parallel
-  2. Analyze results and get approval for action
+  1. Collect search query and search all knowledge bases
+  2. Analyze results and get approval
+  
+  [Example 4: Multi-Platform Fetch → Analyze → Approve → Send Pattern]
+  User: Read my emails and messages from Platform A, Platform B, Platform C, and Platform D, prepare responses, get my approval, then send to each platform
+  init_plan:
+  1. Fetch emails from Platform A <agent_with_tools>
+  2. Fetch messages from Platform B <agent_with_tools>
+  3. Fetch messages from Platform C <agent_with_tools>
+  4. Fetch messages from Platform D <agent_with_tools>
+  5. Prepare draft responses for all messages from $1, $2, $3, $4 <agent_only>
+  6. Get user approval for draft responses from $5 <hitl>
+  7. Send response to Platform A using $6 <agent_with_tools>
+  8. Send response to Platform B using $6 <agent_with_tools>
+  9. Send response to Platform C using $6 <agent_with_tools>
+  10. Send response to Platform D using $6 <agent_with_tools>
+  plan:
+  1. Fetch messages from all platforms and prepare draft responses
+  2. Get user approval and send responses to each platform
+  
+  KEY: Steps 1-4 execute in PARALLEL, step 5 waits for all, step 6 waits for 5, steps 7-10 execute in PARALLEL (all depend on $6)
+  NOTE: Use this pattern when user specifies EXACT platforms/apps by name. For unknown/dynamic number, use loop (see Example 5)
+  
+  [Example 5: SEQUENTIAL PROCESSING CHAIN - Each Step Depends on Previous]
+  User: Fetch recent items from database, calculate statistics, and generate insights report
+  init_plan:
+  1. Fetch recent items from database <agent_with_tools>
+  2. Calculate statistics from $1 <agent_only>
+  3. Generate insights report based on $2 <agent_only>
+  plan:
+  1. Fetch data and calculate statistics
+  2. Generate insights report
+  
+  KEY: SEQUENTIAL CHAIN pattern (A → B → C). Step 2 uses $1, step 3 uses $2. Every step references previous!
+  Graph: [1] → [2] → [3] (fully connected chain)
+  
+  [Example 6: 🔁 SCALABLE LOOP - Dynamic Multi-Platform Processing]
+  User: Read messages from all my connected platforms, prepare responses, and send after approval
+  init_plan:
+  1. Get list of connected platforms <agent_with_tools>
+  2. For each platform in $1, fetch messages <loop>
+  3. Prepare draft responses for all fetched messages from $2 <agent_only>
+  4. Get user approval for draft responses from $3 <hitl>
+  5. For each approved response in $4, send to corresponding platform <loop>
+  plan:
+  1. Fetch messages from all connected platforms
+  2. Prepare responses, get approval, and send
+  
+  KEY: Use <loop> when number is DYNAMIC (user might have 2 or 20 platforms). Loop scales automatically!
+  WHEN TO USE LOOP: "all my accounts", "each connected app", "all platforms", "every message" = unknown quantity
+  WHEN TO USE PARALLEL: "Platform A, B, C" (named specific items) = known quantity → separate nodes
+  
+  [Example 7: Conditional Branching - ALL Branches Required]
+  User: Check inventory, if stock is low order more, otherwise schedule discount promotion
+  init_plan:
+  1. Check current inventory levels <agent_with_tools>
+  2. Analyze stock levels from $1 to determine action <agent_only>
+  3. Order new stock if needed based on $2 <agent_with_tools>
+  4. Schedule discount promotion if stock is high based on $2 <agent_with_tools>
+  5. Send confirmation of action taken from $3 or $4 <agent_with_tools>
+  plan:
+  1. Check inventory and determine action
+  2. Execute appropriate action and send confirmation
+  
+  KEY: ALL branches (steps 3 & 4) are nodes, workflow engine decides which executes based on $2
+  
+  [Example 8: Error Handling with Fallback]
+  User: Try to fetch data from primary API, if it fails use backup API, then process results
+  init_plan:
+  1. Attempt to fetch from primary API <agent_with_tools>
+  2. Check if $1 succeeded, if failed fetch from backup API <agent_with_tools>
+  3. Process data from $1 or $2 whichever succeeded <agent_only>
+  4. Get approval for processed results from $3 <hitl>
+  5. Save final results using $4 <agent_with_tools>
+  plan:
+  1. Fetch data from primary or backup API
+  2. Process results, get approval, and save
+  
+  KEY: Step 2 depends on $1 but includes fallback logic, step 3 uses whichever succeeded
+  
+  [Example 9: Loop with Conditional Inside (SCALABLE)]
+  User: For each customer, check their balance, if negative send warning, if positive send thank you
+  init_plan:
+  1. Fetch all customer accounts <agent_with_tools>
+  2. For each customer from $1, check balance and send appropriate message <loop>
+  3. Generate summary report from all $2 loop results <agent_only>
+  plan:
+  1. Fetch customers and process each account
+  2. Generate summary report
+  
+  KEY: Loop processes ALL customers dynamically. Loop body handles conditional logic internally (warning vs thank you)
+  
+  [Example 10: Complex Parallel Branches that Converge]
+  User: Search product in database A and database B simultaneously, if found in A use that, if found in B use that, if found in both compare and choose best, then process order
+  init_plan:
+  1. Search product in database A <agent_with_tools>
+  2. Search product in database B <agent_with_tools>
+  3. Analyze search results from $1 and $2 to determine best match <agent_only>
+  4. Process order using product from $3 <agent_with_tools>
+  5. Send confirmation using $4 <agent_with_tools>
+  plan:
+  1. Search both databases and select best match
+  2. Process order and send confirmation
+  
+  KEY: Steps 1-2 parallel, step 3 waits for BOTH and includes conditional logic, steps 4-5 sequential for action
+  
+  NOTE: Steps 2, 3, 4 execute in PARALLEL automatically (no `$id` dependencies!)
+  NOTE: Step 5 waits for 2, 3, 4 to complete (depends on ${{2}}, ${{3}}, ${{4}})
   
   [Example 4: Pure AI Processing]
   User: Analyze customer feedback and categorize by sentiment
@@ -301,40 +659,39 @@ instruction_template: |-
   1. Fetch customer feedback and analyze sentiment
   2. Categorize by sentiment and generate summary report
   
-  [Example 5: Complex Workflow with All Node Types]
+  [Example 5: Complex Workflow - Mixed Parallel and Sequential]
   User: Collect customer preferences, search multiple product catalogs, analyze best options, get approval, and create order
   init_plan:
   1. Collect product category, budget, and feature preferences <form>
-  2. Search multiple vendor catalogs simultaneously <parallel>
-     2.1. Search Vendor A catalog <agent_with_tools>
-     2.2. Search Vendor B catalog <agent_with_tools>
-     2.3. Search Vendor C catalog <agent_with_tools>
-  3. Analyze results and rank by value (price + reviews) <agent_only>
-  4. Get user approval for top recommendation <hitl>
-  5. Create purchase order for approved item <agent_with_tools>
-  6. Send order confirmation email <agent_with_tools>
+  2. Search Vendor A catalog <agent_with_tools>
+  3. Search Vendor B catalog <agent_with_tools>
+  4. Search Vendor C catalog <agent_with_tools>
+  5. Analyze results from ${{2}}, ${{3}}, ${{4}} and rank by value (price + reviews) <agent_only>
+  6. Get user approval for top recommendation from analysis $5 <hitl>
+  7. Create purchase order for approved item $6 <agent_with_tools>
+  8. Send order confirmation email for order $7 <agent_with_tools>
   plan:
-  1. Collect preferences and search catalogs in parallel
+  1. Collect preferences and search all vendor catalogs
   2. Analyze results and get user approval
   3. Create order and send confirmation email
   
-  [Example 6: Nested Loops (Advanced)]
+  NOTE: Steps 2, 3, 4 execute in PARALLEL (no dependencies!)
+  NOTE: Step 5 waits for all searches (depends on ${{2}}, ${{3}}, ${{4}})
+  NOTE: Steps 6, 7, 8 execute SEQUENTIALLY (each depends on previous)
+  
+  [Example 6: Nested Loops (Advanced - Rare Pattern)]
   User: For each department, process each employee's quarterly review
   init_plan:
-  1. Fetch organization structure from HR system <agent_with_tools>
-  2. For each department, process reviews <loop>
-     2.1. Fetch department employees <agent_with_tools>
-     2.2. For each employee, complete review <loop>
-        2.2.1. Fetch employee performance data <agent_with_tools>
-        2.2.2. Generate review summary <agent_only>
-        2.2.3. Get manager approval for review <hitl>
-        2.2.4. Submit review to HR system <agent_with_tools>
-     2.3. Generate department summary <agent_only>
-  3. Create organization-wide report <agent_only>
-  4. Get executive approval <hitl>
+  1. Fetch all departments from HR system <agent_with_tools>
+  2. For each department in $1, get employees and process reviews <loop>
+  3. Create organization-wide report from all $2 results <agent_only>
+  4. Get executive approval for $3 report <hitl>
   plan:
   1. Fetch organization and process reviews for each department/employee
   2. Create organization report and get executive approval
+  
+  KEY: Nested loops are RARE - most workflows use single loop or parallel patterns.
+  Loop body at step 2 handles fetching employees AND processing each one internally.
   
   ## Planner's useful tips (100% PATTERN-AGNOSTIC)
   - When the request involves processing structured data, Planner should first inspect the data structure before performing operations on it.
@@ -651,20 +1008,28 @@ instruction_template: |-
   **2. Parallel/Concurrent**: A + B + C → D (parallel actions still counted separately)
   **3. Conditional/Branch**: if X then Y else Z (X, Y, Z are all separate actions/nodes)
   
-  ## 🎯 CRITICAL REMINDER: Node Type Markers
+  ## 🎯 CRITICAL REMINDER: Node Type Markers & Dependencies
   **BEFORE generating init_plan, review these marker rules:**
   
-  ✅ **EVERY step MUST end with a marker:** `<form>`, `<hitl>`, `<agent_with_tools>`, `<agent_only>`, `<loop>`, or `<parallel>`
+  ✅ **EVERY step MUST end with a marker:** `<form>`, `<hitl>`, `<agent_with_tools>`, `<agent_only>`, or `<loop>`
   
   ✅ **Common patterns:**
   - "Collect X" at START → `<form>`
   - "Get approval" / "Review" → `<hitl>`
   - "Send email" / "Search database" → `<agent_with_tools>`
   - "Analyze" / "Rank" / "Draft" → `<agent_only>`
-  - "Fetch from A, B, C, D" → `<loop>` (NOT 4 separate steps!)
-  - "Search X and Y simultaneously" → `<parallel>`
+  - "Process each item in list" → `<loop>` with sub-steps
   
-  ✅ **Loop and Parallel MUST have sub-steps:**
+  ✅ **Parallel execution (AUTOMATIC via dependencies):**
+  - "Fetch from A, B, C, D" (DIFFERENT platforms) → 4 separate steps WITHOUT `$id` references
+  - "Search X and Y simultaneously" → 2 separate steps WITHOUT `$id` references
+  - System automatically detects parallel execution when steps have NO dependencies!
+  
+  ✅ **Sequential execution (AUTOMATIC via dependencies):**
+  - Use `$id` notation to reference previous outputs
+  - Example: "Analyze results from $1 and $2" → Step waits for 1 and 2
+  
+  ✅ **Loops MUST have sub-steps:**
   ```
   CORRECT:
   3. For each platform, fetch data <loop>
@@ -672,24 +1037,23 @@ instruction_template: |-
   
   WRONG:
   3. For each platform, fetch data <loop>
-  (Missing sub-steps - what happens in the loop?)
+  (Too vague - specify what collection you're looping over!)
+  
+  CORRECT:
+  3. For each platform in $1, fetch messages <loop>
+  (Clear: looping over results from step 1)
   ```
   
-  ✅ **Sub-Step Numbering Examples:**
-  - Simple loop: 3.1, 3.2, 3.3
-  - Nested loop: 2.2.1, 2.2.2, 2.2.3
-  - Triple nested: 5.3.2.1, 5.3.2.2
-  
-  ✅ **When to use loops:**
-  - "For each X" → `<loop>` with sub-steps
-  - "Fetch from A, B, C" → `<loop>` with sub-step 1: Fetch
-  - "Send to A, B, C" → `<loop>` with sub-step 1: Send
-  - "Process each item" → `<loop>` with processing sub-steps
+  ✅ **When to use loops vs separate parallel steps:**
+  - "For each X in collection" → `<loop>` (DYNAMIC - number unknown at design time)
+    Example: "all my platforms", "each customer", "every message"
+  - "Fetch from Platform A, B, C" → 3 separate steps (FIXED - known quantity, execute in parallel!)
+    Example: Specific named platforms/apps
   
   ❌ **Common mistakes to avoid:**
   - ❌ "Collect approval" → Should be `<hitl>` (NOT `<form>`)
   - ❌ "Analyze data" → Should be `<agent_only>` (NOT `<agent_with_tools>`)
-  - ❌ Listing "Fetch A", "Fetch B", "Fetch C" separately → Should be ONE step with `<loop>` + sub-steps!
+  - ❌ Using `<parallel>` marker → NOT NEEDED! Just don't use `$id` references
   - ❌ Forgetting markers entirely → EVERY step needs one!
   - ❌ Loop without sub-steps → MUST specify what happens inside the loop!
   - ❌ Sub-step without marker → Each sub-step needs its marker too!
