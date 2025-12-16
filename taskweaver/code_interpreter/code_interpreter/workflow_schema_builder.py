@@ -495,9 +495,9 @@ class WorkflowSchemaBuilder:
                         "⚠️ FALLBACK: If omitted, dependencies inferred from $id in description/params"
                     )
                 },
-                "description": {"type": "string"}
+                "description": {"type": "string", "description": "Clear description of what this node does (taken from plan step)"}
             },
-            "required": ["id", "type", "tool_id"],
+            "required": ["id", "type", "tool_id", "description"],
             "additionalProperties": False
         })
         
@@ -598,9 +598,9 @@ class WorkflowSchemaBuilder:
                         "Explicit dependencies = 100% accuracy. Don't rely on text inference alone!"
                     )
                 },
-                "description": {"type": "string"}
+                "description": {"type": "string", "description": "Clear description of what this node does (taken from plan step)"}
             },
-            "required": ["id", "type"],
+            "required": ["id", "type", "description"],
             "additionalProperties": False
         })
         
@@ -776,9 +776,9 @@ class WorkflowSchemaBuilder:
                     "items": {"type": "integer"},
                     "description": "Step indices that must complete before loop starts (e.g., fetching the array to loop over)."
                 },
-                "description": {"type": "string"}
+                "description": {"type": "string", "description": "Clear description of what this loop does (taken from plan step)"}
             },
-            "required": ["id", "type", "loop_over", "loop_body"],
+            "required": ["id", "type", "loop_over", "loop_body", "description"],
             "additionalProperties": False
         })
         

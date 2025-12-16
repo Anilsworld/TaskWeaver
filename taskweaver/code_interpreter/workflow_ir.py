@@ -30,6 +30,8 @@ class NodeType(Enum):
     HITL = auto()               # Human-in-the-loop approval
     FORM = auto()               # Data collection from user
     CODE_EXECUTION = auto()     # Python code execution
+    LOOP = auto()               # Loop/iteration execution
+    PARALLEL = auto()           # Parallel execution (deprecated - use dependencies)
     
     @classmethod
     def from_string(cls, type_str: str) -> NodeType:
@@ -39,7 +41,9 @@ class NodeType(Enum):
             "agent_only": cls.AGENT_ONLY,
             "hitl": cls.HITL,
             "form": cls.FORM,
-            "code_execution": cls.CODE_EXECUTION
+            "code_execution": cls.CODE_EXECUTION,
+            "loop": cls.LOOP,
+            "parallel": cls.PARALLEL
         }
         return mapping.get(type_str, cls.AGENT_ONLY)
 
@@ -51,6 +55,7 @@ class EdgeType(Enum):
     DEPENDENCY = auto()      # Inferred from depends_on (deprecated - use dependencies)
     CONDITIONAL_TRUE = auto() # Conditional branch (if_true)
     CONDITIONAL_FALSE = auto() # Conditional branch (if_false)
+    NESTED = auto()          # Implicit parent-child relationship (loop_body, parallel groups)
 
 
 @dataclass
@@ -252,6 +257,36 @@ class WorkflowIR:
                         self.dag.add_edge(source, target, edge_type=EdgeType.SEQUENTIAL)
                         logger.debug(f"Added SEQUENTIAL edge (legacy): {source} → {target}")
         
+        # 5. Add implicit edges for nested nodes (loop_body, parallel groups)
+        # This ensures nested nodes don't appear as "disconnected" in validation
+        for node_id, node_dict in [(n["id"], n) for n in self.raw_dict.get("nodes", [])]:
+            if node_id not in self.nodes:
+                continue
+            
+            # Handle loop_body (nested nodes in loops)
+            loop_body = node_dict.get("loop_body", [])
+            if loop_body and isinstance(loop_body, list):
+                for nested_id in loop_body:
+                    if isinstance(nested_id, str) and nested_id in self.nodes:
+                        # Create implicit NESTED edge: loop → nested_node
+                        if not self.dag.has_edge(node_id, nested_id):
+                            edge = IREdge(source=node_id, target=nested_id, type=EdgeType.NESTED)
+                            self.edges.append(edge)
+                            self.dag.add_edge(node_id, nested_id, edge_type=EdgeType.NESTED)
+                            logger.debug(f"Added NESTED edge (loop body): {node_id} → {nested_id}")
+            
+            # Handle nodes array (alternative to loop_body)
+            nested_nodes = node_dict.get("nodes", [])
+            if nested_nodes and isinstance(nested_nodes, list):
+                for nested_node in nested_nodes:
+                    nested_id = nested_node.get("id") if isinstance(nested_node, dict) else nested_node
+                    if nested_id and nested_id in self.nodes:
+                        if not self.dag.has_edge(node_id, nested_id):
+                            edge = IREdge(source=node_id, target=nested_id, type=EdgeType.NESTED)
+                            self.edges.append(edge)
+                            self.dag.add_edge(node_id, nested_id, edge_type=EdgeType.NESTED)
+                            logger.debug(f"Added NESTED edge (nodes array): {node_id} → {nested_id}")
+        
         logger.info(f"[WorkflowIR] Built DAG: {len(self.edges)} edges from explicit edges array")
     
     def _validate_dag(self):
@@ -260,7 +295,7 @@ class WorkflowIR:
         
         Checks:
         - No cycles (must be acyclic)
-        - No disconnected components (all nodes reachable)
+        - No disconnected components (all nodes reachable, excluding nested nodes)
         - Conditional nodes have both branches
         """
         # Check for cycles
@@ -268,12 +303,48 @@ class WorkflowIR:
             cycles = list(nx.simple_cycles(self.dag))
             raise ValueError(f"Workflow contains cycles: {cycles}")
         
-        # Check for disconnected components
+        # Check for disconnected components (excluding nested nodes)
         if len(self.nodes) > 1:  # Only check if multiple nodes
+            # Identify nested nodes (children of loop/parallel nodes)
+            nested_node_ids = set()
+            for node_dict in self.raw_dict.get("nodes", []):
+                # Check loop_body
+                loop_body = node_dict.get("loop_body", [])
+                if loop_body:
+                    nested_node_ids.update(
+                        item for item in loop_body 
+                        if isinstance(item, str)
+                    )
+                # Check nodes array
+                nested_nodes = node_dict.get("nodes", [])
+                if nested_nodes:
+                    nested_node_ids.update(
+                        node.get("id") if isinstance(node, dict) else node 
+                        for node in nested_nodes
+                        if (isinstance(node, dict) and node.get("id")) or isinstance(node, str)
+                    )
+            
+            # Check connectivity only for non-nested nodes
             undirected = self.dag.to_undirected()
             components = list(nx.connected_components(undirected))
+            
             if len(components) > 1:
-                logger.warning(f"Workflow has {len(components)} disconnected components: {components}")
+                # Filter out components that only contain nested nodes
+                non_nested_components = [
+                    comp for comp in components 
+                    if not all(node_id in nested_node_ids for node_id in comp)
+                ]
+                
+                if len(non_nested_components) > 1:
+                    logger.warning(
+                        f"Workflow has {len(non_nested_components)} disconnected components "
+                        f"(excluding {len(nested_node_ids)} nested nodes): {non_nested_components}"
+                    )
+                else:
+                    logger.debug(
+                        f"All components are connected when nested nodes are considered "
+                        f"({len(nested_node_ids)} nested nodes in loop/parallel structures)"
+                    )
         
         # Check conditional nodes have both branches
         for source, branches in self.conditional_branches.items():

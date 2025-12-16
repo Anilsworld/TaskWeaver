@@ -108,53 +108,77 @@ instruction_template: |-
     * Loop automatically scales to ANY quantity (2 items or 200 items!)
     * Loop body executes for EACH item - no manual sub-step numbering needed
   
-  ## CRITICAL: Dependency-Based Orchestration (Inspired by LLMCompiler)
+  ## CRITICAL: Dual Dependency System (Data Flow + Control Flow)
   
-  **GOLDEN RULE: Maximize parallelizability by minimizing dependencies!**
+  **GOLDEN RULE: Separate WHAT data you use from WHEN you execute!**
   
-  **Reference previous outputs using `$id` notation:**
-  - Inputs can be constants OR outputs from preceding actions
-  - Use `$1` or `${{1}}` to reference step 1's output
-  - Use `${{2}}.field_name` to reference specific field from step 2
-  - Use `$1, $2, $3` to reference multiple outputs
+  **TWO types of dependencies:**
+  
+  1. **DATA DEPENDENCY** (`from $X`): Which data/outputs this step CONSUMES
+     - Use when step needs data/results from previous steps
+     - Syntax: `from $1`, `from $2 and $3`, `from ${{1}}.field_name`
+     - Purpose: Documents data flow, used in params with placeholders
+     - Example: "Analyze sentiment from $1" (uses data from step 1)
+  
+  2. **CONTROL DEPENDENCY** (`after $X`): Which steps must COMPLETE before this executes
+     - Use when step must wait for previous steps to finish
+     - Syntax: `after $1`, `after $2 and $3`
+     - Purpose: Defines execution order and synchronization points
+     - Example: "Send email after $6" (waits for step 6 to complete)
+  
+  **DUAL SYNTAX** (when data source ≠ execution dependency):
+  - `from $X after $Y` = Use data from X, but wait for Y to complete
+  - Example: "Send responses from $1 after $6" (uses form data from step 1, but waits for approval in step 6)
+  - Example: "Analyze results from $2 and $3 after $1" (uses data from 2&3, but waits for setup in step 1)
   
   **Automatic Parallel/Sequential Detection:**
-  - Steps WITHOUT `$id` references → Execute in PARALLEL automatically
-  - Steps WITH `$id` references → Wait for dependencies first
+  - Steps WITHOUT `after` clause → Execute in PARALLEL (no control dependency)
+  - Steps WITH same `after` clause → Execute in PARALLEL (same synchronization point)
+  - Steps WITH different `after` clauses → Execute when dependencies met
   
-  **🔴 MANDATORY RULE - ALWAYS Use $id When Consuming Previous Outputs:**
-  - If a step uses/processes/analyzes/combines data from previous steps → MUST reference them with `$id`
-  - If a step is independent and generates new data → NO `$id` reference (executes in parallel)
+  **🔴 MANDATORY RULES:**
+  1. If step USES data from previous steps → Include `from $X`
+  2. If step must WAIT for previous steps → Include `after $Y`
+  3. If data source = execution dependency → Can use just `from $X` (shorthand for `from $X after $X`)
+  4. If execution dependency ≠ data source → MUST use dual syntax: `from $X after $Y`
   
   **🎯 THINK IN GRAPHS (AutoGen-Inspired):**
   You are building a WORKFLOW GRAPH where:
   - Each step = NODE in the graph
-  - Each $id reference = EDGE connecting nodes
-  - Missing $id = DISCONNECTED node = BROKEN workflow!
+  - Each `after` clause = EDGE connecting nodes (control flow)
+  - Each `from` clause = DATA FLOW reference (used in params)
+  - Missing `after` = PARALLEL node (no execution dependency)
   
-  **Examples of REQUIRED $id usage:**
-  ✅ "Analyze results from $1 and $2" (creates edges: 1→this, 2→this)
-  ✅ "Combine outputs from ${{1}}, ${{2}}, ${{3}}" (creates edges: 1→this, 2→this, 3→this)
-  ✅ "Send email with report from $4" (creates edge: 4→this)
-  ✅ "Get approval for recommendation from $5" (creates edge: 5→this)
-  ✅ "Calculate average of $1" (creates edge: 1→this)
-  ✅ "Process data from $1" (creates edge: 1→this)
+  **Examples of REQUIRED dual syntax:**
+  ✅ "Analyze results from $2 and $3 after $1" (waits for 1, uses data from 2&3)
+  ✅ "Combine outputs from $1, $2, $3" (shorthand: waits for 1,2,3 AND uses their data)
+  ✅ "Send email with report from $4 after $5" (waits for 5, uses data from 4)
+  ✅ "Get approval for recommendation from $5" (shorthand: waits for 5 AND reviews its data)
+  ✅ "Send responses from $1 after $6" (waits for approval in 6, sends data from 1)
+  ✅ "Process data from $1" (shorthand: waits for 1 AND processes its data)
   
-  **Examples where $id is NOT needed:**
-  ✅ "Fetch data from external API" (independent, generates new data)
-  ✅ "Search database for products" (independent, generates new data)
-  ✅ "Call external API" (independent, generates new data)
+  **Examples where NO dependency needed:**
+  ✅ "Fetch data from external API" (independent, generates new data, runs in parallel)
+  ✅ "Search database for products" (independent, generates new data, runs in parallel)
+  ✅ "Call external API" (independent, generates new data, runs in parallel)
   
   **🔍 SELF-CHECK MECHANISM (MANDATORY):**
   After writing your init_plan, ask yourself for EACH step starting from step 2:
   
-  Question: "Does this step need output/data/results from ANY previous step?"
-  - If YES → Does the step description contain $id? 
-    → NO? YOU FORGOT! Add it now: "from $X" or "using $Y"
-    → YES? Good! Move to next step.
-  - If NO → This step is independent (fetches NEW data from external source)
+  Question 1: "Does this step need DATA from ANY previous step?"
+  - If YES → Add `from $X` to document data flow
+  - If NO → Step generates new data (no `from` clause)
   
-  🚨 WARNING: If your workflow has 3+ steps and NO $id references appear after step 1, you likely forgot them!
+  Question 2: "Does this step need to WAIT for ANY previous step to complete?"
+  - If YES → Add `after $Y` to define execution order
+  - If NO → Step can run in parallel (no `after` clause)
+  
+  Question 3: "Is the data source the same as the execution dependency?"
+  - If YES → Can use shorthand: `from $X` (implies `from $X after $X`)
+  - If NO → MUST use dual syntax: `from $X after $Y`
+  
+  🚨 WARNING: If your workflow has 3+ sequential steps and NO `after` clauses, you likely forgot them!
+  🚨 CRITICAL: If step uses data from $X but must wait for $Y (X ≠ Y), MUST use `from $X after $Y`!
   
   **📊 WORKFLOW GRAPH PATTERNS (AutoGen-Inspired Mental Models):**
   
@@ -177,31 +201,34 @@ instruction_template: |-
      1. Fetch from Source A <agent_with_tools>
      2. Fetch from Source B <agent_with_tools>
      3. Fetch from Source C <agent_with_tools>
-     4. Combine all data from $1, $2, $3 <agent_only>
+     4. Combine all data from $1, $2, and $3 <agent_only>
      
-     Graph: [1, 2, 3] all parallel → [4] waits for all
+     Graph: [1, 2, 3] all parallel (no 'after') → [4] waits for all (after $1, $2, $3)
+     Control: Step 4 has control deps [1,2,3], steps 1-3 have no deps (parallel)
      ```
   
   3️⃣ **FAN-OUT/FAN-IN DIAMOND** (A → [B, C] → D):
      Use when: Setup → Parallel processing → Merge
      ```
      1. Get configuration <agent_with_tools>
-     2. Process batch A using $1 <agent_with_tools>
-     3. Process batch B using $1 <agent_with_tools>
-     4. Merge results from $2, $3 <agent_only>
+     2. Process batch A from $1 <agent_with_tools>
+     3. Process batch B from $1 <agent_with_tools>
+     4. Merge results from $2 and $3 <agent_only>
      
-     Graph: [1] → [2, 3] parallel → [4] waits for both
+     Graph: [1] → [2, 3] parallel (both after $1) → [4] waits for both (after $2, $3)
+     Control: Steps 2&3 have deps [1] (parallel because same deps), step 4 has deps [2,3]
      ```
   
   4️⃣ **MULTI-STAGE PIPELINE** (Fetch Parallel → Process → Approve → Send Parallel):
      Use when: Complex workflows with multiple parallel stages
      ```
-     1-4. Fetch from multiple sources (parallel)
-     5. Process all fetched data from $1, $2, $3, $4 <agent_only>
-     6. Get approval for $5 <hitl>
-     7-10. Send to multiple destinations using $6 (parallel)
+     1-4. Fetch from multiple sources (parallel, no 'after')
+     5. Process all fetched data from $1, $2, $3, and $4 <agent_only>
+     6. Get approval for summary from $5 <hitl>
+     7-10. Send to multiple destinations from $6 <agent_with_tools>
      
-     Graph: [1,2,3,4] → [5] → [6] → [7,8,9,10]
+     Graph: [1,2,3,4] parallel → [5] waits for all → [6] waits for 5 → [7,8,9,10] parallel after 6
+     Control: Steps 1-4 deps=[], step 5 deps=[1,2,3,4], step 6 deps=[5], steps 7-10 deps=[6]
      ```
   
   **KEY INSIGHT: Just list independent operations as separate steps!**
@@ -226,52 +253,63 @@ instruction_template: |-
   → Steps 1-4 execute in PARALLEL (no $id, independent fetches)
   → Step 5 waits for all 4 to complete (has $id references)
   
-  WRONG init_plan (missing $id):
+  WRONG init_plan (missing dependencies):
   ❌ 1. Fetch data from Platform A <agent_with_tools>
   ❌ 2. Fetch data from Platform B <agent_with_tools>
   ❌ 3. Fetch data from Platform C <agent_with_tools>
   ❌ 4. Fetch data from Platform D <agent_with_tools>
-  ❌ 5. Analyze all data <agent_only>  ← Missing "$1, $2, $3, $4"!
+  ❌ 5. Analyze all data <agent_only>  ← Missing "from $1, $2, $3, $4"!
   
-  → Without $id, step 5 has no dependency info = WRONG execution order!
+  → Without 'from $X' references, step 5 has no control dependencies!
+  → CodeGenerator cannot determine execution order = BROKEN workflow!
   ```
   
   **🎯 COMPLETE PATTERN: Fetch → Analyze → Approve → Send to Multiple Platforms**
   ```
   User: "Fetch from platforms A, B, C, D, prepare responses, get my approval, then send to each platform"
   
-  CORRECT init_plan:
+  CORRECT init_plan (WITH DUAL SYNTAX):
   1. Fetch from Platform A <agent_with_tools>
   2. Fetch from Platform B <agent_with_tools>
   3. Fetch from Platform C <agent_with_tools>
   4. Fetch from Platform D <agent_with_tools>
-  5. Prepare responses for all fetched data from $1, $2, $3, $4 <agent_only>
+  5. Prepare responses for all fetched data from $1, $2, $3, and $4 <agent_only>
   6. Get user approval for responses from $5 <hitl>
-  7. Send to Platform A using $6 <agent_with_tools>
-  8. Send to Platform B using $6 <agent_with_tools>
-  9. Send to Platform C using $6 <agent_with_tools>
-  10. Send to Platform D using $6 <agent_with_tools>
+  7. Send to Platform A from $6 <agent_with_tools>
+  8. Send to Platform B from $6 <agent_with_tools>
+  9. Send to Platform C from $6 <agent_with_tools>
+  10. Send to Platform D from $6 <agent_with_tools>
   
   KEY POINTS:
-  → Steps 1-4: Parallel (no $id dependencies)
-  → Step 5: Waits for 1,2,3,4 (uses $1, $2, $3, $4)
-  → Step 6: Waits for 5 (uses $5)
-  → Steps 7-10: Parallel (all use $6, no dependencies on each other)
+  → Steps 1-4: Parallel (no 'after', independent fetches)
+  → Step 5: Waits for 1,2,3,4 (shorthand: from $1, $2, $3, $4 implies after them)
+  → Step 6: Waits for 5 (shorthand: from $5 implies after $5)
+  → Steps 7-10: Parallel after 6 (all have same control dep: after $6)
   
-  WRONG init_plan (missing $id in later steps):
+  Control Dependencies (what CodeGenerator sees):
+  - Steps 1-4: dependencies=[] (parallel)
+  - Step 5: dependencies=[1,2,3,4] (fan-in, waits for all)
+  - Step 6: dependencies=[5] (sequential)
+  - Steps 7-10: dependencies=[6] (parallel after approval)
+  
+  WRONG init_plan (missing dependencies):
   ❌ 5. Prepare responses for all fetched data from $1, $2, $3, $4 <agent_only>  ✅ Good!
-  ❌ 6. Get user approval for responses <hitl>  ← Missing "$5"!
-  ❌ 7. Send approved responses <agent_with_tools>  ← Missing "$6" AND only 1 platform!
+  ❌ 6. Get user approval for responses <hitl>  ← Missing "from $5"!
+  ❌ 7. Send approved responses <agent_with_tools>  ← Missing "from $6" AND only 1 platform!
   
-  → Without $id in steps 6 & 7, they become disconnected!
-  → Step 7 should be a <loop> to send to ALL platforms!
+  → Without 'from $X' references, control dependencies cannot be determined!
   ```
   
-  **⚠️ MANDATORY RULE: ALWAYS use $id notation for dependent steps!**
-  - If step N uses results from step M → MUST include $M in description
-  - If step N waits for step M to complete → MUST include $M in description
-  - Even for "obvious" dependencies like approval → analysis, MUST use $id!
-  - When sending to multiple platforms, use <loop> with sub-steps, each using $id from approval step!
+  **⚠️ MANDATORY RULE: ALWAYS use 'from $X' or 'after $Y' notation!**
+  - If step N uses DATA from step M → MUST include "from $M" in description
+  - If step N waits for step M to COMPLETE → MUST include "after $M" in description (or "from $M" as shorthand if data source = execution dep)
+  - Even for "obvious" dependencies like approval → analysis, MUST explicitly reference!
+  - When data source ≠ execution dependency → MUST use dual syntax "from $X after $Y"!
+  
+  **DUAL SYNTAX EXAMPLES:**
+  ✅ "Send responses from $1 after $6" (uses form data from 1, waits for approval in 6)
+  ✅ "Analyze results from $2 and $3 after $1" (uses data from 2&3, waits for setup in 1)
+  ✅ "Process data from $5" (shorthand: from $5 after $5, data source = execution dep)
   
   **🎯 UNIVERSAL DEPENDENCY PATTERNS (Works for ANY Workflow):**
   
@@ -479,18 +517,212 @@ instruction_template: |-
   CORRECT Planner Message: "Perform action_1 with specified parameters, perform action_2 based on action_1 results, perform action_3 conditionally based on action_2 outcome"
   
   
+  ## 📚 Learning Strategy: MEGA-EXAMPLE vs Simple Examples
+  
+  **WHY WE HAVE BOTH:**
+  
+  1. **MEGA-EXAMPLE (20 steps) = Reference Manual**
+     - Purpose: Comprehensive coverage of EVERY pattern
+     - When to use: Look up specific edge cases, understand complex patterns
+     - Audience: Advanced users, architecture review, edge case handling
+     - Learning: "I need to implement X pattern - is it covered?"
+  
+  2. **Simple Examples (3-10 steps) = Learning Path**
+     - Purpose: Teach ONE pattern clearly without overwhelming
+     - When to use: First-time users, quick reference, common use cases
+     - Audience: Everyone, especially beginners
+     - Learning: "I want to understand how X works step-by-step"
+  
+  **Pedagogical Progression (Simple → Complex):**
+  ```
+  Example 1 (4 steps): Form → Tool → Approval → Action
+    ↓ Learn: Basic sequential flow
+  
+  Example 3 (6 steps): Form → 3 Parallel Searches → Analyze → Approve
+    ↓ Learn: Parallel execution, fan-in
+  
+  Example 4 (10 steps): 4 Parallel Fetches → Analyze → Approve → 4 Parallel Sends
+    ↓ Learn: Multi-stage parallel, dual dependencies
+  
+  MEGA-EXAMPLE (20 steps): Everything combined
+    ↓ Learn: How all patterns interact in one workflow
+  ```
+  
+  **Why Keep Both:**
+  - 80% of real workflows = 3-10 steps (map to simple examples)
+  - 20% of workflows = 10+ steps (map to MEGA-EXAMPLE)
+  - Simple examples = Relatable, easy to understand
+  - MEGA-EXAMPLE = Comprehensive, proves completeness
+  
+  **Usage Pattern:**
+  - **First read:** Simple examples (understand basics)
+  - **Implementation:** Simple examples (template for common cases)
+  - **Edge cases:** MEGA-EXAMPLE (verify pattern is supported)
+  - **Architecture review:** MEGA-EXAMPLE (prove system handles complexity)
+  
+  **Analogy:**
+  - Simple examples = "Hello World", "Todo App", "Blog"
+  - MEGA-EXAMPLE = "Enterprise E-commerce Platform"
+  - Both needed: Learn with simple, prove with complex!
+  
   ### Examples of planning process (WITH NODE TYPE MARKERS)
+  [🎯 ULTIMATE MEGA-EXAMPLE: ALL Patterns + Edge Cases in One Workflow]
+  User: Enterprise workflow covering EVERY possible dependency pattern, edge case, and complexity
+  init_plan:
+  1. Collect initial parameters <form>
+  2. Fetch from Source A <agent_with_tools>
+  3. Fetch from Source B <agent_with_tools>
+  4. Fetch from Source C <agent_with_tools>
+  5. Try fetch from backup if $2 failed <agent_with_tools>
+  6. Analyze primary data from $2, $3, and $4 <agent_only>
+  7. Process subset from $2 or $5 <agent_with_tools>
+  8. Validate results from $6 and $7 <agent_only>
+  9. Route to path A if condition X from $8 <agent_with_tools>
+  10. Route to path B if condition Y from $8 <agent_with_tools>
+  11. Merge results from $9 or $10 <agent_only>
+  12. Get first-level approval from $11 <hitl>
+  13. Send to Target A from $1 after $12 <agent_with_tools>
+  14. Send to Target B from $1 after $12 <agent_with_tools>
+  15. For each item from $6, transform and send after $12 <loop>
+  16. Monitor completion from $13, $14, and $15 <agent_with_tools>
+  17. If any failures from $16, get exception approval <hitl>
+  18. For each failed item from $17, retry <loop>
+  19. Aggregate all results from $13, $14, $15, and $18 <agent_only>
+  20. Final notification from $19 <agent_with_tools>
+  plan:
+  1. Collect parameters and fetch from all sources with fallback
+  2. Analyze, process, and route conditionally
+  3. Get approval and execute parallel actions
+  4. Monitor, handle exceptions, and aggregate results
+  
+  **🎯 ULTIMATE PATTERN COVERAGE (EVERY Possible Scenario):**
+  
+  ✅ **1. INDEPENDENT PARALLEL:** Steps 1,2,3,4
+     → dependencies=[] → All start immediately
+  
+  ✅ **2. ERROR HANDLING/FALLBACK:** Step 5
+     → "if $2 failed" → dependencies=[2] → Conditional execution
+  
+  ✅ **3. FAN-IN (Multiple sources):** Step 6
+     → from $2, $3, $4 → dependencies=[2,3,4] → Waits for all
+  
+  ✅ **4. OR LOGIC (Alternative paths):** Step 7
+     → from $2 or $5 → dependencies=[2,5] → Uses whichever succeeded
+  
+  ✅ **5. MULTI-INPUT VALIDATION:** Step 8
+     → from $6 and $7 → dependencies=[6,7] → Combines analysis + processing
+  
+  ✅ **6. CONDITIONAL BRANCHING:** Steps 9,10
+     → Both from $8 → dependencies=[8] → Parallel branches, runtime decides which executes
+  
+  ✅ **7. OR MERGE (Branch convergence):** Step 11
+     → from $9 or $10 → dependencies=[9,10] → Merges from conditional branches
+  
+  ✅ **8. HUMAN APPROVAL (HITL):** Steps 12,17
+     → Step 12: First approval → dependencies=[11]
+     → Step 17: Exception approval → dependencies=[16] → Multi-stage approvals
+  
+  ✅ **9. DUAL DEPENDENCY (Data ≠ Control):** Steps 13,14,15
+     → "from $1 after $12" → dependencies=[12] BUT uses data from step 1!
+     → KEY PATTERN: Execution waits for approval, data comes from form
+  
+  ✅ **10. LOOPS WITH DEPENDENCIES:** Steps 15,18
+     → Step 15: "from $6 after $12" → Loop over data from 6, start after approval
+     → Step 18: "from $17" → Nested retry loop
+  
+  ✅ **11. MONITORING/AGGREGATION:** Step 16
+     → from $13, $14, $15 → dependencies=[13,14,15] → Fan-in from parallel branches
+  
+  ✅ **12. CONDITIONAL RETRY:** Step 18
+     → "from $17" → Loop only if step 17 approved failures
+  
+  ✅ **13. FINAL FAN-IN:** Step 19
+     → from $13, $14, $15, $18 → dependencies=[13,14,15,18] → Collects ALL results
+  
+  ✅ **14. COMPLETION CHAIN:** Step 20
+     → from $19 → dependencies=[19] → Final sequential step
+  
+  **Control Dependencies (What CodeGenerator Extracts):**
+  ```
+  [1: [],  2: [],  3: [],  4: [],                    # Independent (parallel)
+   5: [2],                                            # Fallback (conditional)
+   6: [2,3,4],                                        # Fan-in (3 sources)
+   7: [2,5],                                          # OR logic
+   8: [6,7],                                          # Validation (2 inputs)
+   9: [8], 10: [8],                                   # Conditional branches (parallel)
+   11: [9,10],                                        # Branch merge
+   12: [11],                                          # First approval
+   13: [12], 14: [12], 15: [12],                     # Parallel after approval (dual deps!)
+   16: [13,14,15],                                    # Monitor (fan-in)
+   17: [16],                                          # Exception approval
+   18: [17],                                          # Retry loop
+   19: [13,14,15,18],                                 # Final aggregation (4 sources)
+   20: [19]]                                          # Completion
+  ```
+  
+  **Execution Flow (DAG Topology):**
+  ```
+  Parallel Wave 1: [1,2,3,4]
+  Conditional: [5] (if 2 failed)
+  Fan-in: [6] (waits 2,3,4)
+  OR-merge: [7] (waits 2,5)
+  Validation: [8] (waits 6,7)
+  Conditional Branches: [9,10] (parallel, both wait 8)
+  Merge: [11] (waits 9,10)
+  Approval Gate: [12] (waits 11)
+  Parallel Wave 2: [13,14,15] (all wait 12, run parallel)
+  Monitor: [16] (waits 13,14,15)
+  Exception Gate: [17] (waits 16)
+  Retry: [18] (waits 17)
+  Aggregation: [19] (waits 13,14,15,18)
+  Completion: [20] (waits 19)
+  ```
+  
+  **🚀 EVERY POSSIBLE PATTERN COVERED:**
+  ✅ Independent parallel (1,2,3,4)
+  ✅ Sequential chains (6→8→11→12→20)
+  ✅ Fan-out (parallel from same point)
+  ✅ Fan-in (multiple → one)
+  ✅ Dual dependencies (data ≠ control: 13,14,15)
+  ✅ Loops (simple: 15, nested/retry: 18)
+  ✅ Conditional execution (5, 9, 10)
+  ✅ OR logic (alternative paths: 7, 11)
+  ✅ Multi-stage approvals (12, 17)
+  ✅ Error handling (5, 17, 18)
+  ✅ Monitoring (16)
+  ✅ Form input (1)
+  ✅ HITL gates (12, 17)
+  ✅ Final aggregation (19)
+  ✅ Diamond patterns (8→[9,10]→11)
+  
+  **Universal Truth:**
+  ```
+  ANY workflow in ANY domain = Subset/Combination of these 20 steps
+  ```
+  
+  **This example handles:**
+  - ✅ Simple workflows (uses steps 1-6-12-20)
+  - ✅ Complex workflows (uses all 20 steps)
+  - ✅ Error scenarios (5, 17, 18)
+  - ✅ Approvals at any stage (12, 17)
+  - ✅ Parallel at any depth (2-4, 9-10, 13-15)
+  - ✅ Loops at any point (15, 18)
+  
+  **🎯 If you understand THIS example, you can build ANY workflow!**
+
   [Example 1: Form + External Tool + Approval]
   User: Search for products in inventory, get my approval, then place order
   init_plan:
   1. Collect product requirements and quantity <form>
-  2. Search inventory database for matching products <agent_with_tools>
-  3. Get approval for selected products <hitl>
-  4. Place order for approved products <agent_with_tools>
+  2. Search inventory database for matching products from $1 <agent_with_tools>
+  3. Get approval for selected products from $2 <hitl>
+  4. Place order for approved products from $3 <agent_with_tools>
   plan:
   1. Collect requirements and search inventory
   2. Get approval for selected products
   3. Place order for approved products
+  
+  Control Dependencies: [1: [], 2: [1], 3: [2], 4: [3]] (sequential chain)
   
   [Example 2: NO Form - Values Already Specified]
   User: Get my last 30 version control commits and calculate which day I commit most
@@ -549,17 +781,18 @@ instruction_template: |-
   2. Fetch messages from Platform B <agent_with_tools>
   3. Fetch messages from Platform C <agent_with_tools>
   4. Fetch messages from Platform D <agent_with_tools>
-  5. Prepare draft responses for all messages from $1, $2, $3, $4 <agent_only>
+  5. Prepare draft responses for all messages from $1, $2, $3, and $4 <agent_only>
   6. Get user approval for draft responses from $5 <hitl>
-  7. Send response to Platform A using $6 <agent_with_tools>
-  8. Send response to Platform B using $6 <agent_with_tools>
-  9. Send response to Platform C using $6 <agent_with_tools>
-  10. Send response to Platform D using $6 <agent_with_tools>
+  7. Send response to Platform A from $6 <agent_with_tools>
+  8. Send response to Platform B from $6 <agent_with_tools>
+  9. Send response to Platform C from $6 <agent_with_tools>
+  10. Send response to Platform D from $6 <agent_with_tools>
   plan:
   1. Fetch messages from all platforms and prepare draft responses
   2. Get user approval and send responses to each platform
   
-  KEY: Steps 1-4 execute in PARALLEL, step 5 waits for all, step 6 waits for 5, steps 7-10 execute in PARALLEL (all depend on $6)
+  KEY: Steps 1-4 parallel (no 'after'), step 5 waits for all (from $1,$2,$3,$4), step 6 waits for 5 (from $5), steps 7-10 parallel after 6 (from $6)
+  Control Dependencies: [1-4: [], 5: [1,2,3,4], 6: [5], 7-10: [6]]
   NOTE: Use this pattern when user specifies EXACT platforms/apps by name. For unknown/dynamic number, use loop (see Example 5)
   
   [Example 5: SEQUENTIAL PROCESSING CHAIN - Each Step Depends on Previous]
@@ -595,14 +828,15 @@ instruction_template: |-
   User: Check inventory, if stock is low order more, otherwise schedule discount promotion
   init_plan:
   1. Check current inventory levels <agent_with_tools>
-  2. Analyze stock levels from $1 to determine action <agent_only>
-  3. Order new stock if needed based on $2 <agent_with_tools>
-  4. Schedule discount promotion if stock is high based on $2 <agent_with_tools>
-  5. Send confirmation of action taken from $3 or $4 <agent_with_tools>
+  2. Analyze stock levels from $1 <agent_only>
+  3. Order new stock if needed from $2 <agent_with_tools>
+  4. Schedule discount promotion if stock is high from $2 <agent_with_tools>
+  5. Send confirmation from $3 or $4 <agent_with_tools>
   plan:
   1. Check inventory and determine action
   2. Execute appropriate action and send confirmation
   
+  Control Dependencies: [1: [], 2: [1], 3: [2], 4: [2], 5: [3,4]] (steps 3&4 parallel after 2, step 5 fan-in)
   KEY: ALL branches (steps 3 & 4) are nodes, workflow engine decides which executes based on $2
   
   [Example 8: Error Handling with Fallback]
@@ -610,13 +844,14 @@ instruction_template: |-
   init_plan:
   1. Attempt to fetch from primary API <agent_with_tools>
   2. Check if $1 succeeded, if failed fetch from backup API <agent_with_tools>
-  3. Process data from $1 or $2 whichever succeeded <agent_only>
+  3. Process data from $1 or $2 <agent_only>
   4. Get approval for processed results from $3 <hitl>
-  5. Save final results using $4 <agent_with_tools>
+  5. Save final results from $4 <agent_with_tools>
   plan:
   1. Fetch data from primary or backup API
   2. Process results, get approval, and save
   
+  Control Dependencies: [1: [], 2: [1], 3: [1,2], 4: [3], 5: [4]] (step 3 waits for both 1&2)
   KEY: Step 2 depends on $1 but includes fallback logic, step 3 uses whichever succeeded
   
   [Example 9: Loop with Conditional Inside (SCALABLE)]
@@ -624,11 +859,12 @@ instruction_template: |-
   init_plan:
   1. Fetch all customer accounts <agent_with_tools>
   2. For each customer from $1, check balance and send appropriate message <loop>
-  3. Generate summary report from all $2 loop results <agent_only>
+  3. Generate summary report from $2 <agent_only>
   plan:
   1. Fetch customers and process each account
   2. Generate summary report
   
+  Control Dependencies: [1: [], 2: [1], 3: [2]] (sequential)
   KEY: Loop processes ALL customers dynamically. Loop body handles conditional logic internally (warning vs thank you)
   
   [Example 10: Complex Parallel Branches that Converge]
@@ -636,14 +872,15 @@ instruction_template: |-
   init_plan:
   1. Search product in database A <agent_with_tools>
   2. Search product in database B <agent_with_tools>
-  3. Analyze search results from $1 and $2 to determine best match <agent_only>
-  4. Process order using product from $3 <agent_with_tools>
-  5. Send confirmation using $4 <agent_with_tools>
+  3. Analyze search results from $1 and $2 <agent_only>
+  4. Process order from $3 <agent_with_tools>
+  5. Send confirmation from $4 <agent_with_tools>
   plan:
   1. Search both databases and select best match
   2. Process order and send confirmation
   
-  KEY: Steps 1-2 parallel, step 3 waits for BOTH and includes conditional logic, steps 4-5 sequential for action
+  Control Dependencies: [1: [], 2: [], 3: [1,2], 4: [3], 5: [4]] (1&2 parallel, 3 fan-in, 4-5 sequential)
+  KEY: Steps 1-2 parallel, step 3 waits for BOTH and includes conditional logic, steps 4-5 sequential
   
   NOTE: Steps 2, 3, 4 execute in PARALLEL automatically (no `$id` dependencies!)
   NOTE: Step 5 waits for 2, 3, 4 to complete (depends on ${{2}}, ${{3}}, ${{4}})
@@ -652,12 +889,14 @@ instruction_template: |-
   User: Analyze customer feedback and categorize by sentiment
   init_plan:
   1. Fetch customer feedback from database <agent_with_tools>
-  2. Analyze sentiment for each feedback <agent_only>
-  3. Categorize by sentiment (positive/negative/neutral) <agent_only>
-  4. Generate summary report <agent_only>
+  2. Analyze sentiment for each feedback from $1 <agent_only>
+  3. Categorize by sentiment from $2 <agent_only>
+  4. Generate summary report from $3 <agent_only>
   plan:
   1. Fetch customer feedback and analyze sentiment
   2. Categorize by sentiment and generate summary report
+  
+  Control Dependencies: [1: [], 2: [1], 3: [2], 4: [3]] (sequential chain)
   
   [Example 5: Complex Workflow - Mixed Parallel and Sequential]
   User: Collect customer preferences, search multiple product catalogs, analyze best options, get approval, and create order
@@ -666,30 +905,32 @@ instruction_template: |-
   2. Search Vendor A catalog <agent_with_tools>
   3. Search Vendor B catalog <agent_with_tools>
   4. Search Vendor C catalog <agent_with_tools>
-  5. Analyze results from ${{2}}, ${{3}}, ${{4}} and rank by value (price + reviews) <agent_only>
-  6. Get user approval for top recommendation from analysis $5 <hitl>
-  7. Create purchase order for approved item $6 <agent_with_tools>
-  8. Send order confirmation email for order $7 <agent_with_tools>
+  5. Analyze results from $2, $3, and $4 <agent_only>
+  6. Get user approval for top recommendation from $5 <hitl>
+  7. Create purchase order from $6 <agent_with_tools>
+  8. Send order confirmation email from $7 <agent_with_tools>
   plan:
   1. Collect preferences and search all vendor catalogs
   2. Analyze results and get user approval
   3. Create order and send confirmation email
   
-  NOTE: Steps 2, 3, 4 execute in PARALLEL (no dependencies!)
-  NOTE: Step 5 waits for all searches (depends on ${{2}}, ${{3}}, ${{4}})
-  NOTE: Steps 6, 7, 8 execute SEQUENTIALLY (each depends on previous)
+  Control Dependencies: [1: [], 2: [], 3: [], 4: [], 5: [2,3,4], 6: [5], 7: [6], 8: [7]]
+  NOTE: Steps 2-4 execute in PARALLEL (no control dependencies)
+  NOTE: Step 5 waits for all searches (fan-in from 2,3,4)
+  NOTE: Steps 6-8 execute SEQUENTIALLY (each depends on previous)
   
   [Example 6: Nested Loops (Advanced - Rare Pattern)]
   User: For each department, process each employee's quarterly review
   init_plan:
   1. Fetch all departments from HR system <agent_with_tools>
   2. For each department in $1, get employees and process reviews <loop>
-  3. Create organization-wide report from all $2 results <agent_only>
-  4. Get executive approval for $3 report <hitl>
+  3. Create organization-wide report from $2 <agent_only>
+  4. Get executive approval from $3 <hitl>
   plan:
   1. Fetch organization and process reviews for each department/employee
   2. Create organization report and get executive approval
   
+  Control Dependencies: [1: [], 2: [1], 3: [2], 4: [3]] (sequential)
   KEY: Nested loops are RARE - most workflows use single loop or parallel patterns.
   Loop body at step 2 handles fetching employees AND processing each one internally.
   

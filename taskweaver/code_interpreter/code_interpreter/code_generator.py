@@ -608,41 +608,106 @@ class CodeGenerator(Role):
                 example_context = ""
                 yaml_examples = ""
                 
-                # ✅ Build step guidance: Map init_plan steps to node types
+                # ✅ Build step guidance: Map init_plan steps to node types AND extract control dependencies
                 step_guidance = ""
                 self.logger.info(f"[STEP_GUIDANCE] Building step guidance, init_plan length: {len(init_plan_with_markers)}")
                 if init_plan_with_markers:
                     import re
                     step_hints = []
+                    
                     for line in init_plan_with_markers.split('\n'):
                         # Match "1. Description <dependency>" or "   2.1. Description <dependency>"
                         match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+([^<]+)(?:<([^>]+)>)?', line)
                         if match:
                             step_num = match.group(1)
                             step_desc = match.group(2).strip()
-                            dependency = match.group(3).strip() if match.group(3) else ""
+                            node_type_marker = match.group(3).strip() if match.group(3) else ""
                             
-                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, dependency: {dependency}")
+                            # 🎯 UNIVERSAL DEPENDENCY EXTRACTION (works for ANY workflow pattern)
+                            # Extract control dependencies from 'after $X' clause
+                            # Extract data dependencies from 'from $X' or 'in $X' clause (informational, for validation)
                             
-                            # Map specific dependency markers to node types
-                            if dependency == "form":
-                                hint = f"Step {step_num}: type='form' with fields (NO tool_id)"
+                            # Pattern: Find ALL $X references after "after" keyword
+                            # Handles: "after $1", "after $2 and $3", "after $1, $2, and $3", "after $1, $2, $3, $4"
+                            after_deps = []
+                            if 'after' in step_desc:
+                                # Extract everything after the "after" keyword, then find all $X patterns
+                                after_clause = step_desc.split('after', 1)[1] if 'after' in step_desc else ""
+                                after_matches = re.findall(r'\$(\d+)', after_clause)
+                                if after_matches:
+                                    after_deps = [int(d) for d in after_matches]
+                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'after' control deps: {after_deps}")
+                            
+                            # Pattern: Find ALL $X references after "from" keyword
+                            # Handles: "from $1", "from $2 and $3", "from $1, $2, and $3", "from $1, $2, $3, and $4"
+                            from_deps = []
+                            if 'from' in step_desc:
+                                # Extract everything after the "from" keyword (but before "after" if present)
+                                from_clause = step_desc.split('from', 1)[1]
+                                if 'after' in from_clause:
+                                    from_clause = from_clause.split('after', 1)[0]  # Stop at "after"
+                                from_matches = re.findall(r'\$(\d+)', from_clause)
+                                if from_matches:
+                                    from_deps = [int(d) for d in from_matches]
+                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'from' data deps: {from_deps}")
+                            
+                            # Pattern: Find ALL $X references after "in" keyword (for loops)
+                            # Handles: "in $1", "For each item in $1", "over $1", "Loop over items in $2"
+                            # Uses precise regex to avoid false matches like "included", "within", "in Gmail"
+                            in_deps = []
+                            if not from_deps:  # Only check 'in'/'over' if 'from' wasn't found
+                                # Look for patterns like "in $X", "over $X" with word boundaries
+                                # This avoids matching "included in $1" or "within $1"
+                                in_pattern = r'\b(?:in|over)\s+\$(\d+)'
+                                in_matches = re.findall(in_pattern, step_desc)
+                                if in_matches:
+                                    in_deps = [int(d) for d in in_matches]
+                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop): {in_deps}")
+                                # Also check for comma-separated items: "in $1, $2, and $3"
+                                elif re.search(r'\b(?:in|over)\s+\$\d+', step_desc):
+                                    # Extract all $X after the first "in/over $X" match
+                                    match = re.search(r'\b(?:in|over)\s+(.+?)(?:\s+(?:after|<)|$)', step_desc)
+                                    if match:
+                                        in_clause = match.group(1)
+                                        in_matches = re.findall(r'\$(\d+)', in_clause)
+                                        if in_matches:
+                                            in_deps = [int(d) for d in in_matches]
+                                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop, multi): {in_deps}")
+                            
+                            # 🎯 CONTROL DEPENDENCY LOGIC (UNIVERSAL):
+                            # 1. If 'after' clause present → Use those for control deps
+                            # 2. Else if 'from' clause present → Use 'from' as control deps (shorthand)
+                            # 3. Else if 'in/over' clause present → Use 'in/over' as control deps (for loops)
+                            # 4. Else → No control deps (independent/parallel)
+                            control_deps = after_deps if after_deps else (from_deps if from_deps else in_deps)
+                            
+                            deps_hint = ""
+                            if control_deps:
+                                deps_hint = f", dependencies={control_deps}"
+                            else:
+                                deps_hint = f", dependencies=[] (independent)"
+                            
+                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, type: {node_type_marker}{deps_hint}")
+                            
+                            # Map specific node type markers to hints
+                            if node_type_marker == "form":
+                                hint = f"Step {step_num}: type='form' with fields{deps_hint}"
                                 step_hints.append(hint)
                                 self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif dependency == "hitl":
-                                hint = f"Step {step_num}: type='hitl' for approval/review (NO tool_id)"
+                            elif node_type_marker == "hitl":
+                                hint = f"Step {step_num}: type='hitl' for approval/review{deps_hint}"
                                 step_hints.append(hint)
                                 self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif dependency == "agent_with_tools":
-                                hint = f"Step {step_num}: type='agent_with_tools' WITH tool_id from available tools"
+                            elif node_type_marker == "agent_with_tools":
+                                hint = f"Step {step_num}: type='agent_with_tools' WITH tool_id{deps_hint}"
                                 step_hints.append(hint)
                                 self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif dependency == "agent_only":
-                                hint = f"Step {step_num}: type='agent_only' for analysis/processing (NO tool_id)"
+                            elif node_type_marker == "agent_only":
+                                hint = f"Step {step_num}: type='agent_only' for analysis{deps_hint}"
                                 step_hints.append(hint)
                                 self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                            elif dependency == "loop":
-                                hint = f"Step {step_num}: type='loop' with items and loop_node_id"
+                            elif node_type_marker == "loop":
+                                hint = f"Step {step_num}: type='loop' with items{deps_hint}"
                                 step_hints.append(hint)
                                 self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
                     
@@ -669,23 +734,47 @@ class CodeGenerator(Role):
                             "   • ${{loop_item}} - Current iteration item\n"
                             "   • Static values - Use directly without brackets\n"
                             "   NEVER: ${{bare_name}}, ${{user.*}}, ${{context.*}}\n"
-                            "4. Node types: agent_with_tools (REQUIRES tool_id), agent_only, form, hitl, loop\n\n"
-                            "**DEPENDENCIES FIELD (MANDATORY FOR ALL NODES):**\n"
-                            "⚠️ EVERY node MUST have a 'dependencies' field with step numbers (1-based):\n"
-                            "   • First/independent nodes: dependencies=[]\n"
-                            "   • Sequential nodes: dependencies=[step_number] (e.g., dependencies=[1])\n"
-                            "   • Nodes needing multiple inputs: dependencies=[1,2]\n"
-                            "   • Parallel nodes: Same dependencies = parallel execution\n"
-                            "Examples:\n"
-                            "   Node 1 (first): dependencies=[]\n"
-                            "   Node 2 (needs Node 1): dependencies=[1]\n"
-                            "   Node 3 (needs Nodes 1 & 2): dependencies=[1,2]\n"
-                            "   Nodes 2 & 3 (both need Node 1, run in parallel): both have dependencies=[1]\n\n"
-                            "**DATA FLOW IN PARAMS:**\n"
+                            "4. Node types: agent_with_tools (REQUIRES tool_id), agent_only, form, hitl, loop\n"
+                            "5. MANDATORY: Every node MUST have a 'description' field with clear, user-friendly text\n"
+                            "   • Take the step text from the plan and make it user-friendly\n"
+                            "   • Remove markers: <agent_with_tools>, <loop>, etc.\n"
+                            "   • Remove technical references: Replace 'from $1' with the actual action\n"
+                            "   • Example: Plan '1. Fetch 5 Jira tickets' → description='Fetch 5 Jira tickets'\n"
+                            "   • Example: Plan '2. For each ticket in $1' → description='For each ticket, add comment'\n"
+                            "   • Example: Plan '2.1. Add comment' → description='Add comment to ticket'\n\n"
+                            "**DUAL DEPENDENCY SYSTEM (UNIVERSAL - Works for ANY Workflow):**\n"
+                            "The plan uses TWO types of dependencies:\n"
+                            "   • 'from $X' = DATA dependency (which data this step consumes)\n"
+                            "   • 'after $Y' = CONTROL dependency (which steps must complete first)\n\n"
+                            "**DEPENDENCIES FIELD EXTRACTION (PATTERN-AGNOSTIC):**\n"
+                            "⚠️ EVERY node MUST have a 'dependencies' field with CONTROL dependencies (1-based step numbers):\n\n"
+                            "RULE 1: If step says 'after $X' → dependencies=[X] (explicit control)\n"
+                            "RULE 2: If step says 'after $X and $Y' → dependencies=[X, Y] (multiple control)\n"
+                            "RULE 3: If step says 'from $X after $Y' → dependencies=[Y] (control ≠ data)\n"
+                            "RULE 4: If step says 'from $X' (no 'after') → dependencies=[X] (shorthand: control = data)\n"
+                            "RULE 5: If step has NO 'from' or 'after' → dependencies=[] (independent/parallel)\n\n"
+                            "**UNIVERSAL EXAMPLES (Works for ANY scenario):**\n"
+                            "   Plan: '1. Fetch data' → dependencies=[] (independent)\n"
+                            "   Plan: '2. Process from $1' → dependencies=[1] (shorthand)\n"
+                            "   Plan: '3. Analyze from $1 and $2' → dependencies=[1, 2] (multiple data = multiple control)\n"
+                            "   Plan: '4. Send from $1 after $3' → dependencies=[3] (control ≠ data!)\n"
+                            "   Plan: '5. Save after $2 and $4' → dependencies=[2, 4] (explicit control, no data ref)\n"
+                            "   Plan: '6. Loop from $5' → dependencies=[5] (shorthand)\n\n"
+                            "**PARALLEL EXECUTION (Automatic via dependencies):**\n"
+                            "   • Same dependencies = parallel execution\n"
+                            "   • Example: Steps 2&3 both have dependencies=[1] → Run in parallel!\n"
+                            "   • Example: Steps 5,6,7 all have dependencies=[4] → All run in parallel!\n\n"
+                            "**DATA FLOW IN PARAMS (Separate from control):**\n"
                             "Use ${{from_step:node_id.field}} to reference outputs from previous nodes:\n"
                             "   • params={{'input_data': '${{from_step:node1.output}}'}}\n"
                             "   • params={{'content': '${{from_step:previous_step.result}}'}}\n"
                             "   • params={{'items': '${{from_step:fetch_data.items}}'}}\n\n"
+                            "**KEY INSIGHT:**\n"
+                            "Control dependencies (dependencies field) define WHEN to execute.\n"
+                            "Data flow (from_step placeholders in params) define WHAT data to use.\n"
+                            "These can be DIFFERENT! Example: 'Send email from $1 after $5' means:\n"
+                            "   dependencies=[5] (wait for step 5 approval)\n"
+                            "   params uses ${{from_step:step1.form_data}} (use data from step 1)\n\n"
                             "**EDGES:**\n"
                             "⚠️ DO NOT generate 'edges' field - automatically created from dependencies\n\n"
                             f"{example_context}\n"
