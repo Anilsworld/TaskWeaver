@@ -715,6 +715,9 @@ class CodeGenerator(Role):
                         num_steps = len(step_hints)
                         step_guidance = f"\n\n**GENERATE ALL {num_steps} NODES:**\n" + "\n".join(f"- {h}" for h in step_hints)
                         step_guidance += f"\n\n⚠️ Generate a node for EVERY step above (ALL {num_steps} nodes required)!"
+                        step_guidance += f"\n\n🚨 CRITICAL: Generate EXACTLY {num_steps} nodes - NO MORE, NO LESS!"
+                        step_guidance += f"\n   Do NOT expand or add extra nodes beyond the {num_steps} steps listed above!"
+                        step_guidance += f"\n   Each step in the plan = EXACTLY 1 node in the output!"
                         self.logger.info(f"[STEP_GUIDANCE] Generated {len(step_hints)} step hints")
                     else:
                         self.logger.warning(f"[STEP_GUIDANCE] ⚠️ No step hints generated!")
@@ -959,6 +962,31 @@ class CodeGenerator(Role):
                     # Debug: Log actual workflow JSON to see placeholder formats
                     # json is already imported at top of file
                     self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
+                    
+                    # ✅ VALIDATE: Node count must match init_plan structure
+                    if init_plan_with_markers and len(step_hints) > 0:
+                        actual_node_count = len(workflow_json.get('nodes', []))
+                        expected_node_count = len(step_hints)
+                        
+                        if actual_node_count != expected_node_count:
+                            error_msg = (
+                                f"🚨 NODE COUNT MISMATCH!\n"
+                                f"   Expected: {expected_node_count} nodes (from init_plan)\n"
+                                f"   Generated: {actual_node_count} nodes\n"
+                                f"   Difference: {actual_node_count - expected_node_count:+d}\n\n"
+                                f"   The LLM must generate EXACTLY {expected_node_count} nodes - no more, no less!\n"
+                                f"   Each step in init_plan = 1 node in output.\n\n"
+                                f"   Expected steps:\n"
+                                + "\n".join(f"      - {h}" for h in step_hints)
+                            )
+                            self.logger.error(f"[NODE_COUNT_VALIDATION] {error_msg}")
+                            
+                            # Return error for retry
+                            post_proxy.update_message(
+                                error_msg + "\n\n⚠️ Please regenerate with EXACTLY the right number of nodes."
+                            )
+                            post_proxy.update_send_to("CodeInterpreter")
+                            return post_proxy.end()
                     
                     # ⚡ PHASE 3: AUTO-CORRECTION (Forms + HITL + Invalid Params)
                     # Run BEFORE validation so corrections can fix issues
