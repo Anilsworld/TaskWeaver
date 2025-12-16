@@ -764,17 +764,23 @@ class CodeGenerator(Role):
                             "   • Same dependencies = parallel execution\n"
                             "   • Example: Steps 2&3 both have dependencies=[1] → Run in parallel!\n"
                             "   • Example: Steps 5,6,7 all have dependencies=[4] → All run in parallel!\n\n"
-                            "**DATA FLOW IN PARAMS (Separate from control):**\n"
-                            "Use ${{from_step:node_id.field}} to reference outputs from previous nodes:\n"
-                            "   • params={{'input_data': '${{from_step:node1.output}}'}}\n"
-                            "   • params={{'content': '${{from_step:previous_step.result}}'}}\n"
-                            "   • params={{'items': '${{from_step:fetch_data.items}}'}}\n\n"
+                            "**DATA FLOW (LangGraph-Native):**\n"
+                            "✅ Use actual state field names with optional path traversal:\n\n"
+                            "**SIMPLE (auto-extraction):**\n"
+                            "   • loop_over='step_1_output'  # Auto-extracts array from response\n"
+                            "   • loop_over='node_2'  # Auto-finds 'messages', 'data', 'items', etc.\n\n"
+                            "**EXPLICIT (nested path):**\n"
+                            "   • loop_over='node_1.messages'  # Gmail API: {messages: [...]}\n"
+                            "   • loop_over='step_2_output.data'  # REST API: {data: [...]}\n"
+                            "   • loop_over='node_3.items'  # Generic: {items: [...]}\n\n"
+                            "**LOOP BODY ACCESS:**\n"
+                            "   • '${{{{loop_item}}}}' - current item in iteration\n\n"
                             "**KEY INSIGHT:**\n"
                             "Control dependencies (dependencies field) define WHEN to execute.\n"
-                            "Data flow (from_step placeholders in params) define WHAT data to use.\n"
+                            "Data references (step_N_output) define WHAT data to use.\n"
                             "These can be DIFFERENT! Example: 'Send email from $1 after $5' means:\n"
                             "   dependencies=[5] (wait for step 5 approval)\n"
-                            "   params uses ${{from_step:step1.form_data}} (use data from step 1)\n\n"
+                            "   params uses step_1_output (use data from step 1)\n\n"
                             "**EDGES:**\n"
                             "⚠️ DO NOT generate 'edges' field - automatically created from dependencies\n\n"
                             f"{example_context}\n"
@@ -898,13 +904,24 @@ class CodeGenerator(Role):
                                         )
                                         continue
                                     
-                                    # Valid dependency - create edge
+                                    source_node_id = step_to_node[dep_idx]
+                                    
+                                    # ✅ Determine edge type: NESTED for loop→body, SEQUENTIAL otherwise
+                                    edge_type = 'sequential'
+                                    source_node = next((n for n in workflow_json['nodes'] if n['id'] == source_node_id), None)
+                                    if source_node and source_node.get('type') == 'loop':
+                                        # Check if target is in loop body
+                                        loop_body = source_node.get('loop_body', [])
+                                        if node_id in loop_body:
+                                            edge_type = 'nested'
+                                    
+                                    # Valid dependency - create edge with correct type
                                     edges.append({
-                                        'type': 'sequential',
-                                        'from': step_to_node[dep_idx],
+                                        'type': edge_type,
+                                        'from': source_node_id,
                                         'to': node_id
                                     })
-                                    self.logger.info(f"[EDGE_GEN] Created edge: {step_to_node[dep_idx]} → {node_id}")
+                                    self.logger.info(f"[EDGE_GEN] Created edge: {source_node_id} → {node_id} (type={edge_type})")
                             
                             # FAIL FAST if validation errors found
                             if validation_errors:

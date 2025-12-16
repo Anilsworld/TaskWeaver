@@ -733,15 +733,24 @@ class WorkflowSchemaBuilder:
                 "2. For each item, executes child nodes in loop_body\n"
                 "3. Results auto-aggregated and available via '${{loop_id.results}}'\n"
                 "\n"
-                "EXAMPLE:\n"
+                "✅ LANGGRAPH-NATIVE EXAMPLES:\n\n"
+                "**Simple (auto-extraction):**\n"
                 "{\n"
-                "  'id': 'fetch_loop',\n"
+                "  'id': 'process_loop',\n"
                 "  'type': 'loop',\n"
-                "  'loop_over': '${{platforms.items}}',  # Array to iterate\n"
-                "  'loop_body': ['fetch_message'],        # Child node IDs\n"
-                "  'exit_condition': 'optional_early_exit'\n"
-                "}\n"
-                "Child node uses '${{loop_item}}' to access current item."
+                "  'loop_over': 'step_1_output',  # Auto-extracts array from response\n"
+                "  'loop_body': ['process_item'],\n"
+                "  'dependencies': [1]\n"
+                "}\n\n"
+                "**Explicit path (nested data):**\n"
+                "{\n"
+                "  'id': 'email_loop',\n"
+                "  'type': 'loop',\n"
+                "  'loop_over': 'node_1.messages',  # Direct path to Gmail messages\n"
+                "  'loop_body': ['draft_reply'],\n"
+                "  'dependencies': [1]\n"
+                "}\n\n"
+                "Loop body accesses current item via '${{loop_item}}'."
             ),
             "properties": {
                 "id": {"type": "string"},
@@ -749,10 +758,16 @@ class WorkflowSchemaBuilder:
                 "loop_over": {
                     "type": "string",
                     "description": (
-                        "Array to iterate over. Can be:\n"
-                        "- Direct reference: '${{node_id.field}}' (e.g., '${{platforms.items}}')\n"
-                        "- Static array: ['item1', 'item2', 'item3']\n"
-                        "- Range: 'range(10)' for numeric iteration"
+                        "✅ CRITICAL - Specify the array to iterate over (LangGraph-native):\n\n"
+                        "**SIMPLE (recommended):**\n"
+                        "- 'step_N_output' (e.g., 'step_1_output') - auto-extracts array from response\n"
+                        "- 'node_N' (e.g., 'node_1') - auto-extracts array from response\n\n"
+                        "**EXPLICIT (for nested data):**\n"
+                        "- 'node_1.messages' - for Gmail/Slack messages\n"
+                        "- 'step_2_output.data' - for API responses with data wrapper\n"
+                        "- 'node_3.items' - for lists nested in 'items' field\n\n"
+                        "⚠️ Use step/node numbers, NOT node IDs!\n"
+                        "✅ If dependencies=[1], use 'step_1_output' or 'node_1.messages'"
                     )
                 },
                 "loop_body": {

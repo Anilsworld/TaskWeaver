@@ -293,36 +293,48 @@ content: |-
     ```python
     WORKFLOW = {{
       "nodes": [
-        # Define list to iterate over
-        {{"id": "platforms", "type": "agent_only", "params": {{"items": ["gmail", "outlook", "instagram", "facebook"]}}}},
+        # Step 1: Fetch platforms list
+        {{"id": "platforms", "type": "agent_only", "dependencies": [], 
+         "description": "Get list of platforms", 
+         "params": {{"items": ["gmail", "outlook", "instagram", "facebook"]}}}},
         
-        # Loop node with ONE nested node (not 4!)
-        {{"id": "fetch_loop", "type": "loop", "loop_over": "${{{{from_step:platforms.items}}}}",
-         "nodes": [
-           {{"id": "fetch_message", "type": "agent_with_tools", "tool_id": "FETCH", 
-            "params": {{"platform": "${{{{loop_item}}}}"}}}}  # ✅ ONE node executed 4x!
-         ]}},
+        # Step 2: Loop node - ONE node executed 4x (not 4 separate nodes!)
+        {{"id": "fetch_loop", "type": "loop", 
+         "loop_over": "step_1_output",  # ✅ LangGraph-native: actual state field!
+         "loop_body": ["fetch_message"],
+         "dependencies": [1],  # Wait for step 1
+         "description": "For each platform, fetch messages"}},
          
-        # Aggregate results
-        {{"id": "prepare_drafts", "type": "agent_only", 
-         "params": {{"all_messages": "${{{{from_loop:fetch_loop.results}}}}"}},
-         "depends_on": ["fetch_loop"]}}
+        # Step 2.1: Child node (executed once per iteration)
+        {{"id": "fetch_message", "type": "agent_with_tools", "tool_id": "FETCH",
+         "dependencies": [],  # Independent within loop
+         "description": "Fetch messages from platform",
+         "params": {{"platform": "${{{{loop_item}}}}"}}}}  # Current iteration item
       ],
-      "sequential_edges": [("platforms", "fetch_loop"), ("fetch_loop", "prepare_drafts")]
+      "edges": [
+        {{"from": "platforms", "to": "fetch_loop", "type": "sequential"}},
+        {{"from": "fetch_loop", "to": "fetch_message", "type": "nested"}}
+      ]
     }}
     # ✅ 1500 tokens (loop) vs 4800 tokens (4 nodes) = 68% savings!
     ```
     
-    **🚨 CRITICAL SYNTAX RULE - ALL PLACEHOLDERS USE DOUBLE BRACES:**
+    **🚨 CRITICAL - LangGraph-Native Loop Syntax:**
     ```python
-    # ✅ CORRECT (double braces):
-    "loop_over": "${{{{from_step:platforms.items}}}}"
-    "params": {{"platform": "${{{{loop_item}}}}"}}
-    "params": {{"all_messages": "${{{{from_loop:fetch_loop.results}}}}"}}
+    # ✅ SIMPLE (auto-extracts array from response):
+    "loop_over": "step_1_output"  # Auto-finds 'messages', 'data', 'items', etc.
+    "loop_over": "node_2"         # Auto-extracts array field
     
-    # ❌ WRONG (single braces):
-    "loop_over": "${{from_step:platforms.items}}"  # Missing double braces!
-    "params": {{"platform": "${{loop_item}}"}}      # Missing double braces!
+    # ✅ EXPLICIT (path to nested array):
+    "loop_over": "node_1.messages"      # Gmail: {messages: [...]}
+    "loop_over": "step_2_output.data"   # API: {data: [...]}
+    "loop_over": "node_3.items"         # List: {items: [...]}
+    
+    # ✅ ACCESS current item in loop body:
+    "params": {{"email": "${{{{loop_item}}}}"}}  # Current iteration item
+    
+    # ❌ WRONG (don't use node IDs or symbolic refs):
+    "loop_over": "${{{{fetch_emails.output}}}}"  # Use step numbers!
     ```
     
     **THE KEY (LangGraph Send API):**
@@ -452,11 +464,15 @@ content: |-
       
       **Loop with Processing:**
       nodes: [
-        {{"id": "get_list", ...}},
-        {{"id": "process_loop", "type": "loop", "loop_over": "${{from_step:get_list.items}}", "loop_body": [...]}},
-        {{"id": "final_summary", "description": "Summarize ${{from_loop:process_loop.results}}", ...}}
+        {{"id": "get_list", "dependencies": [], ...}},
+        {{"id": "process_loop", "type": "loop", "loop_over": "step_1_output", "loop_body": [...], "dependencies": [1]}},
+        {{"id": "final_summary", "dependencies": [2], ...}}
       ]
-      edges: []  # Auto-inferred: get_list → process_loop → final_summary
+      edges: [
+        {{"from": "get_list", "to": "process_loop", "type": "sequential"}},
+        {{"from": "process_loop", "to": "...", "type": "nested"}},
+        {{"from": "process_loop", "to": "final_summary", "type": "sequential"}}
+      ]
 
     ## On {ROLE_NAME}'s response format:
     - The response is a JSON object with the following format:
