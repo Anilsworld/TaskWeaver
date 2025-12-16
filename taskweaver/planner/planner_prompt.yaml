@@ -132,16 +132,29 @@ instruction_template: |-
 
   ## Loop Rules (STRICT)
   - Use `<loop>` ONLY for dynamic collections ("all", "each", "every")
-  - Loops MUST specify the source collection (`from $X`)
-  - Loops MUST contain sub-steps
+  - Loops MUST specify the source collection using `from $X` or `over $X`
+  - Loops MUST contain sub-steps with dependencies
   - Fixed named items → separate parallel steps (NO loop)
   - For loop structures ("for each X do Y"), the repeated action (Y) counts as ONE step;
     the loop handles iteration and does NOT increase action count.
 
-  ### Loop Format
-  N. For each item in $X, perform actions <loop>
-     N.1. Action description <node_type>
-     N.2. Action description <node_type>
+  ### Loop Format (WITH DEPENDENCIES - MANDATORY)
+  N. Fetch collection data <agent_with_tools>
+  N+1. For each item, perform actions <loop> from $N
+     N+1.1. Process item <node_type> from $N+1
+     N+1.2. Send result <node_type> from $N+1, $N+1.1
+  
+  Examples:
+  1. Search Jira tickets <agent_with_tools>
+  2. For each ticket, update status <loop> from $1
+     2.1. Analyze priority <agent_only> from $2
+     2.2. Update Jira ticket <agent_with_tools> from $2, $2.1
+  
+  1. Get customer orders <agent_with_tools>
+  2. For each order, process payment <loop> from $1
+     2.1. Validate payment info <agent_only> from $2
+     2.2. Charge credit card <agent_with_tools> from $2, $2.1
+     2.3. Send receipt <agent_with_tools> from $2, $2.2
 
   ## Trigger vs Action (CRITICAL)
   - Schedule / event / webhook = METADATA (NOT a node)
