@@ -79,7 +79,23 @@ class WorkflowDefinition(BaseModel):
     nodes: List[WorkflowNode] = Field(..., min_items=1, description="Workflow nodes")
     edges: Optional[List[Union[tuple, dict]]] = Field(
         default_factory=list,
-        description="Edges connecting workflow nodes"
+        description="Edges connecting workflow nodes (auto-inferred from dependencies)"
+    )
+    # Conditional routing for approvals/retries/loop-backs (Autogen-inspired pattern)
+    conditional_edges: Optional[List[Dict[str, Any]]] = Field(
+        default_factory=list,
+        description=(
+            "Conditional routing for decision-based workflow branching (e.g., approval, retry, error handling). "
+            "Each edge must have: 'source' (decision node ID), 'condition' (expression to evaluate), "
+            "'if_true' (target node if condition is true), 'if_false' (target node if condition is false). "
+            "CRITICAL: Cycles (loop-backs) REQUIRE a condition field to prevent infinite loops. "
+            "Examples:\n"
+            "- Approval branch: {'source': 'approval', 'condition': '${approval.decision} == \"Approve\"', "
+            "'if_true': 'send_email', 'if_false': 'END'}\n"
+            "- Retry loop: {'source': 'approval', 'condition': '${approval.decision} == \"Reject\"', "
+            "'if_true': 'END', 'if_false': 'regenerate_node'} (loops back with condition)\n"
+            "- Multi-target: {'source': 'check', 'if_true': ['action_a', 'action_b'], 'if_false': 'fallback'}"
+        )
     )
     # Legacy fields for backward compatibility
     sequential_edges: Optional[List[Union[tuple, dict]]] = Field(

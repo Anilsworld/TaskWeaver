@@ -293,6 +293,213 @@ class CodeGenerator(Role):
         corrector = get_auto_corrector(logger=self.logger)
         return corrector.auto_correct(workflow_json, user_prompt, init_plan)
 
+    def _convert_retry_loops_to_conditional_edges(
+        self, 
+        workflow_json: dict, 
+        init_plan: str
+    ) -> dict:
+        """
+        Detect and convert retry patterns to conditional_edges (Autogen pattern).
+        
+        UNIVERSAL DETECTION: Works for ANY workflow by detecting:
+        1. Duplicate nodes (same tool_id appearing multiple times)
+        2. Retry keywords in node descriptions ("retry", "regenerate", "if rejected")
+        3. HITL/decision nodes between duplicates
+        4. Loop nodes with retry intent
+        
+        Converts them to conditional_edges with loop-back to existing nodes.
+        
+        Args:
+            workflow_json: Workflow dict from LLM
+            init_plan: Original plan text to extract retry intent
+            
+        Returns:
+            Modified workflow_json with conditional_edges instead of duplicates
+        """
+        nodes = workflow_json.get('nodes', [])
+        retry_keywords = ['retry', 'regenerate', 'redo', 'if reject', 'if fail', 'loop back']
+        
+        self.logger.info(
+            f"[RETRY_DETECT] 🔍 Starting universal retry detection on {len(nodes)} nodes"
+        )
+        
+        # ========================================================================
+        # PATTERN 1: Loop nodes with retry intent (nested sub-steps)
+        # ========================================================================
+        retry_loop_nodes = []
+        
+        for node in nodes:
+            if node.get('type') == 'loop':
+                node_desc = str(node.get('description', '')).lower()
+                node_id = node.get('id', '')
+                
+                # Check if this loop is actually a retry pattern
+                is_retry = any(keyword in node_desc or keyword in init_plan.lower() for keyword in retry_keywords)
+                
+                loop_body = node.get('loop_body', [])
+                if is_retry and loop_body:
+                    retry_loop_nodes.append((node_id, node, loop_body))
+                    self.logger.info(
+                        f"[RETRY_DETECT] 🔍 Pattern 1: Loop node {node_id} with "
+                        f"{len(loop_body)} child nodes (retry keywords found)"
+                    )
+        
+        # ========================================================================
+        # PATTERN 2: Duplicate tool_id nodes (same tool appearing twice)
+        # ========================================================================
+        duplicate_patterns = []
+        tool_id_map = {}  # tool_id → [(node_id, node, index)]
+        
+        for idx, node in enumerate(nodes):
+            tool_id = node.get('tool_id')
+            if tool_id:  # Only check nodes with tools
+                if tool_id not in tool_id_map:
+                    tool_id_map[tool_id] = []
+                tool_id_map[tool_id].append((node.get('id'), node, idx))
+        
+        # Find duplicate tool_ids (same tool used 2+ times)
+        for tool_id, node_instances in tool_id_map.items():
+            if len(node_instances) >= 2:
+                # Check if later instances mention retry keywords
+                for node_id, node, idx in node_instances[1:]:  # Skip first occurrence
+                    node_desc = str(node.get('description', '')).lower()
+                    is_retry = any(keyword in node_desc for keyword in retry_keywords)
+                    
+                    if is_retry:
+                        # This is a duplicate for retry purposes!
+                        original_node_id = node_instances[0][0]  # First occurrence
+                        duplicate_patterns.append((node_id, node, original_node_id, tool_id))
+                        self.logger.info(
+                            f"[RETRY_DETECT] 🔍 Pattern 2: Duplicate tool {tool_id} - "
+                            f"{node_id} is retry of {original_node_id}"
+                        )
+        
+        # ========================================================================
+        # CONVERSION: Create conditional_edges and remove duplicates
+        # ========================================================================
+        nodes_to_remove = set()
+        edges_to_remove = set()
+        
+        # Convert Pattern 1 (loop nodes)
+        for loop_id, loop_node, child_node_ids in retry_loop_nodes:
+            loop_deps = loop_node.get('dependencies', [])
+            if not loop_deps:
+                continue
+            
+            decision_node_id = loop_deps[0]  # HITL approval node
+            
+            # Find which existing node to loop back to
+            loop_back_target = None
+            if child_node_ids:
+                first_child_id = child_node_ids[0]
+                first_child = next((n for n in nodes if n.get('id') == first_child_id), None)
+                
+                if first_child and first_child.get('tool_id'):
+                    target_tool_id = first_child.get('tool_id')
+                    for node in nodes:
+                        if (node.get('tool_id') == target_tool_id and 
+                            node.get('id') != first_child_id and
+                            node.get('id') < loop_id):
+                            loop_back_target = node.get('id')
+                            break
+            
+            if loop_back_target:
+                self._add_conditional_edge(
+                    workflow_json, decision_node_id, loop_back_target
+                )
+                nodes_to_remove.add(loop_id)
+                nodes_to_remove.update(child_node_ids)
+                edges_to_remove.update([loop_id] + list(child_node_ids))
+                
+                self.logger.info(
+                    f"[RETRY_CONVERT] ✅ Pattern 1: {decision_node_id} --[if Reject]--> {loop_back_target}"
+                )
+        
+        # Convert Pattern 2 (duplicate tool nodes)
+        for duplicate_id, duplicate_node, original_id, tool_id in duplicate_patterns:
+            # Find the decision node between original and duplicate
+            duplicate_deps = duplicate_node.get('dependencies', [])
+            
+            # Look for HITL node in dependencies
+            decision_node_id = None
+            for dep_id in duplicate_deps:
+                dep_node = next((n for n in nodes if n.get('id') == dep_id), None)
+                if dep_node and dep_node.get('type') == 'hitl':
+                    decision_node_id = dep_id
+                    break
+            
+            if decision_node_id and original_id:
+                self._add_conditional_edge(
+                    workflow_json, decision_node_id, original_id
+                )
+                nodes_to_remove.add(duplicate_id)
+                edges_to_remove.add(duplicate_id)
+                
+                self.logger.info(
+                    f"[RETRY_CONVERT] ✅ Pattern 2: {decision_node_id} --[if Reject]--> {original_id}"
+                )
+                self.logger.info(
+                    f"[RETRY_CONVERT] 🗑️  Removed duplicate: {duplicate_id} (duplicate of {original_id})"
+                )
+        
+        # ========================================================================
+        # CLEANUP: Remove duplicate nodes and their edges
+        # ========================================================================
+        if nodes_to_remove:
+            workflow_json['nodes'] = [
+                n for n in nodes if n.get('id') not in nodes_to_remove
+            ]
+            
+            workflow_json['edges'] = [
+                e for e in workflow_json.get('edges', [])
+                if e.get('from') not in edges_to_remove and e.get('to') not in edges_to_remove
+            ]
+            
+            workflow_json['sequential_edges'] = [
+                e for e in workflow_json.get('sequential_edges', [])
+                if (isinstance(e, tuple) and e[0] not in edges_to_remove and e[1] not in edges_to_remove) or
+                   (isinstance(e, dict) and e.get('from') not in edges_to_remove and e.get('to') not in edges_to_remove)
+            ]
+            
+            self.logger.info(
+                f"[RETRY_CONVERT] 🎉 Removed {len(nodes_to_remove)} duplicate nodes, "
+                f"created {len(workflow_json.get('conditional_edges') or [])} conditional edges"
+            )
+        
+        return workflow_json
+    
+    def _add_conditional_edge(
+        self,
+        workflow_json: dict,
+        decision_node_id: str,
+        loop_back_target: str
+    ):
+        """
+        Add a conditional_edge for retry loop-back (Autogen pattern).
+        
+        Args:
+            workflow_json: Workflow dict to modify
+            decision_node_id: ID of the HITL/decision node
+            loop_back_target: ID of the node to loop back to on rejection
+        """
+        if 'conditional_edges' not in workflow_json or workflow_json['conditional_edges'] is None:
+            workflow_json['conditional_edges'] = []
+        
+        # Universal condition pattern (works for any HITL with 'decision' field)
+        conditional_edge = {
+            "source": decision_node_id,
+            "condition": f"${{{{{decision_node_id}.decision}}}} == 'Reject'",
+            "if_true": "END",  # If Approve (condition is "Reject" == False)
+            "if_false": loop_back_target  # If Reject → loop back! ♻️
+        }
+        
+        workflow_json['conditional_edges'].append(conditional_edge)
+        
+        self.logger.info(
+            f"[RETRY_CONVERT] 📌 Added conditional_edge: "
+            f"{decision_node_id} --[condition: Reject]--> {loop_back_target}"
+        )
+    
     def _convert_workflow_json_to_python(self, workflow_json: dict) -> str:
         """
         Convert workflow JSON from function calling to Python code format.
@@ -602,11 +809,53 @@ class CodeGenerator(Role):
                 self.logger.info(f"[PROMPT_BUILD] Using plan from: {plan_source}, length: {len(plan)} chars")
                 self.logger.info(f"[PROMPT_BUILD] Plan preview (first 300 chars): {plan[:300]}")
                 
+                # ✅ Create user-friendly version of plan (remove technical $1, $2 syntax for display)
+                # This is what the LLM will use for generating descriptions
+                def clean_plan_for_display(plan_text: str) -> str:
+                    """Remove technical dependency syntax from plan for user-friendly descriptions."""
+                    lines = plan_text.split('\n')
+                    cleaned_lines = []
+                    for line in lines:
+                        # Keep the step number and marker, remove technical refs
+                        cleaned = re.sub(r'\s+from\s+\$\d+(?:\.\d+)*(?:\s*(?:,|and)\s*\$\d+(?:\.\d+)*)*', '', line)
+                        cleaned = re.sub(r'\s+after\s+\$\d+(?:\.\d+)*(?:\s*(?:,|and)\s*\$\d+(?:\.\d+)*)*', '', cleaned)
+                        cleaned = re.sub(r'\s+in\s+\$\d+(?:\.\d+)*', '', cleaned)
+                        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                        cleaned_lines.append(cleaned)
+                    return '\n'.join(cleaned_lines)
+                
+                plan_for_display = clean_plan_for_display(plan)
+                self.logger.info(f"[PROMPT_BUILD] Cleaned plan for descriptions (first 300 chars): {plan_for_display[:300]}")
+                
                 # ✅ SKIP EXAMPLES for function calling - schema is already very detailed
                 # Loading 4 examples adds ~10K tokens and causes function calling issues
                 # The JSON schema provides all the information the LLM needs
                 example_context = ""
                 yaml_examples = ""
+                
+                # ✅ Helper function to clean step descriptions
+                def clean_step_description(step_text: str) -> str:
+                    """
+                    Remove technical syntax from step descriptions to make them user-friendly.
+                    - Removes: from $1, from $2, from $1 and $2, from $1, $2
+                    - Removes: after $X, after $Y
+                    - Preserves: Everything else
+                    """
+                    cleaned = step_text
+                    
+                    # Remove "from $X, $Y, ..." patterns (handles various formats)
+                    cleaned = re.sub(r'\s+from\s+\$\d+(?:\.\d+)*(?:\s*(?:,|and)\s*\$\d+(?:\.\d+)*)*', '', cleaned)
+                    
+                    # Remove "after $X" patterns
+                    cleaned = re.sub(r'\s+after\s+\$\d+(?:\.\d+)*(?:\s*(?:,|and)\s*\$\d+(?:\.\d+)*)*', '', cleaned)
+                    
+                    # Remove "in $X" patterns (for loops)
+                    cleaned = re.sub(r'\s+in\s+\$\d+(?:\.\d+)*', '', cleaned)
+                    
+                    # Clean up extra whitespace
+                    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                    
+                    return cleaned
                 
                 # ✅ Build step guidance: Map init_plan steps to node types AND extract control dependencies
                 step_guidance = ""
@@ -729,7 +978,32 @@ class CodeGenerator(Role):
                             step_hints.append(hint)
                             self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
                         elif node_type_marker == "loop":
-                            hint = f"Step {step_num}: type='loop' with items{deps_hint}"
+                            # 🎯 NEW: Extract nested child steps for loop_body
+                            # If this is step 6, find all steps like 6.1, 6.2, 6.3, etc.
+                            child_steps = []
+                            for check_line in init_plan_with_markers.split('\n'):
+                                child_match = re.match(r'^\s*(' + re.escape(step_num) + r'\.(\d+))\.\s+', check_line)
+                                if child_match:
+                                    child_step_num = child_match.group(1)  # e.g., "6.1"
+                                    child_node_id = f"node_{child_step_num.replace('.', '_')}"  # "node_6_1"
+                                    child_steps.append(child_node_id)
+                            
+                            # Build loop_body and loop_over hints
+                            loop_body_hint = ""
+                            loop_over_hint = ""
+                            
+                            if child_steps:
+                                loop_body_list = ", ".join(f"'{nid}'" for nid in child_steps)
+                                loop_body_hint = f", loop_body=[{loop_body_list}]"
+                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found {len(child_steps)} nested steps: {child_steps}")
+                            
+                            # Determine loop_over from dependencies
+                            if control_deps:
+                                # Loop depends on a previous node - use that for loop_over
+                                source_node = f"node_{control_deps[0].replace('.', '_')}"
+                                loop_over_hint = f", loop_over='{source_node}'"
+                            
+                            hint = f"Step {step_num}: type='loop'{loop_over_hint}{loop_body_hint}{deps_hint}"
                             step_hints.append(hint)
                             self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
                     
@@ -740,6 +1014,13 @@ class CodeGenerator(Role):
                         step_guidance += f"\n\n🚨 CRITICAL: Generate EXACTLY {num_steps} nodes - NO MORE, NO LESS!"
                         step_guidance += f"\n   Do NOT expand or add extra nodes beyond the {num_steps} steps listed above!"
                         step_guidance += f"\n   Each step in the plan = EXACTLY 1 node in the output!"
+                        step_guidance += f"\n\n🚨 LOOP NESTING RULE: Nested steps (e.g., 6.1, 6.2) go in BOTH places:"
+                        step_guidance += f"\n   1. As separate nodes in top-level 'nodes' array (e.g., node_6_1, node_6_2)"
+                        step_guidance += f"\n   2. Referenced by parent loop's 'loop_body' field (e.g., loop_body=['node_6_1', 'node_6_2'])"
+                        step_guidance += f"\n   Example: Step 6 <loop> with 6.1, 6.2 → Create node_6 with loop_body=['node_6_1', 'node_6_2'], PLUS node_6_1 and node_6_2 in nodes array"
+                        step_guidance += f"\n\n🚨 DEPENDENCIES RULE: For EACH node, copy the EXACT 'dependencies=[...]' from its step above!"
+                        step_guidance += f"\n   - DO NOT use empty dependencies=[] unless the step explicitly shows dependencies=[]"
+                        step_guidance += f"\n   - The schema default is WRONG - you MUST follow the step guidance exactly!"
                         self.logger.info(f"[STEP_GUIDANCE] Generated {len(step_hints)} step hints")
                     else:
                         self.logger.warning(f"[STEP_GUIDANCE] ⚠️ No step hints generated!")
@@ -798,8 +1079,11 @@ class CodeGenerator(Role):
                             "   • loop_over='node_1.messages'  # Gmail API: {messages: [...]}\n"
                             "   • loop_over='step_2_output.data'  # REST API: {data: [...]}\n"
                             "   • loop_over='node_3.items'  # Generic: {items: [...]}\n\n"
-                            "**LOOP BODY ACCESS:**\n"
-                            "   • '${{{{loop_item}}}}' - current item in iteration\n\n"
+                            "**LOOP BODY (CRITICAL):**\n"
+                            "   • loop_body=['node_6_1', 'node_6_2'] - List of node IDs to execute per iteration\n"
+                            "   • These nodes are defined separately in top-level nodes array\n"
+                            "   • If plan shows '6. Loop <loop>' with sub-steps '6.1', '6.2' → loop_body=['node_6_1', 'node_6_2']\n"
+                            "   • Access current iteration value: '${{{{loop_item}}}}'\n\n"
                             "**KEY INSIGHT:**\n"
                             "Control dependencies (dependencies field) define WHEN to execute.\n"
                             "Data references (step_N_output) define WHAT data to use.\n"
@@ -815,7 +1099,7 @@ class CodeGenerator(Role):
                     {
                         "role": "user",
                         "content": (
-                            f"Plan:\n{plan}\n\n"
+                            f"Plan:\n{plan_for_display}\n\n"
                             f"{composio_actions}{step_guidance}\n\n"
                             f"Generate nodes for: {original_user_query}"
                         )
@@ -875,6 +1159,11 @@ class CodeGenerator(Role):
                     else:
                         self.logger.warning("[CODE_GENERATOR] ⚠️ NO step_guidance to append!")
                     
+                    # Note: Complex dependency analysis is handled by separate services:
+                    # - apps.py_workflows.generation.analysis.dependency_analyzer (schema-based analysis)
+                    # - apps.py_workflows.generation.orchestrator.dependency_resolver (auto-injection)
+                    # Instructor only does simple Pydantic validation (field types, node existence)
+                    
                     workflow_def, instructor_error = intelligent_instructor.generate_with_intelligent_retry(
                         user_request=original_user_query,
                         available_tools=tool_ids,
@@ -898,11 +1187,65 @@ class CodeGenerator(Role):
                     # Convert Pydantic model to dict for remaining checks
                     workflow_json = workflow_def.model_dump()
                     
+                    # ✅ POST-PROCESSING: Clean up technical syntax from descriptions
+                    def clean_description(desc: str) -> str:
+                        """Remove technical $1, $2 syntax from descriptions."""
+                        if not desc:
+                            return desc
+                        cleaned = re.sub(r'\s+from\s+\$\d+(?:\.\d+)*(?:\s*(?:,|and)\s*\$\d+(?:\.\d+)*)*', '', desc)
+                        cleaned = re.sub(r'\s+after\s+\$\d+(?:\.\d+)*(?:\s*(?:,|and)\s*\$\d+(?:\.\d+)*)*', '', cleaned)
+                        cleaned = re.sub(r'\s+in\s+\$\d+(?:\.\d+)*', '', cleaned)
+                        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+                        return cleaned
+                    
+                    for node in workflow_json.get('nodes', []):
+                        if 'description' in node and node['description']:
+                            original = node['description']
+                            cleaned = clean_description(original)
+                            if cleaned != original:
+                                node['description'] = cleaned
+                                self.logger.info(f"[CLEANUP] Cleaned description: '{original}' → '{cleaned}'")
+                    
                     self.logger.info(
                         f"[INSTRUCTOR] ✅ Generated workflow: "
                         f"{len(workflow_json.get('nodes', []))} nodes, "
                         f"{len(workflow_json.get('edges', []))} edges"
                     )
+                    
+                    # 🎯 SCHEMA-BASED DEPENDENCY VALIDATION (Phase 1: Observation Mode)
+                    # Validate using existing AIDependencyAnalyzer to detect optimization opportunities
+                    if session_id and len(workflow_json.get('nodes', [])) > 2:
+                        try:
+                            # Fetch tool schemas from batch cache
+                            from TaskWeaver.project.plugins.composio_action_selector import _BATCH_CACHE
+                            from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
+                            
+                            tool_schemas_for_validation = []
+                            if session_id in _BATCH_CACHE:
+                                for step_query, action_dicts in _BATCH_CACHE[session_id].items():
+                                    tool_schemas_for_validation.extend(action_dicts)
+                                
+                                self.logger.info(
+                                    f"[DEP_VALIDATION] Running schema-based validation with {len(tool_schemas_for_validation)} tools"
+                                )
+                                
+                                # Run validation with tool schemas
+                                is_valid, validated_workflow, errors, validation_metadata = validate_workflow_dict(
+                                    workflow_dict=workflow_json,
+                                    tool_schemas=tool_schemas_for_validation,
+                                    session_id=session_id
+                                )
+                                
+                                # Log validation results (non-blocking)
+                                if validation_metadata and validation_metadata.get('dependency_analysis'):
+                                    dep_analysis = validation_metadata['dependency_analysis']
+                                    if dep_analysis.get('optimization_opportunities'):
+                                        self.logger.info(
+                                            f"[DEP_VALIDATION] Found {len(dep_analysis['optimization_opportunities'])} "
+                                            f"optimization opportunities (see warnings above)"
+                                        )
+                        except Exception as e:
+                            self.logger.debug(f"[DEP_VALIDATION] Validation skipped: {e}")
                     
                     # ⚠️ KEPT FROM ORIGINAL: Edge generation (if edges not already generated)
                     # This is business logic, not validation, so it stays
@@ -1145,6 +1488,30 @@ class CodeGenerator(Role):
                     
                     # ✅ workflow_json now has complete edges from edge generation above
                     self.logger.info(f"[FUNCTION_CALLING] After validation: {len(workflow_json.get('edges', []))} complete edges")
+                    
+                    # 🎯 ATTACH TOOL SCHEMAS TO WORKFLOW (for WorkflowOptimizer)
+                    # This makes tool schemas available across process boundaries
+                    if session_id:
+                        try:
+                            from TaskWeaver.project.plugins.composio_action_selector import _BATCH_CACHE
+                            if session_id in _BATCH_CACHE:
+                                tool_schemas_metadata = []
+                                for step_query, action_dicts in _BATCH_CACHE[session_id].items():
+                                    tool_schemas_metadata.extend(action_dicts)
+                                
+                                # Add as metadata field (will be available in consumer)
+                                workflow_json['_tool_schemas'] = tool_schemas_metadata
+                                self.logger.info(
+                                    f"[TOOL_SCHEMAS] Attached {len(tool_schemas_metadata)} tool schemas to workflow"
+                                )
+                        except Exception as e:
+                            self.logger.debug(f"[TOOL_SCHEMAS] Could not attach schemas: {e}")
+                    
+                    # 🎯 POST-PROCESS: Convert retry loops to conditional_edges (Autogen pattern)
+                    workflow_json = self._convert_retry_loops_to_conditional_edges(
+                        workflow_json, 
+                        init_plan_with_markers
+                    )
                     
                     # Convert to Python code format
                     generated_code = self._convert_workflow_json_to_python(workflow_json)

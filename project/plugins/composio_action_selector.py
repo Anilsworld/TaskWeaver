@@ -828,6 +828,7 @@ def select_composio_actions(
                     
                     for sub_task_result in search_result.sub_task_results:
                         step_index = sub_task_result.index
+                        step_query = sub_task_result.use_case
                         tools = sub_task_result.tools
                         
                         # ✅ Get the FIRST (best-ranked) tool for this step
@@ -847,9 +848,27 @@ def select_composio_actions(
                             }
                             all_action_dicts.append(action_dict)
                             logger.info(f"   [INDEX {step_index}] → {action_dict['action_id']} ({action_dict['app_name']})")
+                            
+                            # 🎯 Cache ALL tools for this step (for dependency validation)
+                            # Store all tools from this sub_task_result, not just the primary one
+                            step_tool_dicts = []
+                            for t in tools:
+                                step_tool_dicts.append({
+                                    'action_id': t.get('tool_id', t.get('action_id', 'UNKNOWN')),
+                                    'action_name': t.get('name', t.get('action_name', '')),
+                                    'app_name': t.get('app_name', ''),
+                                    'app_display_name': t.get('app_display_name', t.get('app_name', '')),
+                                    'description': t.get('description', ''),
+                                    'parameters': t.get('parameters', {}),
+                                    'response': t.get('response', {}),
+                                    'step_index': step_index,
+                                    'execution_order': t.get('execution_order', 0),
+                                })
+                            _BATCH_CACHE[session_id][step_query] = step_tool_dicts
                     
                     # Return best tool per step (1:1 mapping)
                     logger.info(f"✅ [BATCH_API] Returning {len(all_action_dicts)} indexed tools (1 per step)")
+                    logger.info(f"✅ [BATCH_CACHE] Cached {len(_BATCH_CACHE[session_id])} steps for dependency validation")
                     return format_actions_for_prompt(all_action_dicts, len(all_action_dicts))
                 
                 else:

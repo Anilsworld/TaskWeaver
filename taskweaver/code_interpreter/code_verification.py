@@ -374,7 +374,7 @@ def enhanced_syntax_validation(python_code: str, original_error: SyntaxError) ->
                     
                     # Validate structure with Pydantic + WorkflowIR
                     print(f"[CODE_VERIFICATION] 🔍 Calling validate_workflow_dict() with {len(workflow_dict.get('nodes', []))} nodes...")
-                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_dict)
+                    is_valid, workflow_obj, pydantic_errors, validation_metadata = validate_workflow_dict(workflow_dict)
                     print(f"[CODE_VERIFICATION] ✅ validate_workflow_dict() returned: is_valid={is_valid}, errors={len(pydantic_errors)}")
                     
                     if not is_valid:

@@ -43,7 +43,7 @@ instruction_template: |-
   - `<hitl>`: approval, review, authorization, decision
   - `<agent_with_tools>`: external API / service / integration
   - `<agent_only>`: pure AI processing (analysis, drafting, transformation)
-  - `<loop>`: iterate over DYNAMIC / UNKNOWN collections ONLY
+  - `<loop>`: iterate over DYNAMIC / UNKNOWN collections ONLY (NOT for retry/regenerate patterns!)
 
   ### Deterministic Marker Rules
   1. Auth / permissions → NEVER `<form>`
@@ -53,6 +53,7 @@ instruction_template: |-
   5. External call → `<agent_with_tools>`
   6. AI reasoning or transformation → `<agent_only>`
   7. Same operation over unknown quantity → `<loop>`
+  8. **Retry/regenerate if rejected → NO MARKER** (note in plain text, don't create numbered step)
 
   ### Agent Capability Rules (Modern AI Context)
   Modern agents with tools can perform inline operations:
@@ -132,7 +133,38 @@ instruction_template: |-
   
   This rule covers ALL patterns: sequential, parallel, fork-join, conditional, loops, etc.
 
-  ## Loop Rules (STRICT)
+  ## 🔁 Conditional Retry/Loop-Back Pattern (UNIVERSAL - ANY Workflow)
+  
+  **When user says "if [condition], retry/regenerate/redo [action]":**
+  - ❌ This is NOT a `<loop>` (loops = array iteration like "for each item in list")
+  - ✅ This is CONDITIONAL RETRY - add as metadata AFTER numbered steps
+  - ❌ Do NOT create numbered step with sub-steps
+  - ✅ Instead: Add note indicating which step to loop back to on condition
+  
+  **UNIVERSAL Pattern (applies to ANY workflow):**
+  ```
+  N. [Some action] <node_type>
+  N+1. [Another action] from $N <node_type>
+  N+2. [Decision/Approval step] from $N+1 <hitl>
+  N+3. [Final action if approved] from $N+2 <node_type>
+  
+  RETRY_LOGIC: If step N+2 decision is [failure_condition], loop back to step N+X
+  ```
+  
+  **WRONG Pattern (DO NOT DO THIS - specific to avoid!):**
+  ```
+  N. [Action A] <node_type>
+  N+1. [Action B] <node_type>
+  N+2. [Decision] <hitl>
+  N+3. Retry if rejected <loop>     ❌ WRONG - Not a loop!
+     N+3.1. [Action A duplicate]    ❌ CREATES DUPLICATES!
+     N+3.2. [Action B duplicate]    ❌ CREATES DUPLICATES!
+  ```
+  
+  **Why:** CodeInterpreter auto-generates `conditional_edges` from retry metadata.
+  Duplicating steps breaks the workflow - always reference EXISTING steps.
+
+  ## Loop Rules (STRICT - For Array Iteration Only!)
   - Use `<loop>` ONLY for dynamic collections ("all", "each", "every")
   - Loops MUST specify the source collection using `from $X` or `over $X`
   - Loops MUST contain sub-steps with dependencies

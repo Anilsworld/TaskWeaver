@@ -155,7 +155,9 @@ class WorkflowIR:
     
     def _parse_conditional_edges(self):
         """Parse conditional_edges from workflow dict."""
-        for cond_edge in self.raw_dict.get("conditional_edges", []):
+        # Handle both missing key and explicit None value
+        conditional_edges = self.raw_dict.get("conditional_edges") or []
+        for cond_edge in conditional_edges:
             source = cond_edge.get("source")
             if source:
                 self.conditional_branches[source] = {
@@ -297,63 +299,46 @@ class WorkflowIR:
     
     def _validate_dag(self):
         """
-        Validate DAG structure.
+        Validate DAG structure (Autogen-inspired).
         
         Checks:
-        - No cycles (must be acyclic)
+        - Cycles are allowed IF they have conditional edges (exit conditions)
         - No disconnected components (all nodes reachable, excluding nested nodes)
         - Conditional nodes have both branches
+        
+        Following Autogen's DiGraph pattern: Cycles are valid if they contain
+        at least one conditional edge to prevent infinite loops.
         """
-        # Check for cycles
+        # Check for cycles - Autogen pattern: allow cycles with conditional exits
         if not nx.is_directed_acyclic_graph(self.dag):
             cycles = list(nx.simple_cycles(self.dag))
-            raise ValueError(f"Workflow contains cycles: {cycles}")
+            self._validate_cycles_have_conditions(cycles)
         
         # Check for disconnected components (excluding nested nodes)
         if len(self.nodes) > 1:  # Only check if multiple nodes
             # Identify nested nodes (children of loop/parallel nodes)
             nested_node_ids = set()
             
-            # DEBUG: Log raw_dict structure (using INFO so it's visible)
-            logger.info(f"[NESTED_DEBUG] raw_dict has {len(self.raw_dict.get('nodes', []))} nodes")
-            
             for node_dict in self.raw_dict.get("nodes", []):
-                node_id = node_dict.get("id", "unknown")
-                node_type = node_dict.get("type", "unknown")
-                
-                # DEBUG: Show ALL keys in this node
-                logger.info(f"[NESTED_DEBUG] Node '{node_id}' (type={node_type}) has keys: {list(node_dict.keys())}")
-                
-                # Check loop_body in multiple locations
+                # Check loop_body field
                 loop_body = node_dict.get("loop_body", [])
-                if not loop_body:
-                    # Check if loop_body is in metadata (handle None case)
-                    metadata = node_dict.get("metadata") or {}
-                    if isinstance(metadata, dict) and metadata:
-                        logger.info(f"[NESTED_DEBUG] Node '{node_id}' metadata keys: {list(metadata.keys())}")
-                        loop_body = metadata.get("loop_body", [])
-                        if loop_body:
-                            logger.info(f"[NESTED_DEBUG] Found loop_body in metadata: {loop_body}")
-                
                 if loop_body:
-                    logger.info(f"[NESTED_DEBUG] Node '{node_id}' (type={node_type}) has loop_body: {loop_body}")
                     nested_node_ids.update(
                         item for item in loop_body 
                         if isinstance(item, str)
                     )
-                else:
-                    logger.info(f"[NESTED_DEBUG] Node '{node_id}' has NO loop_body anywhere")
-                # Check nodes array
+                
+                # Check nodes array (for parallel groups or nested structures)
                 nested_nodes = node_dict.get("nodes", [])
                 if nested_nodes:
-                    logger.info(f"[NESTED_DEBUG] Node '{node_id}' (type={node_type}) has nodes array: {nested_nodes}")
                     nested_node_ids.update(
                         node.get("id") if isinstance(node, dict) else node 
                         for node in nested_nodes
                         if (isinstance(node, dict) and node.get("id")) or isinstance(node, str)
                     )
             
-            logger.info(f"[NESTED_DEBUG] Found {len(nested_node_ids)} nested nodes: {nested_node_ids}")
+            if nested_node_ids:
+                logger.debug(f"[WORKFLOW_IR] Found {len(nested_node_ids)} nested nodes: {nested_node_ids}")
             
             # Check connectivity only for non-nested nodes
             undirected = self.dag.to_undirected()
@@ -368,13 +353,8 @@ class WorkflowIR:
                 
                 if len(non_nested_components) > 1:
                     logger.warning(
-                        f"Workflow has {len(non_nested_components)} disconnected components "
-                        f"(excluding {len(nested_node_ids)} nested nodes): {non_nested_components}"
-                    )
-                else:
-                    logger.debug(
-                        f"All components are connected when nested nodes are considered "
-                        f"({len(nested_node_ids)} nested nodes in loop/parallel structures)"
+                        f"[WORKFLOW_IR] {len(non_nested_components)} disconnected components "
+                        f"(excluding {len(nested_node_ids)} nested): {non_nested_components}"
                     )
         
         # Check conditional nodes have both branches
@@ -383,6 +363,62 @@ class WorkflowIR:
                 logger.warning(f"Conditional node '{source}' missing branch: if_true={branches.get('if_true')}, if_false={branches.get('if_false')}")
         
         logger.info(f"✅ DAG validation passed: {len(self.nodes)} nodes, {len(self.edges)} edges")
+    
+    def _validate_cycles_have_conditions(self, cycles: List[List[str]]):
+        """
+        Validate that all cycles have at least one conditional edge (Autogen pattern).
+        
+        This prevents infinite loops by requiring an exit condition in every cycle.
+        Follows Autogen's DiGraph.has_cycles_with_exit() approach.
+        
+        Args:
+            cycles: List of cycles detected by NetworkX
+            
+        Raises:
+            ValueError: If any cycle lacks a conditional edge
+        """
+        for cycle in cycles:
+            has_conditional = False
+            
+            # Check each edge in the cycle
+            for i, node_id in enumerate(cycle):
+                next_node_id = cycle[(i + 1) % len(cycle)]
+                
+                # Check if this node has conditional branches
+                if node_id in self.conditional_branches:
+                    branches = self.conditional_branches[node_id]
+                    if_true = branches.get("if_true")
+                    if_false = branches.get("if_false")
+                    
+                    # Collect all targets from conditional branches
+                    targets = []
+                    if isinstance(if_true, list):
+                        targets.extend(if_true)
+                    elif if_true and if_true != "END":
+                        targets.append(if_true)
+                    if isinstance(if_false, list):
+                        targets.extend(if_false)
+                    elif if_false and if_false != "END":
+                        targets.append(if_false)
+                    
+                    # If this conditional edge is part of the cycle, we have an exit condition
+                    if next_node_id in targets and branches.get("condition"):
+                        has_conditional = True
+                        logger.info(
+                            f"[CYCLE_VALIDATION] ✅ Cycle has exit condition: "
+                            f"{' → '.join(cycle + [cycle[0]])} "
+                            f"(conditional edge from '{node_id}' with condition)"
+                        )
+                        break
+            
+            if not has_conditional:
+                cycle_path = ' → '.join(cycle + [cycle[0]])
+                raise ValueError(
+                    f"Cycle detected without exit condition: {cycle_path}. "
+                    f"Add a conditional edge with a 'condition' field to allow dynamic loop termination. "
+                    f"Example: Use conditional_edges with condition='${{node_id.decision}} == \"Approve\"' "
+                    f"to create retry/loop-back patterns."
+                )
     
     def get_execution_order(self) -> List[List[str]]:
         """

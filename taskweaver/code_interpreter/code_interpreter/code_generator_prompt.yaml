@@ -337,9 +337,66 @@ content: |-
     "loop_over": "${{{{fetch_emails.output}}}}"  # Use step numbers!
     ```
     
-    **THE KEY (LangGraph Send API):**
+    ## 🔁 CONDITIONAL EDGES: Decision Branching & Retry (Autogen-Inspired, UNIVERSAL)
+    
+    **WHEN TO USE:**
+    - ANY decision/approval with different paths ("if [condition] do X, else do Y")
+    - ANY retry/loop-back pattern ("if [failure], redo step N")
+    - ANY error handling with conditional routing
+    
+    **CRITICAL DISTINCTION:**
+    - ❌ Array iteration ("for each X in list") → Use `loop` node type with `loop_body`
+    - ✅ Decision branching ("if X then Y else Z") → Use `conditional_edges`
+    - ✅ Retry loop ("if [condition], redo step N") → Use `conditional_edges` with loop-back
+    
+    **UNIVERSAL PATTERN (works for ANY workflow):**
+    ```python
+    WORKFLOW = {{
+      "nodes": [
+        {{"id": "node_N", ...}},  # Some action that might need retry
+        {{"id": "node_M", "dependencies": ["node_N"], ...}},  # Subsequent action(s)
+        {{"id": "node_D", "type": "hitl", "form_id": "decision_form", "fields": [{{"name": "decision", "type": "select", "options": ["Option_A", "Option_B"], "required": True}}], "dependencies": ["node_M"], ...}}  # Decision point
+      ],
+      "conditional_edges": [
+        {{
+          "source": "node_D",  # Decision node ID
+          "condition": "${{{{node_D.decision}}}} == '[failure_value]'",  # Condition to evaluate
+          "if_true": "END",  # Success path (or another node)
+          "if_false": "node_N"  # Failure → loop back to retry! ♻️
+        }}
+      ],
+      "edges": []  # Auto-inferred from dependencies
+    }}
+    ```
+    
+    **CRITICAL RULES (Autogen's DiGraph Pattern):**
+    1. **Cycles REQUIRE conditions**: Loop-back edges MUST have `condition` field (prevents infinite loops)
+    2. **Condition is dynamic**: Runtime evaluates `${{{{node_id.field}}}} == 'value'` at execution time
+    3. **No retry counters**: Condition-based termination (more flexible than max_retries)
+    4. **Multi-target supported**: `"if_true": ["node_a", "node_b"]` branches to multiple nodes
+    5. **Source must be decision node**: Only HITL or conditional logic nodes can be sources
+    
+    **EXAMPLES (Universal - replace with your workflow's node IDs/conditions):**
+    ```python
+    # ✅ Retry loop-back (condition REQUIRED for cycles - Autogen pattern)
+    {{"source": "decision_node", "condition": "${{{{decision_node.status}}}} == '[failure_value]'", 
+      "if_true": "END", "if_false": "target_node"}}  # Loops back with exit condition
+    
+    # ✅ Approval branching (no cycle - forward only)
+    {{"source": "approval_node", "condition": "${{{{approval_node.decision}}}} == '[success_value]'",
+      "if_true": "success_action", "if_false": "failure_action"}}
+    
+    # ✅ Multi-path branching (fan-out from decision)
+    {{"source": "check_node", "condition": "${{{{check_node.result}}}} == '[valid_value]'",
+      "if_true": ["action_a", "action_b", "action_c"], "if_false": "error_handler"}}
+    
+    # ❌ WRONG - Cycle without condition (REJECTED by validation!)
+    {{"source": "approval", "if_false": "some_earlier_node"}}  # Missing condition!
+    ```
+    
+    **THE KEY (LangGraph Send API for loops):**
     - Loop node contains ONE nested node (fetch_message)
-    - Runtime executes it 4x with different ${{{{loop_item}}}} values
+    - Runtime executes it Nx with different ${{{{loop_item}}}} values
     - Results auto-aggregated via ${{{{from_loop:loop_id.field}}}}
     
     **WHEN TO USE SEPARATE INDEPENDENT NODES (Automatic Parallel Execution)**:
