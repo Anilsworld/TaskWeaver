@@ -120,6 +120,7 @@ class EnhancedWorkflowNode(WorkflowNode):
         
         return self
     
+    
     @field_validator('params', mode='before')
     @classmethod
     def ensure_params_populated(cls, v, info):
@@ -256,6 +257,7 @@ class InstructorWorkflowGenerator:
         model: Optional[str] = None,
         temperature: float = 0.0,
         composio_actions_text: Optional[str] = None,
+        tool_schemas: Optional[List[Dict]] = None,
     ) -> tuple[Optional[EnhancedWorkflowDefinition], Optional[str]]:
         """
         Generate a validated workflow IR using Instructor.
@@ -267,6 +269,7 @@ class InstructorWorkflowGenerator:
             model: OpenAI model to use
             temperature: Temperature for generation
             composio_actions_text: Full text of Composio actions + step guidance (appended in code_generator.py)
+            tool_schemas: Full tool schemas for validation context (enables Pydantic validators to run)
         
         Returns:
             Tuple of (workflow_definition, error_message)
@@ -294,11 +297,19 @@ class InstructorWorkflowGenerator:
             )
             logger.info(f"[INSTRUCTOR] Available tools: {len(available_tools)} tools")
             
+            # 🔧 CRITICAL FIX: Pass tool_schemas as validation_context
+            # This makes _tool_schemas available to Pydantic validators during Instructor's validation,
+            # enabling validate_tool_ids() and validate_important_optional_params() to run DURING generation
+            validation_context = {}
+            if tool_schemas:
+                validation_context['_tool_schemas'] = tool_schemas
+                logger.info(f"[INSTRUCTOR] ✅ Passing {len(tool_schemas)} tool schemas as validation context")
+            
             # Use Instructor to generate and validate workflow
             # Instructor automatically:
             # 1. Converts Pydantic model to OpenAI function calling schema
             # 2. Calls the LLM with the schema
-            # 3. Validates the response against the Pydantic model
+            # 3. Validates the response against the Pydantic model (WITH validation_context!)
             # 4. Retries on validation errors with detailed error messages
             workflow = self.client.chat.completions.create(
                 model=model,
@@ -308,6 +319,7 @@ class InstructorWorkflowGenerator:
                     {"role": "user", "content": user_prompt},
                 ],
                 response_model=EnhancedWorkflowDefinition,
+                validation_context=validation_context,  # 🔧 NEW: Enables Pydantic validators
                 max_retries=self.max_retries,
             )
             
@@ -549,23 +561,82 @@ You have access to the following Composio tool IDs:
     
     def _post_process_workflow(self, workflow: EnhancedWorkflowDefinition) -> EnhancedWorkflowDefinition:
         """
-        ✅ SIMPLIFIED POST-PROCESSING (Validation moved to Pydantic!)
+        🎯 DETERMINISTIC POST-PROCESSING (No LLM hallucination possible!)
         
-        Now that Pydantic validators handle most validation DURING generation:
-        - Code execution 'result =' checks → Pydantic @model_validator
-        - Placeholder reference validation → Pydantic @model_validator
-        - App name extraction → Pydantic @model_validator
-        - Generic .response_field checks → Pydantic @model_validator
+        Pydantic validators handle validation DURING generation, but post-processing
+        handles deterministic fixes that don't rely on LLM following instructions:
         
-        Post-processing only handles:
-        1. Generate sequential_edges from depends_on if empty (convenience)
+        1. Infer missing dependencies from ${node_id.field} patterns in params
+        2. Generate sequential_edges from dependencies (convenience)
         
-        This eliminates the never-ending post-processing accumulation problem!
+        This ensures workflows are correct even if LLM ignores dependency instructions!
         """
+        import re
+        import json
+        
         issues_fixed = []
         
-        # Fix 1: Generate sequential_edges from dependencies if empty
-        # This is a convenience fix, not critical validation
+        # ===== FIX 1: DETERMINISTIC DEPENDENCY RECONSTRUCTION =====
+        # Extract dependencies from ${node_id.field} patterns in params
+        # This catches LLM mistakes where it forgets to add dependencies
+        # but correctly references node outputs in template variables
+        template_checks = 0
+        template_fixes = 0
+        
+        for node in workflow.nodes:
+            if not node.params:
+                continue
+            
+            # Convert params to string to search for ${...} patterns
+            try:
+                param_str = json.dumps(node.params)
+            except (TypeError, ValueError):
+                # If params can't be serialized, skip
+                continue
+            
+            # Find all ${node_X.field} or ${node_X_Y.field} references
+            # Handles: ${node_1.result}, ${node_2_3.output}, ${collect_data.field}
+            referenced_nodes = re.findall(r'\$\{(node_\d+(?:_\d+)?|[a-z_]+)\.[a-zA-Z_]+\}', param_str)
+            
+            if referenced_nodes:
+                template_checks += 1
+                logger.info(
+                    f"[POST_PROCESS_DEP] 🔍 node '{node.id}': Found {len(set(referenced_nodes))} template refs: "
+                    f"{list(set(referenced_nodes))}, current deps: {node.dependencies}"
+                )
+            
+            # Add missing dependencies
+            for ref_node in set(referenced_nodes):
+                # Skip if not a valid node ID format
+                if not (ref_node.startswith('node_') or ref_node in [n.id for n in workflow.nodes]):
+                    continue
+                
+                # Skip self-references
+                if ref_node == node.id:
+                    continue
+                
+                # Add if missing
+                if ref_node not in node.dependencies:
+                    node.dependencies.append(ref_node)
+                    template_fixes += 1
+                    issues_fixed.append(f"node '{node.id}': Added missing dependency '{ref_node}' (inferred from params)")
+                    logger.warning(
+                        f"[POST_PROCESS_DEP] 🔧 Auto-fixed: node '{node.id}' depends on '{ref_node}' "
+                        f"(LLM forgot to add dependency but used ${{{ref_node}...}} in params)"
+                    )
+                else:
+                    logger.info(
+                        f"[POST_PROCESS_DEP] ✅ node '{node.id}': Dependency '{ref_node}' already present (LLM got it right)"
+                    )
+        
+        if template_checks > 0:
+            logger.info(
+                f"[POST_PROCESS_DEP] 📊 Template dependency check: {template_checks} nodes with templates, "
+                f"{template_fixes} dependencies auto-added"
+            )
+        
+        # ===== FIX 2: GENERATE EDGES FROM DEPENDENCIES =====
+        # This is a convenience fix - edges are auto-generated from dependencies
         if not workflow.sequential_edges and any(node.dependencies for node in workflow.nodes):
             sequential_edges = []
             for node in workflow.nodes:
@@ -577,7 +648,7 @@ You have access to the following Composio tool IDs:
         
         # Log results
         if issues_fixed:
-            logger.info(f"[POST_PROCESS] Auto-fixed {len(issues_fixed)} convenience issue(s):")
+            logger.info(f"[POST_PROCESS] Auto-fixed {len(issues_fixed)} issue(s):")
             for issue in issues_fixed:
                 logger.info(f"  ✓ {issue}")
         
@@ -619,6 +690,7 @@ class IntelligentRetryWrapper:
         model: Optional[str] = None,
         temperature: float = 0.0,
         composio_actions_text: Optional[str] = None,
+        tool_schemas: Optional[List[Dict]] = None,
         max_retries: int = 3
     ) -> tuple[Optional[EnhancedWorkflowDefinition], Optional[str]]:
         """
@@ -634,6 +706,7 @@ class IntelligentRetryWrapper:
             model: Model name for generation
             temperature: Generation temperature
             composio_actions_text: Full tool descriptions + step guidance (appended in code_generator.py)
+            tool_schemas: Full tool schemas for validation context
             max_retries: Maximum retry attempts
         
         Returns:
@@ -651,6 +724,7 @@ class IntelligentRetryWrapper:
                     plan=plan,
                     model=model,
                     temperature=temperature,
+                    tool_schemas=tool_schemas,  # 🔧 NEW: Pass through to enable validation
                     composio_actions_text=composio_actions_text
                 )
                 

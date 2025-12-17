@@ -752,8 +752,30 @@ def select_composio_actions(
     
     # Check if we have cached results from batch call
     if session_id and session_id in _BATCH_CACHE:
-        # Try fuzzy matching to find this step in cache
-        cached_steps = list(_BATCH_CACHE[session_id].keys())
+        # ✅ DETERMINISTIC: Use step index if available (retry-safe)
+        if structured_steps:
+            # 🔧 CRITICAL FIX: Collect tools for ALL steps, not just the first match!
+            # On retry, structured_steps are passed again - use index-based lookup
+            all_cached_tools = []
+            found_count = 0
+            for step in structured_steps:
+                step_index = step.get('index')
+                cache_key = f"__INDEX_{step_index}__"
+                if cache_key in _BATCH_CACHE[session_id]:
+                    logger.info(f"✅ [BATCH_CACHE] Index-based hit for step {step_index}")
+                    _log_to_debug_file(f"[BATCH_CACHE] Index {step_index} hit (retry-safe)")
+                    step_tools = _BATCH_CACHE[session_id][cache_key]
+                    all_cached_tools.extend(step_tools)
+                    found_count += 1
+            
+            if found_count > 0:
+                logger.info(f"✅ [BATCH_CACHE] Returning {len(all_cached_tools)} tools from {found_count} cached steps")
+                return format_actions_for_prompt(all_cached_tools, len(all_cached_tools))
+            
+            logger.warning(f"⚠️ [BATCH_CACHE] Index-based lookup failed for {len(structured_steps)} steps")
+        
+        # ✅ FALLBACK: Try fuzzy matching (for non-structured calls)
+        cached_steps = [k for k in _BATCH_CACHE[session_id].keys() if not k.startswith('__INDEX_')]
         matched_step = _fuzzy_match_step(user_query, cached_steps)
         
         if matched_step:
@@ -831,10 +853,25 @@ def select_composio_actions(
                         step_query = sub_task_result.use_case
                         tools = sub_task_result.tools
                         
-                        # ✅ Get the FIRST (best-ranked) tool for this step
-                        # Composio ranks tools best-first, so trust their ranking
+                        # ✅ CRITICAL FIX: When Composio returns multiple tools, use the PRIMARY tool (lowest execution_order)
+                        # 
+                        # CONTEXT:
+                        # - Composio's execution_order represents a multi-step plan sequence (1, 2, 3, ...)
+                        # - BUT we generate ONE workflow node per step (user's step = one node)
+                        # - So we need the PRIMARY action (order=1), not the final step in Composio's plan
+                        # 
+                        # EXAMPLE:
+                        # User's step: "Send email with flight details"
+                        # Composio returns: [GMAIL_SEND_EMAIL (order=1), CREATE_DRAFT (order=2), SEND_DRAFT (order=3)]
+                        # ✅ We want: GMAIL_SEND_EMAIL (order=1) - the direct action
+                        # ❌ Not: SEND_DRAFT (order=3) - the final step in a multi-step plan
                         if tools:
-                            tool = tools[0]  # Primary (best) tool for this step
+                            if len(tools) > 1:
+                                # Use PRIMARY tool (lowest execution_order = first action in Composio's plan)
+                                tool = min(tools, key=lambda t: t.get('execution_order', 999))
+                                logger.info(f"   [INDEX {step_index}] Multi-step detected: {len(tools)} tools, selected PRIMARY tool {tool.get('tool_id')} (execution_order={tool.get('execution_order')})")
+                            else:
+                                tool = tools[0]  # Only one tool, use it
                             action_dict = {
                                 'action_id': tool.get('tool_id', tool.get('action_id', 'UNKNOWN')),
                                 'action_name': tool.get('name', tool.get('action_name', '')),
@@ -865,6 +902,11 @@ def select_composio_actions(
                                     'execution_order': t.get('execution_order', 0),
                                 })
                             _BATCH_CACHE[session_id][step_query] = step_tool_dicts
+                            
+                            # ✅ DETERMINISTIC: Also cache by index for retry safety
+                            index_key = f"__INDEX_{step_index}__"
+                            _BATCH_CACHE[session_id][index_key] = step_tool_dicts
+                            logger.info(f"[BATCH_CACHE] Cached step {step_index} with index key for retry")
                     
                     # Return best tool per step (1:1 mapping)
                     logger.info(f"✅ [BATCH_API] Returning {len(all_action_dicts)} indexed tools (1 per step)")
@@ -940,107 +982,131 @@ def select_composio_actions(
                 _log_to_debug_file("[BATCH_API] No results from batch call")
         
         except Exception as e:
-            logger.warning(f"⚠️  [BATCH_API] Batch call failed: {e}, using pgvector fallback")
-            _log_to_debug_file(f"[BATCH_API] Error: {e}, falling back to pgvector")
-    
-    # ===================================================================
-    # INTENT DETECTION (for pgvector fallback)
-    # ===================================================================
-    query_intent = detect_query_intent(user_query)
-    _log_to_debug_file(f"[INTENT_DETECT] Query intent: {query_intent} (from step: {user_query[:80]}...)")
-    logger.info(f"[INTENT_DETECT] Step intent: {query_intent} | Step: {user_query[:60]}...")
-    
-    # ✅ SCALABLE: Let action_matcher.py do SEMANTIC app detection
-    # No keyword matching, no hardcoding - pure AI-first pgvector search!
-    # action_matcher.py will:
-    # 1. Use app_embedding semantic search to find relevant apps
-    # 2. Re-rank with default_app_preferences (user's connected apps prioritized)
-    # 3. Search actions only in the best-matched apps
-    _log_to_debug_file(f"[APP_DETECTION] Delegating to action_matcher.py for semantic app search")
-    logger.info(f"[APP_DETECTION] Using semantic search (no keyword hints) for scalability")
-    
-    try:
-        # ✅ Use the WORKING two-stage matcher (action_matcher.py)
-        from apps.integrations.services.action_matcher import ComposioActionMatcher
-        
-        matcher = ComposioActionMatcher(enable_warmup=False)  # No warmup for speed
-        
-        # ✅ SCALABLE ARCHITECTURE: Let action_matcher.py do ALL app detection semantically
-        # - NO app_hints → action_matcher uses pgvector semantic search at app level
-        # - NO keyword matching → pure AI-first approach
-        # - context for domain/app discovery
-        # - user_query for action intent matching
-        
-        _log_to_debug_file(f"[SEMANTIC_MATCH] Using action_matcher.py for both app AND action detection")
-        
-        action_dicts = matcher.match_for_subtask(
-            subtask_description=user_query,  # Step-specific intent
-            app_hints=None,  # ✅ Let matcher do semantic app search!
-            top_k_apps=10,  # How many apps to consider
-            top_k_actions_per_app=3,  # Actions per app
-            min_confidence=0.35,  # Quality threshold
-            context=context  # Full user query for domain/app discovery
-        )
-        
-        if not action_dicts:
-            _log_to_debug_file("[TWO STAGE] No actions matched")
-            return ""
-        
-        # ✅ INTENT-BASED FILTERING: Filter actions based on detected intent
-        if query_intent == "read":
-            # Filter OUT write actions (send, create, update, delete, post, publish)
-            write_action_keywords = ['SEND', 'CREATE', 'UPDATE', 'DELETE', 'POST', 'PUBLISH', 'UPLOAD', 
-                                     'DRAFT', 'REPLY', 'FORWARD', 'COMPOSE', 'WRITE']
-            read_action_keywords = ['FETCH', 'GET', 'LIST', 'QUERY', 'RETRIEVE', 'DOWNLOAD', 'FIND', 
-                                   'SEARCH', 'VIEW', 'SHOW', 'READ', 'LOAD']
-            
-            filtered_actions = []
-            for action in action_dicts:
-                action_id = action['action_id'].upper()
-                # Prefer read actions, exclude pure write actions
-                is_read = any(kw in action_id for kw in read_action_keywords)
-                is_write = any(kw in action_id for kw in write_action_keywords)
-                
-                # Include if it's a read action OR if it's ambiguous (neither read nor write)
-                if is_read or not is_write:
-                    filtered_actions.append(action)
-                else:
-                    _log_to_debug_file(f"[INTENT_FILTER] Filtered OUT {action_id} (write action, but intent={query_intent})")
-            
-            if len(filtered_actions) < len(action_dicts):
-                logger.info(f"[INTENT_FILTER] Filtered {len(action_dicts) - len(filtered_actions)} write actions (intent={query_intent})")
-                _log_to_debug_file(f"[INTENT_FILTER] Kept {len(filtered_actions)}/{len(action_dicts)} actions after intent filtering")
-                action_dicts = filtered_actions
-        
-        # Log the matched apps and actions
-        matched_apps = list(set([a['app_name'] for a in action_dicts]))
-        _log_to_debug_file(f"[TWO STAGE] Matched apps: {matched_apps}")
-        _log_to_debug_file(f"[TWO STAGE] Found {len(action_dicts)} actions (after intent filter):")
-        
-        # Enhanced logging - show ALL actions returned
-        logger.info(f"[TWO STAGE] 🎯 Returned {len(action_dicts)} actions from two-stage search:")
-        for i, action in enumerate(action_dicts[:top_k], 1):
-            action_id = action['action_id']
-            app_name = action['app_name']
-            confidence = action.get('confidence', 0)
-            _log_to_debug_file(
-                f"  {i}. {action_id} "
-                f"(app: {app_name}, confidence: {confidence:.4f})"
+            logger.error(f"❌ [BATCH_API] Batch call failed: {e}")
+            logger.error(f"❌ [CRITICAL] Cannot proceed without batch API - workflow generation requires batch cache")
+            _log_to_debug_file(f"[BATCH_API] Error: {e}, CANNOT FALL BACK (function calling requires batch)")
+            raise RuntimeError(
+                f"Batch API call failed: {e}. Function calling requires batch API results. "
+                "Please check Composio API key and connectivity."
             )
-            logger.info(f"[TWO STAGE]   {i}. {action_id} (app: {app_name}, confidence: {confidence:.3f})")
-        
-        # Format for TaskWeaver prompt (same format as before)
-        return format_actions_for_prompt(action_dicts, top_k)
-        
-    except ImportError as e:
-        _log_to_debug_file(f"[TWO STAGE] Import error, falling back to old method: {e}")
-        # Fallback to old global search if action_matcher not available
-        return _select_composio_actions_fallback(user_query, app_hints, top_k)
-    except Exception as e:
-        logger.error(f"[TWO STAGE] Error in two-stage search: {e}", exc_info=True)
-        _log_to_debug_file(f"[TWO STAGE] Error: {e}")
-        # Fallback to old global search
-        return _select_composio_actions_fallback(user_query, app_hints, top_k)
+    
+    # ===================================================================
+    # ❌ LEGACY TWO-STAGE SEARCH (COMMENTED OUT)
+    # ===================================================================
+    # This fallback is NO LONGER NEEDED because:
+    # 1. Function calling REQUIRES batch API (we don't use legacy generation anymore)
+    # 2. Index-based cache lookup handles retries deterministically
+    # 3. If batch API fails, we should error (not silently degrade to pgvector)
+    #
+    # Keeping code commented for reference but should never reach here
+    # ===================================================================
+    
+    logger.error("❌ [CRITICAL] Reached legacy fallback code - this should NEVER happen!")
+    logger.error("   Batch API should have returned results or raised exception")
+    logger.error(f"   Session: {session_id}, Query: {user_query[:100]}")
+    raise RuntimeError(
+        "Workflow generation failed: Batch API did not return results but also didn't error. "
+        "This is a bug - please report to engineering."
+    )
+    
+    # # ===================================================================
+    # # INTENT DETECTION (for pgvector fallback)
+    # # ===================================================================
+    # query_intent = detect_query_intent(user_query)
+    # _log_to_debug_file(f"[INTENT_DETECT] Query intent: {query_intent} (from step: {user_query[:80]}...)")
+    # logger.info(f"[INTENT_DETECT] Step intent: {query_intent} | Step: {user_query[:60]}...")
+    # 
+    # # ✅ SCALABLE: Let action_matcher.py do SEMANTIC app detection
+    # # No keyword matching, no hardcoding - pure AI-first pgvector search!
+    # # action_matcher.py will:
+    # # 1. Use app_embedding semantic search to find relevant apps
+    # # 2. Re-rank with default_app_preferences (user's connected apps prioritized)
+    # # 3. Search actions only in the best-matched apps
+    # _log_to_debug_file(f"[APP_DETECTION] Delegating to action_matcher.py for semantic app search")
+    # logger.info(f"[APP_DETECTION] Using semantic search (no keyword hints) for scalability")
+    # 
+    # try:
+    #     # ✅ Use the WORKING two-stage matcher (action_matcher.py)
+    #     from apps.integrations.services.action_matcher import ComposioActionMatcher
+    #     
+    #     matcher = ComposioActionMatcher(enable_warmup=False)  # No warmup for speed
+    #     
+    #     # ✅ SCALABLE ARCHITECTURE: Let action_matcher.py do ALL app detection semantically
+    #     # - NO app_hints → action_matcher uses pgvector semantic search at app level
+    #     # - NO keyword matching → pure AI-first approach
+    #     # - context for domain/app discovery
+    #     # - user_query for action intent matching
+    #     
+    #     _log_to_debug_file(f"[SEMANTIC_MATCH] Using action_matcher.py for both app AND action detection")
+    #     
+    #     action_dicts = matcher.match_for_subtask(
+    #         subtask_description=user_query,  # Step-specific intent
+    #         app_hints=None,  # ✅ Let matcher do semantic app search!
+    #         top_k_apps=10,  # How many apps to consider
+    #         top_k_actions_per_app=3,  # Actions per app
+    #         min_confidence=0.35,  # Quality threshold
+    #         context=context  # Full user query for domain/app discovery
+    #     )
+    #     
+    #     if not action_dicts:
+    #         _log_to_debug_file("[TWO STAGE] No actions matched")
+    #         return ""
+    #     
+    #     # ✅ INTENT-BASED FILTERING: Filter actions based on detected intent
+    #     if query_intent == "read":
+    #         # Filter OUT write actions (send, create, update, delete, post, publish)
+    #         write_action_keywords = ['SEND', 'CREATE', 'UPDATE', 'DELETE', 'POST', 'PUBLISH', 'UPLOAD', 
+    #                                  'DRAFT', 'REPLY', 'FORWARD', 'COMPOSE', 'WRITE']
+    #         read_action_keywords = ['FETCH', 'GET', 'LIST', 'QUERY', 'RETRIEVE', 'DOWNLOAD', 'FIND', 
+    #                                'SEARCH', 'VIEW', 'SHOW', 'READ', 'LOAD']
+    #         
+    #         filtered_actions = []
+    #         for action in action_dicts:
+    #             action_id = action['action_id'].upper()
+    #             # Prefer read actions, exclude pure write actions
+    #             is_read = any(kw in action_id for kw in read_action_keywords)
+    #             is_write = any(kw in action_id for kw in write_action_keywords)
+    #             
+    #             # Include if it's a read action OR if it's ambiguous (neither read nor write)
+    #             if is_read or not is_write:
+    #                 filtered_actions.append(action)
+    #             else:
+    #                 _log_to_debug_file(f"[INTENT_FILTER] Filtered OUT {action_id} (write action, but intent={query_intent})")
+    #         
+    #         if len(filtered_actions) < len(action_dicts):
+    #             logger.info(f"[INTENT_FILTER] Filtered {len(action_dicts) - len(filtered_actions)} write actions (intent={query_intent})")
+    #             _log_to_debug_file(f"[INTENT_FILTER] Kept {len(filtered_actions)}/{len(action_dicts)} actions after intent filtering")
+    #             action_dicts = filtered_actions
+    #     
+    #     # Log the matched apps and actions
+    #     matched_apps = list(set([a['app_name'] for a in action_dicts]))
+    #     _log_to_debug_file(f"[TWO STAGE] Matched apps: {matched_apps}")
+    #     _log_to_debug_file(f"[TWO STAGE] Found {len(action_dicts)} actions (after intent filter):")
+    #     
+    #     # Enhanced logging - show ALL actions returned
+    #     logger.info(f"[TWO STAGE] 🎯 Returned {len(action_dicts)} actions from two-stage search:")
+    #     for i, action in enumerate(action_dicts[:top_k], 1):
+    #         action_id = action['action_id']
+    #         app_name = action['app_name']
+    #         confidence = action.get('confidence', 0)
+    #         _log_to_debug_file(
+    #             f"  {i}. {action_id} "
+    #             f"(app: {app_name}, confidence: {confidence:.4f})"
+    #         )
+    #         logger.info(f"[TWO STAGE]   {i}. {action_id} (app: {app_name}, confidence: {confidence:.3f})")
+    #     
+    #     # Format for TaskWeaver prompt (same format as before)
+    #     return format_actions_for_prompt(action_dicts, top_k)
+    #     
+    # except ImportError as e:
+    #     _log_to_debug_file(f"[TWO STAGE] Import error, falling back to old method: {e}")
+    #     # Fallback to old global search if action_matcher not available
+    #     return _select_composio_actions_fallback(user_query, app_hints, top_k)
+    # except Exception as e:
+    #     logger.error(f"[TWO STAGE] Error in two-stage search: {e}", exc_info=True)
+    #     _log_to_debug_file(f"[TWO STAGE] Error: {e}")
+    #     # Fallback to old global search
+    #     return _select_composio_actions_fallback(user_query, app_hints, top_k)
 
 
 def _select_composio_actions_fallback(

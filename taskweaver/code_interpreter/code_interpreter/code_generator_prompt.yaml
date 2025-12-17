@@ -154,7 +154,7 @@ content: |-
          - ❌ DO NOT use plausible-sounding names like "SHOPIFY_SEARCH_PRODUCTS", "STRIPE_CHARGE_CARD", "HOTEL_API_SEARCH"
          - ❌ DO NOT proceed with workflow generation
          - ✅ Instead: Return a clear message explaining what's missing
-         - ✅ Example: "I cannot create this workflow because I don't have access to hotel booking APIs in the available actions list. I can work with email platforms, messaging apps, spreadsheet tools, and 800+ other integrations."
+         - ✅ Example: "I cannot create this workflow because I don't have access to the required tools in the available actions list. Please check the Available Composio Actions section for supported integrations."
       4. ONLY proceed with workflow generation if ALL tools exist in the actions list
       5. **CRITICAL**: Every tool_id MUST be copied EXACTLY from the "Available Composio Actions" list - no modifications, no inventions
     - This format supports ALL workflow patterns: sequential, parallel, conditional, loops, nested, multi-dimensional, any complexity
@@ -198,6 +198,48 @@ content: |-
       * "${{from_step:node_id.nested.field[0].id}}" - Supports nested paths with dot notation and array indexing
       * "${{aggregate:node_id.[field1,field2,field3]}}" - Combine multiple fields intelligently (auto-detects HTML vs text)
       * Static values - Any JSON value (string, number, boolean, object, array)
+    
+    - **🎯 CRITICAL: CONTEXTUALLY IMPORTANT OPTIONAL PARAMETERS (100% Schema-Driven)**:
+      
+      **UNIVERSAL RULE (Works for ALL 800+ tools)**:
+      When building params for ANY tool, check EACH optional parameter against this deterministic rule:
+      
+      ✅ **INCLUDE with ${{EXTRACT:param_name}} if:**
+         • Parameter has `examples` array with values in schema (Composio documented it)
+         AND
+         • Parameter's `default` is null OR `nullable` is true (no sensible default)
+         AND
+         • Parameter is NOT in `required` array (it's optional)
+      
+      ❌ **SKIP if:**
+         • Has sensible default (`default: "me"`, `default: false`, `default: 10`)
+         • No examples array (edge-case parameter)
+      
+      **Why This Works:**
+      - Composio adds `examples` only for commonly-used parameters that improve UX/clarity
+      - If default is null/nullable BUT has examples → needs user context
+      - This captures: titles, names, labels, descriptions, priorities, categories, etc.
+      - NO HARDCODING - pure schema signals!
+      
+      **Example Decision Tree:**
+      ```python
+      # Tool schema shows three optional parameters:
+      # "title": {"type": "string", "default": null, "nullable": true, "examples": ["Q4 Planning", "Team Sync"]}
+      # "is_public": {"type": "boolean", "default": false, "examples": [true, false]}
+      # "owner_id": {"type": "string", "default": "me", "examples": ["me", "user123"]}
+      
+      # Decision:
+      # ✅ title: Has examples + null default → INCLUDE: "title": "${{EXTRACT:title}}"
+      # ❌ is_public: Has examples BUT sensible default (false) → SKIP (use default)
+      # ❌ owner_id: Has examples BUT sensible default ("me") → SKIP (use default)
+      ```
+      
+      **Critical Notes:**
+      - Apply this rule AFTER determining required params
+      - Works universally: ALL 800+ Composio integrations
+      - System will intelligently generate values from workflow context at execution time
+      - If user explicitly mentions the value in query, use `${{EXTRACT:param_name}}`
+      - If user doesn't mention it, still include it if rule matches → better UX!
     
     - **CRITICAL: SCHEMA-DRIVEN FORM GENERATION** (100% Dynamic, Zero Hardcoding):
       

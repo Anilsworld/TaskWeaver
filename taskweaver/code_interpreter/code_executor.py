@@ -188,14 +188,19 @@ class CodeExecutor:
                 lines.append(
                     "The values of variables of the above Python code after execution are:\n",
                 )
+                # ✅ Truncate individual variable outputs (tool schemas, large dicts)
                 for o in output:
-                    lines.append(f"{str(o)}")
+                    o_str = str(o)
+                    if len(o_str) > 500:
+                        o_str = o_str[:200] + f"\n... [truncated {len(o_str) - 200} chars] ..."
+                    lines.append(o_str)
                 lines.append("")
             else:
-                # ✅ Truncate verbose output (e.g., large workflow dictionaries)
+                # ✅ Truncate verbose output (e.g., large workflow dictionaries with tool schemas)
                 output_str = str(output)
-                if len(output_str) > 3000:
-                    output_str = output_str[:1000] + f"\n... [truncated {len(output_str) - 1000} chars] ..."
+                if len(output_str) > 500:
+                    # Show first 200 chars only for workflows (tool schemas are massive)
+                    output_str = output_str[:200] + f"\n... [truncated {len(output_str) - 200} chars] ..."
                 
                 lines.append(
                     "The result of above Python code after execution is:\n" + output_str,

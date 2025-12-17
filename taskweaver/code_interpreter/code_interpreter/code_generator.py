@@ -1234,7 +1234,20 @@ class CodeGenerator(Role):
                     # Note: Complex dependency analysis is handled by separate services:
                     # - apps.py_workflows.generation.analysis.dependency_analyzer (schema-based analysis)
                     # - apps.py_workflows.generation.orchestrator.dependency_resolver (auto-injection)
-                    # Instructor only does simple Pydantic validation (field types, node existence)
+                    # Instructor does Pydantic validation (field types, node existence, tool IDs, important params)
+                    
+                    # 🔧 CRITICAL FIX: Build tool_schemas BEFORE calling Instructor
+                    # This enables Pydantic validators to run DURING generation (not after)
+                    tool_schemas = []
+                    if session_id:
+                        try:
+                            from TaskWeaver.project.plugins.composio_action_selector import _BATCH_CACHE
+                            if session_id in _BATCH_CACHE:
+                                for step_query, action_dicts in _BATCH_CACHE[session_id].items():
+                                    tool_schemas.extend(action_dicts)
+                                self.logger.info(f"[PRE-VALIDATION] ✅ Loaded {len(tool_schemas)} tool schemas for Instructor validation")
+                        except Exception as e:
+                            self.logger.debug(f"[PRE-VALIDATION] Could not load tool schemas: {e}")
                     
                     workflow_def, instructor_error = intelligent_instructor.generate_with_intelligent_retry(
                         user_request=original_user_query,
@@ -1243,6 +1256,7 @@ class CodeGenerator(Role):
                         model=self.llm_api.config.model,  # ✅ Access model via llm_api.config
                         temperature=0.0,
                         composio_actions_text=composio_with_guidance,  # ✅ Includes step_guidance
+                        tool_schemas=tool_schemas if tool_schemas else None,  # 🔧 NEW: Enable validators
                         max_retries=3
                     )
                     
@@ -1284,40 +1298,10 @@ class CodeGenerator(Role):
                         f"{len(workflow_json.get('edges', []))} edges"
                     )
                     
-                    # 🎯 SCHEMA-BASED DEPENDENCY VALIDATION (Phase 1: Observation Mode)
-                    # Validate using existing AIDependencyAnalyzer to detect optimization opportunities
-                    if session_id and len(workflow_json.get('nodes', [])) > 2:
-                        try:
-                            # Fetch tool schemas from batch cache
-                            from TaskWeaver.project.plugins.composio_action_selector import _BATCH_CACHE
-                            from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
-                            
-                            tool_schemas_for_validation = []
-                            if session_id in _BATCH_CACHE:
-                                for step_query, action_dicts in _BATCH_CACHE[session_id].items():
-                                    tool_schemas_for_validation.extend(action_dicts)
-                                
-                                self.logger.info(
-                                    f"[DEP_VALIDATION] Running schema-based validation with {len(tool_schemas_for_validation)} tools"
-                                )
-                                
-                                # Run validation with tool schemas
-                                is_valid, validated_workflow, errors, validation_metadata = validate_workflow_dict(
-                                    workflow_dict=workflow_json,
-                                    tool_schemas=tool_schemas_for_validation,
-                                    session_id=session_id
-                                )
-                                
-                                # Log validation results (non-blocking)
-                                if validation_metadata and validation_metadata.get('dependency_analysis'):
-                                    dep_analysis = validation_metadata['dependency_analysis']
-                                    if dep_analysis.get('optimization_opportunities'):
-                                        self.logger.info(
-                                            f"[DEP_VALIDATION] Found {len(dep_analysis['optimization_opportunities'])} "
-                                            f"optimization opportunities (see warnings above)"
-                                        )
-                        except Exception as e:
-                            self.logger.debug(f"[DEP_VALIDATION] Validation skipped: {e}")
+                    # ✅ VALIDATION NOTE: All validation (tool IDs, important params, dependencies)
+                    # now happens DURING Instructor generation via Pydantic validators.
+                    # No need for redundant post-generation validation.
+                    # Optimization opportunities are detected later by WorkflowOptimizer.
                     
                     # ⚠️ KEPT FROM ORIGINAL: Edge generation (if edges not already generated)
                     # This is business logic, not validation, so it stays

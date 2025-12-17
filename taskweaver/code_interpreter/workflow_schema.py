@@ -75,11 +75,24 @@ class WorkflowNode(BaseModel):
 
 
 class WorkflowDefinition(BaseModel):
-    """Complete workflow structure."""
-    nodes: List[WorkflowNode] = Field(..., min_items=1, description="Workflow nodes")
+    """
+    Complete workflow structure.
+    
+    CRITICAL STRUCTURE:
+    {
+      "nodes": [{"id": "...", "type": "...", ...}, ...],  # Array of node objects
+      "edges": [...],                                      # Top-level field (NOT inside nodes)
+      "sequential_edges": [...],                           # Top-level field (NOT inside nodes)
+      "parallel_edges": [...]                              # Top-level field (NOT inside nodes)
+    }
+    
+    ❌ WRONG: {"nodes": [{...node1...}, {...node2...}, {"edges": []}]}
+    ✅ RIGHT: {"nodes": [{...node1...}, {...node2...}], "edges": [...]}
+    """
+    nodes: List[WorkflowNode] = Field(..., min_items=1, description="Array of workflow node objects. Each node MUST have 'id' and 'type' fields.")
     edges: Optional[List[Union[tuple, dict]]] = Field(
         default_factory=list,
-        description="Edges connecting workflow nodes (auto-inferred from dependencies)"
+        description="TOP-LEVEL field: Edges connecting workflow nodes (auto-inferred from dependencies). This is NOT part of the nodes array."
     )
     # Conditional routing for approvals/retries/loop-backs (Autogen-inspired pattern)
     conditional_edges: Optional[List[Dict[str, Any]]] = Field(
@@ -110,6 +123,59 @@ class WorkflowDefinition(BaseModel):
     class Config:
         # Allow extra fields for forward compatibility
         extra = "allow"
+    
+    @model_validator(mode='before')
+    @classmethod
+    def validate_nodes_structure(cls, data):
+        """
+        Auto-fix LLM JSON malformation: Prevent edges from being nested inside nodes array.
+        
+        Common LLM mistake:
+        {"nodes": [{...node1...}, {...node2...}, {"edges": [], "sequential_edges": []}]}
+        
+        Correct structure:
+        {"nodes": [...], "edges": [...], "sequential_edges": [...]}
+        
+        Safety: Only hoists edges from nodes array to top-level. Doesn't affect edges
+        added later by optimizer (START edges, parallel groups, etc.) since those run
+        after this validator.
+        """
+        if isinstance(data, dict) and 'nodes' in data:
+            nodes = data['nodes']
+            if isinstance(nodes, list) and len(nodes) > 0:
+                # Check if any item in nodes is actually edges metadata (LLM mistake)
+                nodes_to_remove = []
+                for i, node in enumerate(nodes):
+                    if isinstance(node, dict):
+                        # If a node has 'edges' or 'sequential_edges' as keys but no 'id' or 'type',
+                        # it's likely the LLM put edges metadata inside nodes array
+                        has_edge_keys = any(k in node for k in ['edges', 'sequential_edges', 'parallel_edges', 'conditional_edges'])
+                        has_node_keys = any(k in node for k in ['id', 'type', 'tool_id'])
+                        
+                        if has_edge_keys and not has_node_keys:
+                            # LLM mistake detected - hoist edge data to top level (only if not already set)
+                            logger.warning(f"[SCHEMA_FIX] 🔧 LLM put edges inside nodes[{i}], hoisting to top level")
+                            for edge_key in ['edges', 'sequential_edges', 'parallel_edges', 'conditional_edges']:
+                                if edge_key in node:
+                                    if edge_key not in data:
+                                        # Hoist to top level
+                                        data[edge_key] = node[edge_key]
+                                        logger.info(f"[SCHEMA_FIX] ✅ Hoisted '{edge_key}' to top level")
+                                    else:
+                                        # Top level already has this - merge intelligently
+                                        if isinstance(data[edge_key], list) and isinstance(node[edge_key], list):
+                                            data[edge_key].extend(node[edge_key])
+                                            logger.info(f"[SCHEMA_FIX] ✅ Merged '{edge_key}' from malformed node")
+                            nodes_to_remove.append(i)
+                
+                # Remove malformed "nodes" in reverse order to preserve indices
+                for i in reversed(nodes_to_remove):
+                    nodes.pop(i)
+                    logger.info(f"[SCHEMA_FIX] 🗑️  Removed malformed node at index {i}")
+                
+                if nodes_to_remove:
+                    logger.info(f"[SCHEMA_FIX] ✅ Fixed: {len(nodes)} valid nodes remaining after cleanup")
+        return data
     
     @field_validator('edges', 'sequential_edges', 'parallel_edges', mode='before')
     @classmethod
@@ -146,6 +212,178 @@ class WorkflowDefinition(BaseModel):
                     if target and target not in node_ids:
                         raise ValueError(f"Edge references non-existent node: '{target}'. Available nodes: {', '.join(sorted(node_ids))}")
         
+        return self
+    
+    @model_validator(mode='wrap')
+    @classmethod
+    def validate_tool_ids(cls, values, handler, info):
+        """
+        DETERMINISTIC VALIDATION: Ensure all tool_ids exist in _tool_schemas.
+        
+        This prevents LLM from inventing/hallucinating tool IDs (e.g., "FLIGHT_SEARCH" 
+        instead of "COMPOSIO_SEARCH_FLIGHTS"). Triggers Instructor retry on failure.
+        """
+        # First, let Pydantic validate the model
+        self = handler(values)
+        
+        # 🔧 CRITICAL FIX: Access _tool_schemas from validation_context (passed by Instructor)
+        # or fall back to extra fields (for legacy validation)
+        tool_schemas = None
+        
+        # Try validation_context first (Pydantic v2: context is in info.context)
+        if info and info.context:
+            tool_schemas = info.context.get('_tool_schemas')
+            if tool_schemas:
+                logger.info(f"[PYDANTIC_VALIDATOR] ✅ Using {len(tool_schemas)} tool schemas from validation_context")
+        
+        # Fall back to extra fields
+        if not tool_schemas:
+            tool_schemas = getattr(self, '_tool_schemas', None) or []
+        
+        if not tool_schemas:
+            logger.debug("[PYDANTIC_VALIDATOR] No _tool_schemas found - skipping tool ID validation")
+            return self
+        
+        # Build set of valid tool IDs from schemas
+        valid_tool_ids = {schema['action_id'] for schema in tool_schemas if isinstance(schema, dict) and 'action_id' in schema}
+        
+        if not valid_tool_ids:
+            logger.warning("[PYDANTIC_VALIDATOR] No valid tool IDs found in _tool_schemas")
+            return self
+        
+        # Check each agent_with_tools node
+        invalid_tools = []
+        for node in self.nodes:
+            if node.type == 'agent_with_tools' and node.tool_id:
+                if node.tool_id not in valid_tool_ids:
+                    # Find fuzzy matches for helpful error message
+                    fuzzy_matches = []
+                    node_tool_lower = node.tool_id.lower()
+                    for valid_id in valid_tool_ids:
+                        if node_tool_lower in valid_id.lower() or valid_id.lower() in node_tool_lower:
+                            fuzzy_matches.append(valid_id)
+                    
+                    invalid_tools.append({
+                        'node_id': node.id,
+                        'invalid_tool_id': node.tool_id,
+                        'suggestions': fuzzy_matches[:3]  # Top 3 suggestions
+                    })
+        
+        if invalid_tools:
+            # Build detailed error message for Instructor retry
+            error_parts = [
+                "❌ TOOL VALIDATION FAILED: Invalid tool_id(s) detected.",
+                "",
+                "🚨 CRITICAL: You MUST use EXACT tool IDs from the available actions list.",
+                "DO NOT invent or simplify tool names.",
+                "",
+                "Invalid tools found:"
+            ]
+            for invalid in invalid_tools:
+                error_parts.append(f"  • Node '{invalid['node_id']}': '{invalid['invalid_tool_id']}' does NOT exist")
+                if invalid['suggestions']:
+                    error_parts.append(f"    Did you mean: {', '.join(invalid['suggestions'])}?")
+                else:
+                    error_parts.append(f"    Available tools: {', '.join(sorted(valid_tool_ids)[:5])}...")
+            
+            error_parts.append("")
+            error_parts.append("✅ FIX: Replace invalid tool_id(s) with exact matches from the available actions.")
+            
+            raise ValueError("\n".join(error_parts))
+        
+        logger.debug(f"[PYDANTIC_VALIDATOR] ✅ Tool ID validation passed: {len([n for n in self.nodes if n.type == 'agent_with_tools'])} nodes checked")
+        return self
+    
+    @model_validator(mode='wrap')
+    @classmethod
+    def validate_important_optional_params(cls, values, handler, info):
+        """
+        DETERMINISTIC VALIDATION: Ensure contextually important optional parameters are included.
+        
+        Rule: If a parameter has 'examples' in schema AND 'default' is null/nullable, 
+        it's contextually important (e.g., email subject, task title, etc.).
+        
+        This catches when LLM omits important params. Triggers Instructor retry.
+        """
+        # First, let Pydantic validate the model
+        self = handler(values)
+        
+        # 🔧 CRITICAL FIX: Access _tool_schemas from validation_context (passed by Instructor)
+        # or fall back to extra fields (for legacy validation)
+        tool_schemas = None
+        
+        # Try validation_context first (Pydantic v2: context is in info.context)
+        if info and info.context:
+            tool_schemas = info.context.get('_tool_schemas')
+            if tool_schemas:
+                logger.info(f"[PYDANTIC_VALIDATOR] ✅ Using {len(tool_schemas)} tool schemas from validation_context for param check")
+        
+        # Fall back to extra fields
+        if not tool_schemas:
+            tool_schemas = getattr(self, '_tool_schemas', None) or []
+        
+        if not tool_schemas:
+            logger.debug("[PYDANTIC_VALIDATOR] No _tool_schemas found - skipping important param validation")
+            return self
+        
+        # Build tool_id → schema mapping
+        tool_id_to_schema = {schema['action_id']: schema for schema in tool_schemas if isinstance(schema, dict) and 'action_id' in schema}
+        
+        # Check each agent_with_tools node
+        missing_params = []
+        for node in self.nodes:
+            if node.type != 'agent_with_tools' or not node.tool_id:
+                continue
+            
+            if node.tool_id not in tool_id_to_schema:
+                continue  # Tool validation will catch this
+            
+            tool_schema = tool_id_to_schema[node.tool_id]
+            params_schema = tool_schema.get('parameters', {}).get('properties', {})
+            required_params = tool_schema.get('parameters', {}).get('required', [])
+            
+            for param_name, param_props in params_schema.items():
+                # Skip if required (required params are handled elsewhere)
+                if param_name in required_params:
+                    continue
+                
+                # Check if contextually important:
+                # has examples + null default = contextually important
+                has_examples = bool(param_props.get('examples'))
+                has_null_default = param_props.get('default') is None
+                
+                # ✅ SCHEMA-DRIVEN: No hardcoding - just check schema signals
+                # If Composio added examples AND default is null, it's contextually important
+                if has_examples and has_null_default:
+                    # This is a contextually important optional parameter
+                    # Check if LLM included it in node params
+                    node_params = node.params or {}
+                    if param_name not in node_params:
+                        missing_params.append({
+                            'node_id': node.id,
+                            'tool_id': node.tool_id,
+                            'param_name': param_name,
+                            'examples': param_props.get('examples', [])[:2]  # Show first 2 examples
+                        })
+        
+        if missing_params:
+            # 🎯 NON-BLOCKING: Log warning only, don't block workflow generation
+            # Optional parameters can be omitted if not needed for the user's use case
+            warning_parts = [
+                f"⚠️ [PARAM_VALIDATION] Found {len(missing_params)} optional parameter(s) with examples that were omitted:",
+            ]
+            for missing in missing_params[:3]:  # Show first 3
+                examples_str = ', '.join([f"'{ex}'" for ex in missing['examples']])
+                warning_parts.append(f"  • Node '{missing['node_id']}' ({missing['tool_id']}): '{missing['param_name']}' (examples: {examples_str})")
+            
+            if len(missing_params) > 3:
+                warning_parts.append(f"  ... and {len(missing_params) - 3} more")
+            
+            warning_parts.append("💡 These parameters have examples in the schema but were omitted. They may improve UX if applicable.")
+            
+            logger.warning("\n".join(warning_parts))
+        
+        logger.debug(f"[PYDANTIC_VALIDATOR] ✅ Important param validation passed: {len([n for n in self.nodes if n.type == 'agent_with_tools'])} nodes checked")
         return self
     
     def to_ir(self):
@@ -248,7 +486,8 @@ def validate_workflow_dict(workflow_dict: Dict[str, Any]) -> tuple[bool, Optiona
                 
                 # Make errors more actionable
                 if 'missing' in msg.lower():
-                    error_messages.append(f"[!] Missing required field: {loc}")
+                    # 🔧 FIX: Show both location AND message for missing fields
+                    error_messages.append(f"[!] Missing required field at {loc}: {msg}")
                 elif 'value_error' in error_type:
                     error_messages.append(f"[!] Invalid value at {loc}: {msg}")
                 else:

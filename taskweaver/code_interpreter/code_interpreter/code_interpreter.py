@@ -212,7 +212,14 @@ class CodeInterpreter(Role, Interpreter):
         post_proxy.update_status("verifying code")
 
         self.tracing.set_span_attribute("code_verification_on", self.config.code_verification_on)
-        self.logger.info(f"Code to be verified: {code.content}")
+        
+        # ✅ Truncate verbose workflow code for cleaner logs (tool schemas can be 80k+ chars)
+        if len(code.content) > 5000:
+            code_preview = code.content[:300] + f"\n... [truncated {len(code.content) - 300} chars] ...\n" + code.content[-200:]
+            self.logger.info(f"Code to be verified: {code_preview}")
+        else:
+            self.logger.info(f"Code to be verified: {code.content}")
+        
         with get_tracer().start_as_current_span("CodeInterpreter.verify_code") as span:
             span.set_attribute("code", code.content)
             # ✅ ARCHITECTURAL FIX: Pass session variables for constraint enforcement

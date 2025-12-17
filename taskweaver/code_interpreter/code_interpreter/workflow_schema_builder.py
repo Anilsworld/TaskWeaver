@@ -620,11 +620,24 @@ class WorkflowSchemaBuilder:
             required_params = params_schema.get('required', [])
             
             if required_params:
-                # Extract params that look like user inputs (not IDs/technical fields)
-                user_input_params = [
-                    p for p in required_params 
-                    if any(hint in p.lower() for hint in ['email', 'name', 'phone', 'address', 'message', 'title', 'description', 'subject', 'recipient'])
-                ]
+                # Extract params that look like user inputs using schema signals (not hardcoded)
+                # User input params typically have: examples, descriptions, no technical keywords
+                properties = params_schema.get('properties', {})
+                user_input_params = []
+                
+                for p in required_params[:10]:  # Limit to first 10
+                    param_schema = properties.get(p, {})
+                    param_lower = p.lower()
+                    
+                    # Schema-driven detection: has examples OR long description
+                    has_examples = bool(param_schema.get('examples'))
+                    has_description = len(param_schema.get('description', '')) > 30
+                    
+                    # Exclude technical/system params (IDs, tokens, keys, formats)
+                    is_technical = any(kw in param_lower for kw in ['_id', 'token', 'key', 'api', 'auth', 'format', 'page_'])
+                    
+                    if (has_examples or has_description) and not is_technical:
+                        user_input_params.append(p)
                 
                 if user_input_params:
                     form_field_requirements.append(
@@ -731,7 +744,7 @@ class WorkflowSchemaBuilder:
                 "- Multiple items with identical operation\n"
                 "\n"
                 "HOW IT WORKS:\n"
-                "1. Loop iterates over array (e.g., ['gmail', 'outlook', 'slack'])\n"
+                "1. Loop iterates over array (e.g., ['item_a', 'item_b', 'item_c'])\n"
                 "2. For each item, executes child nodes in loop_body\n"
                 "3. Results auto-aggregated and available via '${{loop_id.results}}'\n"
                 "\n"
@@ -746,10 +759,10 @@ class WorkflowSchemaBuilder:
                 "}\n\n"
                 "**Explicit path (nested data):**\n"
                 "{\n"
-                "  'id': 'email_loop',\n"
+                "  'id': 'data_loop',\n"
                 "  'type': 'loop',\n"
-                "  'loop_over': 'node_1.messages',  # Direct path to Gmail messages\n"
-                "  'loop_body': ['draft_reply'],\n"
+                "  'loop_over': 'node_1.items',  # Direct path to nested array field\n"
+                "  'loop_body': ['process_item'],\n"
                 "  'dependencies': [1]\n"
                 "}\n\n"
                 "Loop body accesses current item via '${{loop_item}}'."
@@ -765,9 +778,9 @@ class WorkflowSchemaBuilder:
                         "- 'step_N_output' (e.g., 'step_1_output') - auto-extracts array from response\n"
                         "- 'node_N' (e.g., 'node_1') - auto-extracts array from response\n\n"
                         "**EXPLICIT (for nested data):**\n"
-                        "- 'node_1.messages' - for Gmail/Slack messages\n"
+                        "- 'node_1.items' - for array nested in 'items' field\n"
                         "- 'step_2_output.data' - for API responses with data wrapper\n"
-                        "- 'node_3.items' - for lists nested in 'items' field\n\n"
+                        "- 'node_3.results' - for lists nested in 'results' field\n\n"
                         "⚠️ Use step/node numbers, NOT node IDs!\n"
                         "✅ If dependencies=[1], use 'step_1_output' or 'node_1.messages'"
                     )

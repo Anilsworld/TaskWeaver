@@ -454,6 +454,10 @@ class WorkflowIR:
         """
         Auto-detect and fix fork-join patterns using NetworkX (Sim.ai-style).
         
+        ⚠️ NOTE: This should ONLY fix genuinely parallel fork-join patterns.
+        Most dependency issues are now fixed deterministically in Instructor post-processing
+        by extracting dependencies from ${node_id.field} patterns in params.
+        
         Algorithm:
         1. Get parallel execution layers using nx.topological_generations()
         2. For each layer with 2+ parallel nodes (fork), check next layer
@@ -462,10 +466,14 @@ class WorkflowIR:
         Returns:
             Number of dependencies added
         
-        Example:
+        Example (genuine fork-join):
             Before: [1] → [2, 3, 4] → [5]
             Dependencies: 5 depends on [1] ❌ (missing 2, 3, 4)
             After: 5 depends on [1, 2, 3, 4] ✅
+        
+        Counter-example (sequential, not fork-join):
+            Before: [1] → [2] → [3]
+            Dependencies: Already correct, don't modify!
         """
         added_count = 0
         
