@@ -842,192 +842,14 @@ class CodeGenerator(Role):
                     context = full_prompt_text[max(0, idx-100):idx+100]
                     self.logger.warning(f"[PROMPT_BUILD] Context: ...{context}...")
                 
-                # ✅ NEW: Use Instructor with Intelligent Retry (Autogen-inspired)
-                # Features:
-                # - Schema generation from Pydantic models
-                # - LLM-based retry decision (stops on unfixable errors)
-                # - Dependencies validation
-                # - App name extraction
-                # - HITL decision field auto-add
-                # - Params population checks
-                # - Reasoning transparency (logs why retrying)
+                # Call function calling API
                 try:
-                    from taskweaver.code_interpreter.code_interpreter.instructor_workflow_generator import (
-                        create_intelligent_instructor_client
+                    result = self.llm_api.chat_completion_with_function_calling(
+                        messages=minimal_prompt,
+                        functions=[function_schema],
+                        function_call={"name": "create_workflow_ir"},
+                        temperature=0.0
                     )
-                    
-                    # Initialize Intelligent Retry Wrapper with our LLM client
-                    # Access OpenAI client via: llm_api → completion_service → client
-                    intelligent_instructor = create_intelligent_instructor_client(
-                        openai_client=self.llm_api.completion_service.client,
-                        max_retries=3
-                    )
-                    
-                    # Generate workflow using Intelligent Retry
-                    # LLM decides whether to retry on validation errors (not blind retry)
-                    # ✅ CRITICAL FIX: Append step_guidance to composio_actions (like the old code did)
-                    # The old code appended step_guidance to composio_actions at line 819:
-                    # f"{composio_actions}{step_guidance}\n\n"
-                    composio_with_guidance = composio_actions
-                    if step_guidance:
-                        composio_with_guidance += "\n\n" + step_guidance
-                        self.logger.info(f"[CODE_GENERATOR] ✅ Appended step_guidance ({len(step_guidance)} chars) to composio_actions")
-                    else:
-                        self.logger.warning("[CODE_GENERATOR] ⚠️ NO step_guidance to append!")
-                    
-                    workflow_def, instructor_error = intelligent_instructor.generate_with_intelligent_retry(
-                        user_request=original_user_query,
-                        available_tools=tool_ids,
-                        plan=plan,
-                        model=self.llm_api.config.model,  # ✅ Access model via llm_api.config
-                        temperature=0.0,
-                        composio_actions_text=composio_with_guidance,  # ✅ Includes step_guidance
-                        max_retries=3
-                    )
-                    
-                    if instructor_error:
-                        # Instructor failed after max retries
-                        self.logger.error(f"[INSTRUCTOR] Generation failed: {instructor_error}")
-                        post_proxy.update_attachment(
-                            f"Workflow generation failed:\n{instructor_error}",
-                            AttachmentType.revise_message
-                        )
-                        post_proxy.update_send_to("User")
-                        return post_proxy.end()
-                    
-                    # Convert Pydantic model to dict for remaining checks
-                    workflow_json = workflow_def.model_dump()
-                    
-                    self.logger.info(
-                        f"[INSTRUCTOR] ✅ Generated workflow: "
-                        f"{len(workflow_json.get('nodes', []))} nodes, "
-                        f"{len(workflow_json.get('edges', []))} edges"
-                    )
-                    
-                    # ⚠️ KEPT FROM ORIGINAL: Edge generation (if edges not already generated)
-                    # This is business logic, not validation, so it stays
-                    # NOTE: Instructor may have already generated edges via dependencies
-                    if "edges" not in workflow_json or not workflow_json["edges"]:
-                        self.logger.info(f"[EDGE_GEN] Generating edges from node dependencies...")
-                        
-                        # Build node ID lookup for validation
-                        all_node_ids = {node['id'] for node in workflow_json['nodes']}
-                        self.logger.info(f"[EDGE_GEN] Available node IDs: {sorted(all_node_ids)}")
-                        
-                        # Generate edges from dependencies field
-                        edges = []
-                        validation_errors = []
-                        
-                        for node in workflow_json['nodes']:
-                            node_id = node['id']
-                            dependencies = node.get('dependencies', None)
-                            
-                            # Dependencies validation is now in Instructor, but double-check here
-                            if dependencies is None:
-                                validation_errors.append(
-                                    f"Node '{node_id}' missing REQUIRED 'dependencies' field"
-                                )
-                                continue
-                            
-                            if not isinstance(dependencies, list):
-                                validation_errors.append(
-                                    f"Node '{node_id}' has invalid dependencies: {dependencies} "
-                                    f"(must be list of node IDs)"
-                                )
-                                continue
-                            
-                            # Filter out self-dependencies (auto-fix)
-                            valid_dependencies = [dep for dep in dependencies if dep != node_id]
-                            
-                            if len(valid_dependencies) < len(dependencies):
-                                removed_self_deps = [dep for dep in dependencies if dep == node_id]
-                                self.logger.warning(
-                                    f"[EDGE_GEN] ⚠️ Auto-fixed: Node '{node_id}' had self-dependency {removed_self_deps} - removed automatically"
-                                )
-                                node['dependencies'] = valid_dependencies
-                            
-                            # Create edges from each dependency to this node
-                            for dep_node_id in valid_dependencies:
-                                if not isinstance(dep_node_id, str):
-                                    validation_errors.append(
-                                        f"Node '{node_id}' has non-string dependency: {dep_node_id} "
-                                        f"(must be node ID like 'node_1', 'node_2_1')"
-                                    )
-                                    continue
-                                
-                                if dep_node_id not in all_node_ids:
-                                    validation_errors.append(
-                                        f"Node '{node_id}' depends on non-existent node: '{dep_node_id}'"
-                                    )
-                                    continue
-                                
-                                # Determine edge type: NESTED for loop→body, SEQUENTIAL otherwise
-                                edge_type = 'sequential'
-                                source_node = next((n for n in workflow_json['nodes'] if n['id'] == dep_node_id), None)
-                                if source_node and source_node.get('type') == 'loop':
-                                    loop_body = source_node.get('loop_body', [])
-                                    if node_id in loop_body:
-                                        edge_type = 'nested'
-                                
-                                # Valid dependency - create edge with correct type
-                                edges.append({
-                                    'type': edge_type,
-                                    'from': dep_node_id,
-                                    'to': node_id
-                                })
-                                self.logger.info(f"[EDGE_GEN] Created edge: {dep_node_id} → {node_id} (type={edge_type})")
-                        
-                        # FAIL FAST if validation errors found
-                        if validation_errors:
-                            error_msg = (
-                                f"⚠️ Workflow dependency validation failed:\n\n"
-                                + "\n".join(f"  • {err}" for err in validation_errors)
-                                + "\n\n"
-                                f"💡 FIX: Every node MUST have a 'dependencies' field with node IDs:\n"
-                                f"  - First/independent nodes: dependencies=[]\n"
-                                f"  - Sequential nodes: dependencies=['node_1']\n"
-                                f"  - Nested nodes: dependencies=['node_2', 'node_2_1']\n"
-                                f"  - Example: node_2 depends on node_1 → dependencies=['node_1']\n"
-                            )
-                            self.logger.error(f"[EDGE_GEN] {error_msg}")
-                            post_proxy.update_attachment(error_msg, AttachmentType.revise_message)
-                            post_proxy.update_send_to("CodeInterpreter")
-                            return post_proxy.end()
-                        
-                        # Create sequential edges WITHIN loop bodies
-                        for node in workflow_json['nodes']:
-                            if node.get('type') == 'loop':
-                                loop_body = node.get('loop_body', [])
-                                if len(loop_body) > 1:
-                                    self.logger.info(f"[EDGE_GEN] Analyzing loop body of {node['id']}: {loop_body}")
-                                    
-                                    for i in range(len(loop_body) - 1):
-                                        current_node_id = loop_body[i]
-                                        next_node_id = loop_body[i + 1]
-                                        
-                                        # Check if edge already exists
-                                        existing_edge = any(
-                                            e['from'] == current_node_id and e['to'] == next_node_id
-                                            for e in edges
-                                        )
-                                        
-                                        if not existing_edge:
-                                            edges.append({
-                                                'type': 'sequential',
-                                                'from': current_node_id,
-                                                'to': next_node_id
-                                            })
-                                            self.logger.info(f"[EDGE_GEN] Created inferred edge within loop: {current_node_id} → {next_node_id} (type=sequential)")
-                        
-                        workflow_json['edges'] = edges
-                        self.logger.info(f"[EDGE_GEN] ✅ Generated {len(edges)} edges from node dependencies")
-                    
-                    # ⚠️ ORIGINAL CODE CONTINUES BELOW (node count validation, etc.)
-                    # This code is intentionally preserved for gradual migration
-                    
-                    # FAKE: Create a result object that looks like function calling output
-                    # This allows the rest of the code to work without changes
-                    result = {"arguments": workflow_json}
                     
                     # Extract workflow JSON with error handling
                     if "arguments" not in result:
@@ -1047,13 +869,137 @@ class CodeGenerator(Role):
                         # Old wrapped format
                         workflow_json = arguments["workflow"]
                     elif "nodes" in arguments:
-                        # ✅ SIMPLIFIED: Instructor already generated workflow_json with validation
-                        # This branch is now handled by Instructor above
+                        # New flat format - edges will be auto-generated
                         workflow_json = arguments
                         
                         # Set defaults
                         if "triggers" not in workflow_json:
                             workflow_json["triggers"] = []
+                        
+                        # 🎯 SINGLE SOURCE OF TRUTH: Generate edges from explicit dependencies only
+                        if "edges" not in workflow_json or not workflow_json["edges"]:
+                            self.logger.info(f"[EDGE_GEN] Generating edges from node ID dependencies for {len(workflow_json['nodes'])} nodes...")
+                            
+                            # Build node ID lookup for validation
+                            all_node_ids = {node['id'] for node in workflow_json['nodes']}
+                            self.logger.info(f"[EDGE_GEN] Available node IDs: {sorted(all_node_ids)}")
+                            
+                            # Generate edges from dependencies field
+                            edges = []
+                            validation_errors = []
+                            
+                            for node in workflow_json['nodes']:
+                                node_id = node['id']
+                                dependencies = node.get('dependencies', None)
+                                
+                                # Validate dependencies field exists
+                                if dependencies is None:
+                                    validation_errors.append(
+                                        f"Node '{node_id}' missing REQUIRED 'dependencies' field"
+                                    )
+                                    continue
+                                
+                                # Validate dependencies are valid
+                                if not isinstance(dependencies, list):
+                                    validation_errors.append(
+                                        f"Node '{node_id}' has invalid dependencies: {dependencies} "
+                                        f"(must be list of node IDs)"
+                                    )
+                                    continue
+                                
+                                # 🎯 DETERMINISTIC FIX: Auto-remove self-dependencies
+                                # Filter out self-dependencies before processing
+                                valid_dependencies = [dep for dep in dependencies if dep != node_id]
+                                
+                                if len(valid_dependencies) < len(dependencies):
+                                    removed_self_deps = [dep for dep in dependencies if dep == node_id]
+                                    self.logger.warning(
+                                        f"[EDGE_GEN] ⚠️ Auto-fixed: Node '{node_id}' had self-dependency {removed_self_deps} - removed automatically"
+                                    )
+                                    # Update the node's dependencies in the workflow JSON
+                                    node['dependencies'] = valid_dependencies
+                                
+                                # Create edges from each dependency to this node
+                                for dep_node_id in valid_dependencies:
+                                    # Validate dependency is a string (node ID)
+                                    if not isinstance(dep_node_id, str):
+                                        validation_errors.append(
+                                            f"Node '{node_id}' has non-string dependency: {dep_node_id} "
+                                            f"(must be node ID like 'node_1', 'node_2_1')"
+                                        )
+                                        continue
+                                    
+                                    # Validate dependency exists
+                                    if dep_node_id not in all_node_ids:
+                                        validation_errors.append(
+                                            f"Node '{node_id}' depends on non-existent node: '{dep_node_id}'"
+                                        )
+                                        continue
+                                    
+                                    # ✅ Determine edge type: NESTED for loop→body, SEQUENTIAL otherwise
+                                    edge_type = 'sequential'
+                                    source_node = next((n for n in workflow_json['nodes'] if n['id'] == dep_node_id), None)
+                                    if source_node and source_node.get('type') == 'loop':
+                                        # Check if target is in loop body
+                                        loop_body = source_node.get('loop_body', [])
+                                        if node_id in loop_body:
+                                            edge_type = 'nested'
+                                    
+                                    # Valid dependency - create edge with correct type
+                                    edges.append({
+                                        'type': edge_type,
+                                        'from': dep_node_id,
+                                        'to': node_id
+                                    })
+                                    self.logger.info(f"[EDGE_GEN] Created edge: {dep_node_id} → {node_id} (type={edge_type})")
+                            
+                            # FAIL FAST if validation errors found
+                            if validation_errors:
+                                error_msg = (
+                                    f"⚠️ Workflow dependency validation failed:\n\n"
+                                    + "\n".join(f"  • {err}" for err in validation_errors)
+                                    + "\n\n"
+                                    f"💡 FIX: Every node MUST have a 'dependencies' field with node IDs:\n"
+                                    f"  - First/independent nodes: dependencies=[]\n"
+                                    f"  - Sequential nodes: dependencies=['node_1']\n"
+                                    f"  - Nested nodes: dependencies=['node_2', 'node_2_1']\n"
+                                    f"  - Example: node_2 depends on node_1 → dependencies=['node_1']\n"
+                                )
+                                self.logger.error(f"[EDGE_GEN] {error_msg}")
+                                post_proxy.update_attachment(error_msg, AttachmentType.revise_message)
+                                post_proxy.update_send_to("CodeInterpreter")  # Retry with error feedback
+                                return post_proxy.end()
+                            
+                            # 🎯 ADDITIONAL: Create sequential edges WITHIN loop bodies
+                            # If nested nodes don't have explicit inter-dependencies, infer them from loop_body order
+                            for node in workflow_json['nodes']:
+                                if node.get('type') == 'loop':
+                                    loop_body = node.get('loop_body', [])
+                                    if len(loop_body) > 1:
+                                        self.logger.info(f"[EDGE_GEN] Analyzing loop body of {node['id']}: {loop_body}")
+                                        
+                                        # Check if nested nodes already have edges between them
+                                        for i in range(len(loop_body) - 1):
+                                            current_node_id = loop_body[i]
+                                            next_node_id = loop_body[i + 1]
+                                            
+                                            # Check if edge already exists
+                                            existing_edge = any(
+                                                e['from'] == current_node_id and e['to'] == next_node_id
+                                                for e in edges
+                                            )
+                                            
+                                            if not existing_edge:
+                                                # Add sequential edge within loop body
+                                                edges.append({
+                                                    'type': 'sequential',
+                                                    'from': current_node_id,
+                                                    'to': next_node_id
+                                                })
+                                                self.logger.info(f"[EDGE_GEN] Created inferred edge within loop: {current_node_id} → {next_node_id} (type=sequential)")
+                            
+                            workflow_json['edges'] = edges
+                            self.logger.info(f"[EDGE_GEN] ✅ Generated {len(edges)} edges from node ID dependencies (+ inferred loop sequences)")
                     else:
                         error_msg = (
                             f"[FUNCTION_CALLING] Function call missing workflow structure. "
@@ -1098,10 +1044,21 @@ class CodeGenerator(Role):
                             post_proxy.update_send_to("CodeInterpreter")
                             return post_proxy.end()
                     
-                    # ✅ REMOVED: Auto-correction now handled by Instructor validators
-                    # - App name extraction: EnhancedWorkflowNode.extract_app_name_from_tool_id
-                    # - HITL decision field: EnhancedWorkflowDefinition.add_hitl_decision_field
-                    # - Invalid params: EnhancedWorkflowNode.ensure_params_populated
+                    # ⚡ PHASE 3: AUTO-CORRECTION (Forms + HITL + Invalid Params)
+                    # Run BEFORE validation so corrections can fix issues
+                    original_node_count = len(workflow_json.get('nodes', []))
+                    workflow_json = self._auto_correct_workflow(
+                        workflow_json=workflow_json,
+                        user_prompt=query,
+                        init_plan=init_plan_with_markers
+                    )
+                    corrected_node_count = len(workflow_json.get('nodes', []))
+                    
+                    if corrected_node_count != original_node_count:
+                        self.logger.info(
+                            f"[AUTO_CORRECT] Phase 3 corrections applied: "
+                            f"{original_node_count} → {corrected_node_count} nodes"
+                        )
                     
                     # ✅ VALIDATION: Comprehensive placeholder validation (Pydantic-based)
                     # Validates:
@@ -1136,15 +1093,22 @@ class CodeGenerator(Role):
                         for warning in validation_result.warnings[:3]:  # Show first 3
                             self.logger.warning(f"  {warning}")
                     
-                    # ✅ REMOVED: Basic Pydantic validation now handled by Instructor
-                    # Instructor's EnhancedWorkflowDefinition already validates:
-                    # - Node types (via Literal type hints)
-                    # - Required fields (via Pydantic Field(...))
-                    # - Edge structure (via base WorkflowDefinition)
-                    # - Cross-node dependencies (via validate_all_dependencies_exist)
+                    # Step 3: Pydantic structural validation (node types, edges, DAG)
+                    from taskweaver.code_interpreter.workflow_schema import validate_workflow_dict
+                    is_valid, workflow_obj, pydantic_errors = validate_workflow_dict(workflow_json)
                     
-                    # ✅ workflow_json now has complete edges from edge generation above
+                    # ✅ workflow_json now has complete edges from WorkflowIR (including auto-added parallel edges)
                     self.logger.info(f"[FUNCTION_CALLING] After validation: {len(workflow_json.get('edges', []))} complete edges")
+                    
+                    if not is_valid:
+                        self.logger.error(f"[FUNCTION_CALLING] Pydantic validation failed: {pydantic_errors}")
+                        self.logger.error(f"[FUNCTION_CALLING] Failed workflow nodes: {[n.get('id', '?') + ':' + n.get('type', '?') for n in workflow_json.get('nodes', [])]}")
+                        post_proxy.update_attachment(
+                            "Generated workflow has structural errors. Please simplify your request.",
+                            AttachmentType.revise_message
+                        )
+                        post_proxy.update_send_to("User")
+                        return post_proxy.end()
                     
                     # Convert to Python code format
                     generated_code = self._convert_workflow_json_to_python(workflow_json)

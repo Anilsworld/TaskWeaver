@@ -200,11 +200,14 @@ class Planner(Role):
             if is_generation_mode == "true":
                 context += (
                     "\n- WORKFLOW GENERATION MODE: You are generating a complete workflow structure, NOT executing it."
+                    "\n  * ⚠️ CRITICAL: Set send_to='CodeInterpreter' to generate the workflow (do NOT send to User!)"
+                    "\n  * Even if the first step is a form/file upload, still send to CodeInterpreter"
                     "\n  * Generate ALL workflow steps in ONE instruction to CodeInterpreter (do NOT split across multiple rounds)"
                     "\n  * Include approval/HITL steps as form_collect() calls with conditional logic in the SAME code block"
                     "\n  * After approval steps, continue with post-approval actions (e.g., send emails, update records)"
                     "\n  * Do NOT stop and talk to User for approval - generate the full workflow including post-approval steps"
                     "\n  * The workflow will be executed later; your job is to define the complete structure now"
+                    "\n  * In the message field, provide a brief summary of the workflow (e.g., 'Generate 9-step trims management workflow')"
                 )
         
         return context
