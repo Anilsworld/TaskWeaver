@@ -325,7 +325,13 @@ class CodeInterpreter(Role, Interpreter):
                 return post_proxy.end()
 
         post_proxy.update_status("executing code")
-        self.logger.info(f"Code to be executed: {executable_code}")
+        
+        # ✅ Truncate verbose workflow logging for cleaner output
+        if len(executable_code) > 5000:
+            code_summary = executable_code[:200] + f"\n... [truncated {len(executable_code) - 200} chars] ..."
+            self.logger.info(f"Code to be executed: {code_summary}")
+        else:
+            self.logger.info(f"Code to be executed: {executable_code}")
 
         exec_result = self.executor.execute_code(
             exec_id=post_proxy.post.id,

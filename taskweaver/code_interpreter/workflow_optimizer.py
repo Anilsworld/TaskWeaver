@@ -318,6 +318,7 @@ class WorkflowOptimizer:
         Rebuild edges array from node dependencies.
         
         Detects parallel vs sequential edges based on shared dependencies.
+        PRESERVES conditional edges for retry/loop-back patterns.
         """
         nodes = workflow_dict.get('nodes', [])
         edges = []
@@ -334,10 +335,38 @@ class WorkflowOptimizer:
                 dep_groups[deps] = []
             dep_groups[deps].append(node_id)
         
+        # Build node_id → step_number mapping for proper edge formatting
+        node_id_to_step = {}
+        for node in nodes:
+            node_id = node.get('id')
+            # Try different field names for step number
+            step_num = node.get('step_number') or node.get('step') or node.get('line_number')
+            if step_num:
+                node_id_to_step[node_id] = step_num
+        
+        # ✅ Fallback: If no step_numbers found, CREATE them based on node order
+        if not node_id_to_step and nodes:
+            self.logger.warning(
+                f"[OPTIMIZER] No step_numbers found in nodes! Creating sequential step numbers..."
+            )
+            for idx, node in enumerate(nodes, start=1):
+                node_id = node.get('id')
+                node_id_to_step[node_id] = idx
+                # Also set it on the node for future use
+                node['step_number'] = idx
+        
+        self.logger.info(f"[OPTIMIZER] node_id_to_step mapping: {node_id_to_step}")
+        
         # Build edges from dependencies
+        entry_nodes = []  # Track nodes with no dependencies (need START edges)
+        
         for node in nodes:
             node_id = node.get('id')
             deps = node.get('dependencies', [])
+            
+            # Track entry nodes (no dependencies = need START edge)
+            if not deps:
+                entry_nodes.append(node_id)
             
             for dep_id in deps:
                 # ✅ Create edges with BOTH formats for compatibility
@@ -347,13 +376,100 @@ class WorkflowOptimizer:
                     'source': dep_id,   # ← Frontend expects this!
                     'target': node_id,  # ← Frontend expects this!
                     'type': 'sequential',  # Default to sequential
-                    'from_step': dep_id,  # ← Backward compatibility
-                    'to_step': node_id,   # ← Backward compatibility
+                    'from_step': node_id_to_step.get(dep_id, dep_id),  # ← Use step_number if available
+                    'to_step': node_id_to_step.get(node_id, node_id),  # ← Use step_number if available
                     'condition': None,
                     'metadata': {}
                 }
                 edges.append(edge)
                 sequential_edges.append((dep_id, node_id))
+        
+        # ✅ CREATE START EDGES for entry nodes (enables parallel initial execution)
+        # This is the FINAL step before frontend, so START edges must be created here
+        for entry_node_id in entry_nodes:
+            start_edge = {
+                'from': 'START',
+                'to': entry_node_id,
+                'source': 'START',
+                'target': entry_node_id,
+                'type': 'sequential',
+                'from_step': 0,  # ← START = step 0
+                'to_step': node_id_to_step.get(entry_node_id, entry_node_id),  # ← Use step_number
+                'condition': None,
+                'metadata': {'is_entry': True}
+            }
+            edges.append(start_edge)
+            sequential_edges.append(('START', entry_node_id))
+            self.logger.info(f"[OPTIMIZER] Created START edge for entry node: START → {entry_node_id}")
+        
+        # ✅ PRESERVE CONDITIONAL EDGES (for retry/loop-back patterns)
+        # The converter may have already split conditional edges into TWO separate edges (if_true, if_false)
+        # Check INPUT edges from converter first
+        input_edges = workflow_dict.get('edges', [])
+        input_conditional_edges = [e for e in input_edges if e.get('type') == 'conditional']
+        conditional_edges_metadata = workflow_dict.get('conditional_edges', [])
+        
+        self.logger.info(
+            f"[OPTIMIZER] Found {len(conditional_edges_metadata) if conditional_edges_metadata else 0} conditional edges in metadata"
+        )
+        self.logger.info(
+            f"[OPTIMIZER] Found {len(input_conditional_edges)} pre-split conditional edges from converter"
+        )
+        
+        if input_conditional_edges:
+            # ✅ Converter already split conditional edges - preserve BOTH branches
+            self.logger.info(f"[OPTIMIZER] Using {len(input_conditional_edges)} pre-split conditional edges from converter")
+            for edge in input_conditional_edges:
+                # Update with numeric step numbers
+                source = edge.get('source') or edge.get('from')
+                target = edge.get('target') or edge.get('to')
+                
+                updated_edge = {
+                    'from': source,
+                    'to': target,
+                    'source': source,
+                    'target': target,
+                    'type': 'conditional',
+                    'from_step': node_id_to_step.get(source, source),
+                    'to_step': 9999 if target == 'END' else node_id_to_step.get(target, target),
+                    'condition': edge.get('condition'),
+                    'metadata': edge.get('metadata', {})
+                }
+                edges.append(updated_edge)
+                self.logger.info(f"[OPTIMIZER] Preserved split conditional edge: {source} → {target}")
+        elif conditional_edges_metadata:
+            # No pre-split edges - create from original conditional_edges array (legacy path)
+            for cond_edge in conditional_edges_metadata:
+                source = cond_edge.get('source')
+                if_true = cond_edge.get('if_true')
+                if_false = cond_edge.get('if_false', 'END')
+                condition = cond_edge.get('condition')
+                
+                if source and if_true:
+                    # Create conditional edge with frontend-compatible format
+                    to_step_value = node_id_to_step.get(if_true, if_true)
+                    if if_true == 'END':
+                        to_step_value = 9999  # END marker
+                    
+                    edge = {
+                        'from': source,
+                        'to': if_true,
+                        'source': source,
+                        'target': if_true,
+                        'type': 'conditional',
+                        'from_step': node_id_to_step.get(source, source),
+                        'to_step': to_step_value,
+                        'condition': condition,
+                        'metadata': {
+                            'if_true': if_true,
+                            'if_false': if_false,
+                            'condition_expression': condition
+                        }
+                    }
+                    edges.append(edge)
+                    self.logger.info(
+                        f"[OPTIMIZER] Preserved conditional edge: {source} → {if_true}/{if_false}"
+                    )
         
         # Detect parallel edges: nodes with same dependencies
         for deps, node_ids in dep_groups.items():
@@ -369,12 +485,27 @@ class WorkflowOptimizer:
         workflow_dict['edges'] = edges
         workflow_dict['sequential_edges'] = sequential_edges
         workflow_dict['parallel_edges'] = parallel_edges if parallel_edges else []
+        # ✅ Preserve conditional_edges metadata for reference
+        workflow_dict['conditional_edges'] = conditional_edges_metadata
         
         metadata['optimized_edges'] = len(edges)
         
+        # ✅ Debug: Log first few edges to verify step numbers are set correctly
+        if edges:
+            for idx, edge in enumerate(edges[:3]):  # Log first 3 edges
+                self.logger.info(
+                    f"[OPTIMIZER_DEBUG] Edge {idx}: {edge.get('source')} → {edge.get('target')} "
+                    f"(from_step={edge.get('from_step')}, to_step={edge.get('to_step')})"
+                )
+        
+        # Count edge types in final edges array
+        start_edge_count = len(entry_nodes) if entry_nodes else 0
+        conditional_edge_count = len([e for e in edges if e.get('type') == 'conditional'])
+        
         self.logger.info(
             f"[OPTIMIZER] Rebuilt {len(edges)} edges "
-            f"({len(sequential_edges)} sequential, {len(parallel_edges)} parallel groups)"
+            f"({start_edge_count} START, {len(sequential_edges) - start_edge_count} sequential, "
+            f"{conditional_edge_count} conditional, {len(parallel_edges)} parallel groups)"
         )
         
         return workflow_dict

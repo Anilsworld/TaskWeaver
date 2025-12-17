@@ -469,6 +469,11 @@ class WorkflowIR:
         """
         added_count = 0
         
+        # Skip fork-join detection for cyclic graphs (retry patterns use conditional edges)
+        if not nx.is_directed_acyclic_graph(self.dag):
+            logger.info("[FORK-JOIN] Skipping fork-join auto-fix (cyclic graph detected, retry pattern)")
+            return 0
+        
         # Get execution layers (parallel groups)
         layers = list(nx.topological_generations(self.dag))
         

@@ -466,6 +466,71 @@ class CodeGenerator(Role):
                 f"created {len(workflow_json.get('conditional_edges') or [])} conditional edges"
             )
         
+        # ========================================================================
+        # CLEANUP: Remove orphan nodes created after duplicate removal
+        # ========================================================================
+        # After removing duplicate nodes, some nodes may now have missing dependencies.
+        # Re-validate and remove these orphans (e.g., node_7 depending on removed node_6).
+        existing_node_ids = {n.get('id') for n in workflow_json.get('nodes', [])}
+        orphan_cleanup_iterations = 0
+        max_iterations = 10  # Prevent infinite loops
+        
+        while orphan_cleanup_iterations < max_iterations:
+            orphan_nodes = []
+            
+            for node in workflow_json.get('nodes', []):
+                node_id = node.get('id')
+                dependencies = node.get('dependencies', [])
+                
+                # Check if any dependency doesn't exist
+                missing_deps = [dep for dep in dependencies if dep not in existing_node_ids]
+                
+                if missing_deps:
+                    orphan_nodes.append((node_id, missing_deps))
+                    self.logger.warning(
+                        f"[RETRY_CLEANUP] Removing orphan node {node_id}: "
+                        f"depends on non-existent {missing_deps}"
+                    )
+            
+            # If no orphans found, we're done
+            if not orphan_nodes:
+                break
+            
+            # Remove orphan nodes
+            orphan_ids = {node_id for node_id, _ in orphan_nodes}
+            workflow_json['nodes'] = [
+                n for n in workflow_json.get('nodes', [])
+                if n.get('id') not in orphan_ids
+            ]
+            
+            # Remove edges to/from orphans
+            workflow_json['edges'] = [
+                e for e in workflow_json.get('edges', [])
+                if e.get('from') not in orphan_ids and e.get('to') not in orphan_ids
+            ]
+            
+            # Update existing node IDs for next iteration
+            existing_node_ids = {n.get('id') for n in workflow_json.get('nodes', [])}
+            nodes_to_remove.update(orphan_ids)
+            orphan_cleanup_iterations += 1
+            
+            self.logger.info(
+                f"[RETRY_CLEANUP] Iteration {orphan_cleanup_iterations}: "
+                f"Removed {len(orphan_nodes)} orphan node(s)"
+            )
+        
+        # Final summary log
+        total_conditionals = len(workflow_json.get('conditional_edges') or [])
+        total_nodes_remaining = len(workflow_json.get('nodes', []))
+        self.logger.info(
+            f"[RETRY_DETECT] ✅ Universal retry detection complete: "
+            f"{len(retry_loop_nodes)} loop patterns, "
+            f"{len(duplicate_patterns)} duplicate patterns, "
+            f"{len(nodes_to_remove)} nodes removed/cleaned, "
+            f"{total_conditionals} conditional_edges, "
+            f"{total_nodes_remaining} final nodes"
+        )
+        
         return workflow_json
     
     def _add_conditional_edge(
@@ -489,8 +554,8 @@ class CodeGenerator(Role):
         conditional_edge = {
             "source": decision_node_id,
             "condition": f"${{{{{decision_node_id}.decision}}}} == 'Reject'",
-            "if_true": "END",  # If Approve (condition is "Reject" == False)
-            "if_false": loop_back_target  # If Reject → loop back! ♻️
+            "if_true": loop_back_target,  # If Reject (condition TRUE) → loop back
+            "if_false": "END"  # If Approve (condition FALSE) → end workflow
         }
         
         workflow_json['conditional_edges'].append(conditional_edge)
@@ -864,148 +929,155 @@ class CodeGenerator(Role):
                     import re
                     step_hints = []
                     
-                for line in init_plan_with_markers.split('\n'):
-                    # 🎯 UNIVERSAL REGEX: Capture ENTIRE line after step number
-                    # Handles ANY order: "1. Desc <marker> from $X" OR "1. Desc from $X <marker>"
-                    match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+(.+)', line)
-                    if match:
-                        step_num = match.group(1)
-                        full_line = match.group(2).strip()  # Full line after step number
-                        
-                        # Extract marker from anywhere in the line
-                        marker_match = re.search(r'<([^>]+)>', full_line)
-                        node_type_marker = marker_match.group(1).strip() if marker_match else ""
-                        
-                        # Extract description (everything before first marker, or full line if no marker)
-                        step_desc = full_line.split('<')[0].strip() if '<' in full_line else full_line
-                        
-                        # 🎯 UNIVERSAL DEPENDENCY EXTRACTION (works for ANY workflow pattern, ANY order)
-                        # Search in FULL LINE (not just description) to handle both:
-                        #   - "1. Desc from $X <marker>"  (old order)
-                        #   - "1. Desc <marker> from $X"  (new order)
-                        
-                        # Pattern: Find ALL $X references after "after" keyword
-                        # Handles: "after $1", "after $2 and $3", "after $1, $2, and $3"
-                        after_deps = []
-                        if 'after' in full_line:
-                            after_clause = full_line.split('after', 1)[1]
-                            # 🎯 UPDATED: Support hierarchical steps (e.g., $2.1, $2.2.3)
-                            after_matches = re.findall(r'\$(\d+(?:\.\d+)*)', after_clause)
-                            if after_matches:
-                                after_deps = after_matches  # Keep as strings: ['2', '2.1']
-                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'after' control deps: {after_deps}")
-                        
-                        # Pattern: Find ALL $X references after "from" keyword
-                        # Handles: "from $1", "from $2 and $3", "from $1, $2, and $3"
-                        # 🎯 UPDATED: Supports hierarchical steps like "from $2, $2.1"
-                        from_deps = []
-                        if 'from' in full_line:
-                            from_clause = full_line.split('from', 1)[1]
-                            if 'after' in from_clause:
-                                from_clause = from_clause.split('after', 1)[0]  # Stop at "after"
-                            # 🎯 UPDATED: Support hierarchical steps (e.g., $2.1, $2.2.3)
-                            from_matches = re.findall(r'\$(\d+(?:\.\d+)*)', from_clause)
-                            if from_matches:
-                                from_deps = from_matches  # Keep as strings: ['2', '2.1']
-                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'from' data deps: {from_deps}")
-                        
-                        # Pattern: Find ALL $X references after "in"/"over" keyword (for loops)
-                        # Uses precise regex to avoid false matches like "included", "within"
-                        # 🎯 UPDATED: Supports hierarchical steps
-                        in_deps = []
-                        if not from_deps:  # Only check 'in'/'over' if 'from' wasn't found
-                            in_pattern = r'\b(?:in|over)\s+\$(\d+(?:\.\d+)*)'
-                            in_matches = re.findall(in_pattern, full_line)
-                            if in_matches:
-                                in_deps = in_matches  # Keep as strings
-                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop): {in_deps}")
-                            # Also check for comma-separated items: "in $1, $2, and $3"
-                            # 🎯 UPDATED: Support hierarchical steps (e.g., "in $2.1")
-                            elif re.search(r'\b(?:in|over)\s+\$\d+(?:\.\d+)*', full_line):
-                                match_in = re.search(r'\b(?:in|over)\s+(.+?)(?:\s+(?:after|<)|$)', full_line)
-                                if match_in:
-                                    in_clause = match_in.group(1)
-                                    # 🎯 UPDATED: Support hierarchical steps
-                                    in_matches = re.findall(r'\$(\d+(?:\.\d+)*)', in_clause)
-                                    if in_matches:
-                                        in_deps = in_matches  # Keep as strings
-                                        self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop, multi): {in_deps}")
-                        
-                        # 🎯 UNIVERSAL DEPENDENCY LOGIC:
-                        # Combine ALL dependencies from 'from', 'after', and 'in/over' clauses
-                        # If step says "from $3 after $2" → dependencies = [2, 3] (BOTH!)
-                        # If step says "from $2, $2.1" → dependencies = ['2', '2.1'] (hierarchical)
-                        all_deps = set()
-                        all_deps.update(from_deps)
-                        all_deps.update(after_deps)
-                        all_deps.update(in_deps)
-                        
-                        # Natural sort for hierarchical steps (e.g., '2' < '2.1' < '10')
-                        def natural_sort_key(step_str):
-                            """Convert '2.1.3' to [2, 1, 3] for natural sorting"""
-                            return [int(x) for x in step_str.split('.')]
-                        
-                        control_deps = sorted(list(all_deps), key=natural_sort_key) if all_deps else []
-                        
-                        # 🎯 BUILD HINT: Show node IDs (not integers) to guide LLM
-                        # The hint tells the LLM what to generate in the workflow JSON
-                        # Map step numbers to node IDs: "2" → "node_2", "2.1" → "node_2_1"
-                        deps_hint = ""
-                        if control_deps:
-                            # ✅ FIXED: Handle hierarchical steps properly (2.1 → node_2_1)
-                            node_id_deps = [f"'node_{d.replace('.', '_')}'" for d in sorted(set(control_deps))]
-                            deps_hint = f", dependencies=[{', '.join(node_id_deps)}]"
-                        else:
-                            deps_hint = f", dependencies=[]"
-                        
-                        self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, type: {node_type_marker}{deps_hint}")
-                        
-                        # Map specific node type markers to hints
-                        if node_type_marker == "form":
-                            hint = f"Step {step_num}: type='form' with fields{deps_hint}"
-                            step_hints.append(hint)
-                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                        elif node_type_marker == "hitl":
-                            hint = f"Step {step_num}: type='hitl' for approval/review{deps_hint}"
-                            step_hints.append(hint)
-                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                        elif node_type_marker == "agent_with_tools":
-                            hint = f"Step {step_num}: type='agent_with_tools' WITH tool_id{deps_hint}"
-                            step_hints.append(hint)
-                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                        elif node_type_marker == "agent_only":
-                            hint = f"Step {step_num}: type='agent_only' for analysis{deps_hint}"
-                            step_hints.append(hint)
-                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
-                        elif node_type_marker == "loop":
-                            # 🎯 NEW: Extract nested child steps for loop_body
-                            # If this is step 6, find all steps like 6.1, 6.2, 6.3, etc.
-                            child_steps = []
-                            for check_line in init_plan_with_markers.split('\n'):
-                                child_match = re.match(r'^\s*(' + re.escape(step_num) + r'\.(\d+))\.\s+', check_line)
-                                if child_match:
-                                    child_step_num = child_match.group(1)  # e.g., "6.1"
-                                    child_node_id = f"node_{child_step_num.replace('.', '_')}"  # "node_6_1"
-                                    child_steps.append(child_node_id)
+                    # ✅ Fix: Handle both real newlines AND escaped \n strings
+                    # Sometimes the plan comes with escaped newlines from JSON serialization
+                    plan_text = init_plan_with_markers.replace('\\n', '\n')
+                    
+                    for line in plan_text.split('\n'):
+                        # 🎯 UNIVERSAL REGEX: Capture ENTIRE line after step number
+                        # Handles ANY order: "1. Desc <marker> from $X" OR "1. Desc from $X <marker>"
+                        match = re.match(r'^\s*(\d+(?:\.\d+)?)\.\s+(.+)', line)
+                        if match:
+                            step_num = match.group(1)
+                            full_line = match.group(2).strip()  # Full line after step number
                             
-                            # Build loop_body and loop_over hints
-                            loop_body_hint = ""
-                            loop_over_hint = ""
+                            # Extract marker from anywhere in the line
+                            marker_match = re.search(r'<([^>]+)>', full_line)
+                            node_type_marker = marker_match.group(1).strip() if marker_match else ""
                             
-                            if child_steps:
-                                loop_body_list = ", ".join(f"'{nid}'" for nid in child_steps)
-                                loop_body_hint = f", loop_body=[{loop_body_list}]"
-                                self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found {len(child_steps)} nested steps: {child_steps}")
+                            # Extract description (everything before first marker, or full line if no marker)
+                            step_desc = full_line.split('<')[0].strip() if '<' in full_line else full_line
                             
-                            # Determine loop_over from dependencies
+                            # 🎯 UNIVERSAL DEPENDENCY EXTRACTION (works for ANY workflow pattern, ANY order)
+                            # Search in FULL LINE (not just description) to handle both:
+                            #   - "1. Desc from $X <marker>"  (old order)
+                            #   - "1. Desc <marker> from $X"  (new order)
+                            
+                            # Pattern: Find ALL $X references after "after" keyword
+                            # Handles: "after $1", "after $2 and $3", "after $1, $2, and $3"
+                            after_deps = []
+                            if 'after' in full_line:
+                                after_clause = full_line.split('after', 1)[1]
+                                # 🎯 UPDATED: Support hierarchical steps (e.g., $2.1, $2.2.3)
+                                after_matches = re.findall(r'\$(\d+(?:\.\d+)*)', after_clause)
+                                if after_matches:
+                                    after_deps = after_matches  # Keep as strings: ['2', '2.1']
+                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'after' control deps: {after_deps}")
+                            
+                            # Pattern: Find ALL $X references after "from" keyword
+                            # Handles: "from $1", "from $2 and $3", "from $1, $2, and $3"
+                            # 🎯 UPDATED: Supports hierarchical steps like "from $2, $2.1"
+                            from_deps = []
+                            if 'from' in full_line:
+                                from_clause = full_line.split('from', 1)[1]
+                                if 'after' in from_clause:
+                                    from_clause = from_clause.split('after', 1)[0]  # Stop at "after"
+                                # 🎯 UPDATED: Support hierarchical steps (e.g., $2.1, $2.2.3)
+                                from_matches = re.findall(r'\$(\d+(?:\.\d+)*)', from_clause)
+                                if from_matches:
+                                    from_deps = from_matches  # Keep as strings: ['2', '2.1']
+                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'from' data deps: {from_deps}")
+                            
+                            # Pattern: Find ALL $X references after "in"/"over" keyword (for loops)
+                            # Uses precise regex to avoid false matches like "included", "within"
+                            # 🎯 UPDATED: Supports hierarchical steps
+                            in_deps = []
+                            if not from_deps:  # Only check 'in'/'over' if 'from' wasn't found
+                                in_pattern = r'\b(?:in|over)\s+\$(\d+(?:\.\d+)*)'
+                                in_matches = re.findall(in_pattern, full_line)
+                                if in_matches:
+                                    in_deps = in_matches  # Keep as strings
+                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop): {in_deps}")
+                                # Also check for comma-separated items: "in $1, $2, and $3"
+                                # 🎯 UPDATED: Support hierarchical steps (e.g., "in $2.1")
+                                elif re.search(r'\b(?:in|over)\s+\$\d+(?:\.\d+)*', full_line):
+                                    match_in = re.search(r'\b(?:in|over)\s+(.+?)(?:\s+(?:after|<)|$)', full_line)
+                                    if match_in:
+                                        in_clause = match_in.group(1)
+                                        # 🎯 UPDATED: Support hierarchical steps
+                                        in_matches = re.findall(r'\$(\d+(?:\.\d+)*)', in_clause)
+                                        if in_matches:
+                                            in_deps = in_matches  # Keep as strings
+                                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found 'in/over' data deps (loop, multi): {in_deps}")
+                            
+                            # 🎯 UNIVERSAL DEPENDENCY LOGIC:
+                            # Combine ALL dependencies from 'from', 'after', and 'in/over' clauses
+                            # If step says "from $3 after $2" → dependencies = [2, 3] (BOTH!)
+                            # If step says "from $2, $2.1" → dependencies = ['2', '2.1'] (hierarchical)
+                            all_deps = set()
+                            all_deps.update(from_deps)
+                            all_deps.update(after_deps)
+                            all_deps.update(in_deps)
+                            
+                            # Natural sort for hierarchical steps (e.g., '2' < '2.1' < '10')
+                            def natural_sort_key(step_str):
+                                """Convert '2.1.3' to [2, 1, 3] for natural sorting"""
+                                return [int(x) for x in step_str.split('.')]
+                            
+                            control_deps = sorted(list(all_deps), key=natural_sort_key) if all_deps else []
+                            
+                            # 🎯 BUILD HINT: Show node IDs (not integers) to guide LLM
+                            # The hint tells the LLM what to generate in the workflow JSON
+                            # Map step numbers to node IDs: "2" → "node_2", "2.1" → "node_2_1"
+                            deps_hint = ""
                             if control_deps:
-                                # Loop depends on a previous node - use that for loop_over
-                                source_node = f"node_{control_deps[0].replace('.', '_')}"
-                                loop_over_hint = f", loop_over='{source_node}'"
+                                # ✅ FIXED: Handle hierarchical steps properly (2.1 → node_2_1)
+                                node_id_deps = [f"'node_{d.replace('.', '_')}'" for d in sorted(set(control_deps))]
+                                deps_hint = f", dependencies=[{', '.join(node_id_deps)}]"
+                            else:
+                                deps_hint = f", dependencies=[]"
                             
-                            hint = f"Step {step_num}: type='loop'{loop_over_hint}{loop_body_hint}{deps_hint}"
-                            step_hints.append(hint)
-                            self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: {step_desc}, type: {node_type_marker}{deps_hint}")
+                            
+                            # Map specific node type markers to hints
+                            if node_type_marker == "form":
+                                hint = f"Step {step_num}: type='form' with fields{deps_hint}"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif node_type_marker == "hitl":
+                                hint = f"Step {step_num}: type='hitl' for approval/review{deps_hint}"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif node_type_marker == "agent_with_tools":
+                                hint = f"Step {step_num}: type='agent_with_tools' WITH tool_id{deps_hint}"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif node_type_marker == "agent_only":
+                                hint = f"Step {step_num}: type='agent_only' for analysis{deps_hint}"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            elif node_type_marker == "loop":
+                                # 🎯 NEW: Extract nested child steps for loop_body
+                                # If this is step 6, find all steps like 6.1, 6.2, 6.3, etc.
+                                child_steps = []
+                                for check_line in plan_text.split('\n'):
+                                    child_match = re.match(r'^\s*(' + re.escape(step_num) + r'\.(\d+))\.\s+', check_line)
+                                    if child_match:
+                                        child_step_num = child_match.group(1)  # e.g., "6.1"
+                                        child_node_id = f"node_{child_step_num.replace('.', '_')}"  # "node_6_1"
+                                        child_steps.append(child_node_id)
+                                
+                                # Build loop_body and loop_over hints
+                                loop_body_hint = ""
+                                loop_over_hint = ""
+                                
+                                if child_steps:
+                                    loop_body_list = ", ".join(f"'{nid}'" for nid in child_steps)
+                                    loop_body_hint = f", loop_body=[{loop_body_list}]"
+                                    self.logger.info(f"[STEP_GUIDANCE] Step {step_num}: Found {len(child_steps)} nested steps: {child_steps}")
+                                
+                                # Determine loop_over from dependencies
+                                if control_deps:
+                                    # Loop depends on a previous node - use that for loop_over
+                                    source_node = f"node_{control_deps[0].replace('.', '_')}"
+                                    loop_over_hint = f", loop_over='{source_node}'"
+                                
+                                hint = f"Step {step_num}: type='loop'{loop_over_hint}{loop_body_hint}{deps_hint}"
+                                step_hints.append(hint)
+                                self.logger.info(f"[STEP_GUIDANCE] Added hint: {hint}")
+                            
+                            # ✅ Log after each step to track progress
+                            self.logger.info(f"[STEP_GUIDANCE] Generated {len(step_hints)} step hints")
                     
                     if step_hints:
                         num_steps = len(step_hints)
@@ -1412,9 +1484,9 @@ class CodeGenerator(Role):
                         f"{len(workflow_json.get('edges', []))} edges"
                     )
                     
-                    # Debug: Log actual workflow JSON to see placeholder formats
-                    # json is already imported at top of file
-                    self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
+                    # ✅ Workflow JSON logging disabled to reduce verbosity
+                    # Debug: Uncomment below to see full workflow structure if needed
+                    # self.logger.info(f"[WORKFLOW_JSON] Full workflow:\n{json.dumps(workflow_json, indent=2)}")
                     
                     # ✅ VALIDATE: Node count must match init_plan structure
                     if init_plan_with_markers and len(step_hints) > 0:

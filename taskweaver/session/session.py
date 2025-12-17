@@ -208,8 +208,14 @@ class Session:
                 post = Post.create(message=message, send_from="User", send_to="Planner")
                 while True:
                     post = _send_message(post.send_to, post)
+                    
+                    # ✅ Truncate verbose messages for cleaner logging
+                    log_message = post.message
+                    if len(log_message) > 2000:
+                        log_message = log_message[:500] + f"\n... [truncated {len(post.message) - 500} chars] ..."
+                    
                     self.logger.info(
-                        f"{post.send_from} talk to {post.send_to}: {post.message}",
+                        f"{post.send_from} talk to {post.send_to}: {log_message}",
                     )
                     self.internal_chat_num += 1
                     if post.send_to == "User":

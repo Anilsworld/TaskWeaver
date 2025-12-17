@@ -167,6 +167,11 @@ class CodeExecutor:
                 display_code = result.code.replace(code_mask, "")
             else:
                 display_code = result.code
+            
+            # ✅ Truncate large code blocks (e.g., workflow definitions) in execution result message
+            if len(display_code) > 5000:
+                display_code = display_code[:500] + f"\n... [truncated {len(display_code) - 500} chars] ..."
+            
             lines.append(
                 f"The following python code has been executed:\n" "```python\n" f"{display_code}\n" "```\n\n",
             )
@@ -187,8 +192,13 @@ class CodeExecutor:
                     lines.append(f"{str(o)}")
                 lines.append("")
             else:
+                # ✅ Truncate verbose output (e.g., large workflow dictionaries)
+                output_str = str(output)
+                if len(output_str) > 3000:
+                    output_str = output_str[:1000] + f"\n... [truncated {len(output_str) - 1000} chars] ..."
+                
                 lines.append(
-                    "The result of above Python code after execution is:\n" + str(output),
+                    "The result of above Python code after execution is:\n" + output_str,
                 )
         elif result.is_success:
             if len(result.stdout) > 0:
